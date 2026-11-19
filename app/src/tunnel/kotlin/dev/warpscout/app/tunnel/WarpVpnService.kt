@@ -85,44 +85,32 @@ class WarpVpnService : VpnService() {
     // ------------------------------------------------------------------ поднятие
 
     private fun runTunnel(text: String) {
-        var socket: DatagramSocket? = null
+        val cfg = runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull()
+        if (cfg == null) {
+            fail(Stage.CONFIG, "E_CONFIG", "конфигурация не разбирается (нет PrivateKey/PublicKey)")
+            shutdown("туннель не поднят: конфиг не разобран")
+            return
+        }
+        TunnelState.endpoint = cfg.endpoint.render()
+        TunnelDiagnostics.log(
+            Stage.CONFIG,
+            "endpoint ${cfg.endpoint.render()}, mtu ${cfg.mtu}, allowed-ips ${cfg.allowedIps.take(80)}"
+        )
+
+        val socket = openSocket(cfg)
+        if (socket == null) {
+            shutdown("туннель не поднят: нет UDP-сокета")
+            return
+        }
         try {
-            val cfg = runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull()
-            if (cfg == null) {
-                fail(Stage.CONFIG, "E_CONFIG", "конфигурация не разбирается (нет PrivateKey/PublicKey)")
-                return
-            }
-            TunnelState.endpoint = cfg.endpoint.render()
-            TunnelDiagnostics.log(Stage.CONFIG, "endpoint ${cfg.endpoint.render()}, mtu ${cfg.mtu}, allowed-ips ${cfg.allowedIps.take(80)}")
-
-            socket = try {
-                DatagramSocket().apply {
-                    soTimeout = 1500
-                    connect(InetSocketAddress(cfg.endpoint.host, cfg.endpoint.port))
-                }
-            } catch (e: Exception) {
-                fail(Stage.SOCKET, "E_SOCKET", "сокет до ${cfg.endpoint.render()}: ${e.message}")
-                return
-            }
-            TunnelDiagnostics.log(Stage.SOCKET, "UDP-сокет готов")
-
             if (!runCatching { protect(socket) }.getOrDefault(false)) {
                 // Без protect() пакеты туннеля попадут в сам туннель — трафик замкнётся по кругу.
-                fail(Stage.PROTECT, "E_PROTECT", "protect() отказал — туннель не поднимаю, иначе петля")
+                fail(Stage.PROTECT, "E_PROTECT", "protect() отказал — иначе пакеты уйдут в сам туннель")
                 return
             }
             TunnelDiagnostics.log(Stage.PROTECT, "protect() выдан")
 
-            val pfd = try {
-                builderFor(cfg).establish()
-            } catch (e: Exception) {
-                fail(Stage.TUN, "E_TUN", "establish(): ${e.javaClass.simpleName}: ${e.message}")
-                return
-            }
-            if (pfd == null) {
-                fail(Stage.TUN, "E_TUN", "VpnService не выдал tun (нет разрешения на VPN?)")
-                return
-            }
+            val pfd = establishTun(cfg) ?: return
             tun = pfd
             bindUnderlyingNetwork()
             TunnelDiagnostics.log(
@@ -136,26 +124,48 @@ class WarpVpnService : VpnService() {
                 tunInput = FileInputStream(pfd.fileDescriptor),
                 tunOutput = FileOutputStream(pfd.fileDescriptor),
                 config = cfg,
-                settings = NetSettings(attempts = 3, timeoutMs = 1500, junkPacketsBeforeHandshake = 1),
+                settings = NetSettings(attempts = 3, timeoutMs = 1500),
                 log = { line -> onPlaneLog(line) }
             )
             plane = dataPlane
             startTicker()
 
-            val ok = runCatching { dataPlane.run() }.getOrElse { e ->
-                fail(Stage.TRANSPORT, "E_CRASH", "${e.javaClass.simpleName}: ${e.message}")
-                false
-            }
+            val ok = dataPlane.run()
             if (ok) {
                 TunnelDiagnostics.log(Stage.STOP, "передача завершилась (пир перестал отвечать)")
                 if (!stopping.get()) TunnelState.stopped("туннель закрыт: пир перестал отвечать")
             } else if (!stopping.get() && TunnelState.error == null) {
                 fail(Stage.HANDSHAKE, "E_HANDSHAKE", "handshake не прошёл — endpoint молчит или режет UDP")
             }
+        } catch (t: Throwable) {
+            fail(Stage.TRANSPORT, "E_CRASH", "${t.javaClass.simpleName}: ${t.message}")
         } finally {
-            runCatching { socket?.close() }
+            runCatching { socket.close() }
             shutdown(if (stopping.get()) "туннель остановлен" else "туннель остановлен после ошибки")
         }
+    }
+
+    private fun openSocket(cfg: WarpConfig): DatagramSocket? = try {
+        DatagramSocket().apply {
+            soTimeout = 1500
+            connect(InetSocketAddress(cfg.endpoint.host, cfg.endpoint.port))
+        }.also { TunnelDiagnostics.log(Stage.SOCKET, "UDP-сокет до ${cfg.endpoint.render()} готов") }
+    } catch (e: Exception) {
+        fail(Stage.SOCKET, "E_SOCKET", "сокет до ${cfg.endpoint.render()}: ${e.message}")
+        null
+    }
+
+    private fun establishTun(cfg: WarpConfig): ParcelFileDescriptor? {
+        val pfd = try {
+            builderFor(cfg).establish()
+        } catch (e: Exception) {
+            fail(Stage.TUN, "E_TUN", "establish(): ${e.javaClass.simpleName}: ${e.message}")
+            return null
+        }
+        if (pfd == null) {
+            fail(Stage.TUN, "E_TUN", "VpnService не выдал tun (нет разрешения на VPN?)")
+        }
+        return pfd
     }
 
     private fun onPlaneLog(line: String) {

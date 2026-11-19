@@ -207,7 +207,23 @@ object ConfigExport {
         return "WARP_${cfg.junk.kind.name.lowercase()}_$safe.conf"
     }
 
+    /**
+     * Полный минимальный конфиг Clash Meta (Stash/FlClash совместимы): порт, режим, DNS, прокси,
+     * группа и правило. Раньше здесь был только блок `proxies:` — такой файл импортировался, но
+     * трафик через него не шёл: без `rules` Clash нечего применять.
+     */
     fun clashYaml(cfg: WarpConfig): String = buildString {
+        appendLine("mixed-port: 7890")
+        appendLine("allow-lan: false")
+        appendLine("mode: rule")
+        appendLine("log-level: info")
+        appendLine("ipv6: ${cfg.enableIpv6Address}")
+        appendLine("dns:")
+        appendLine("  enable: true")
+        appendLine("  ipv6: ${cfg.enableIpv6Address}")
+        appendLine("  nameserver:")
+        appendLine("    - 1.1.1.1")
+        appendLine("    - 8.8.8.8")
         appendLine("proxies:")
         appendLine("- name: \"${cfg.name}\"")
         appendLine("  type: wireguard")
@@ -215,9 +231,15 @@ object ConfigExport {
         appendLine("  port: ${cfg.endpoint.port}")
         appendLine("  private-key: ${cfg.account.privateB64}")
         appendLine("  public-key: ${cfg.account.peerPublicB64}")
-        appendLine("  ip: ${cfg.account.ipv4}/32")
-        if (cfg.enableIpv6Address && cfg.account.ipv6 != null) appendLine("  ipv6: ${cfg.account.ipv6}/128")
-        appendLine("  allowed-ips: [\"${cfg.allowedIps.replace(",", "\", \"")}\"]")
+        appendLine("  ip: ${cfg.account.ipv4.substringBefore('/')}")
+        if (cfg.enableIpv6Address && cfg.account.ipv6 != null) {
+            appendLine("  ipv6: ${cfg.account.ipv6.substringBefore('/')}")
+        }
+        // allowed-ips: без trim каждый элемент после запятой начинался бы с пробела — такой YAML
+        // Clash не разберёт («\` ::/0\` не CIDR»).
+        val allowed = cfg.allowedIps.split(',').map { it.trim() }.filter { it.contains('/') }
+        val allowedYaml = allowed.joinToString(", ") { "\"$it\"" }
+        appendLine("  allowed-ips: [$allowedYaml]")
         appendLine("  mtu: ${cfg.mtu}")
         appendLine("  udp: true")
         appendLine("  keepalive: ${cfg.persistentKeepalive ?: 25}")
@@ -238,6 +260,13 @@ object ConfigExport {
         appendLine("    s2: ${cfg.junk.awg.s2}")
         appendLine("    s3: ${cfg.junk.awg.s3}")
         appendLine("    s4: ${cfg.junk.awg.s4}")
+        appendLine("proxy-groups:")
+        appendLine("- name: \"WARP\"")
+        appendLine("  type: select")
+        appendLine("  proxies:")
+        appendLine("    - \"${cfg.name}\"")
+        appendLine("rules:")
+        appendLine("- MATCH,WARP")
     }
 
     /**
@@ -262,8 +291,9 @@ object ConfigExport {
         """.trimMargin()
 
         ConfigTarget.CLASH -> """
-            |Clash Meta / Stash / FlClash: добавьте блок proxies в конфиг (или импортируйте YAML целиком).
-            |Endpoint: ${cfg.endpoint.render()}, amnezia-wg-option уже внутри.
+            |Clash Meta / Stash / FlClash: импортируйте этот YAML целиком — внутри уже есть порт, DNS,
+            |прокси с amnezia-wg-option, группа WARP и правило MATCH,WARP.
+            |Endpoint: ${cfg.endpoint.render()}.
         """.trimMargin()
     }
 }

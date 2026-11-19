@@ -235,6 +235,17 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         check("таргет по умолчанию — WireGuard", ConfigTarget.DEFAULT == ConfigTarget.WIREGUARD)
         check("подсказка под WG упоминает WireGuard",
             ConfigExport.handoffHint(cfg, ConfigTarget.WIREGUARD).contains("WireGuard"))
+
+        // Clash: файл должен быть применимым целиком, а не «набором прокси без правил».
+        val yaml = ConfigExport.clashYaml(cfg)
+        check("clash: есть прокси и amnezia-wg-option",
+            yaml.contains("proxies:") && yaml.contains("amnezia-wg-option"))
+        check("clash: есть порт, режим и DNS", yaml.contains("mixed-port:") && yaml.contains("mode: rule") && yaml.contains("dns:"))
+        check("clash: есть группа и правило", yaml.contains("proxy-groups:") && yaml.contains("MATCH,WARP"))
+        check("clash: allowed-ips без ведущих пробелов",
+            yaml.contains("\"0.0.0.0/0\", \"::/0\"") && !yaml.contains("\" ::/0\""))
+        check("clash: таргет не рендерится через WgConf",
+            runCatching { WgConf.render(cfg, ConfigTarget.CLASH) }.isFailure)
     }
 
     private fun resourceChecksFromRules() {

@@ -603,6 +603,10 @@ class MainActivity : AppCompatActivity() {
             append(target.note)
             if (!target.supportsJunk) append(" · AWG-поля (Jc/H1/I1…) в файл не попадут")
         }
+        // Предпросмотр ниже тоже переключаем: иначе на экране остаётся конфиг в старом формате,
+        // а кнопки «Сохранить/Скопировать» положат в файл уже новый.
+        val cfg = currentConfig()
+        if (cfg != null) binding.textConfig.text = ConfigFiles.render(cfg, target)
     }
 
     /** Что именно попадёт в AllowedIPs — до запуска подбора, без единого сетевого запроса. */
