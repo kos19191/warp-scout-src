@@ -19,42 +19,80 @@ jobs:
     name: "Ядро: самопроверка + интеграция с фейковым эндпоинтом"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
       - name: "Офлайн-векторы (BLAKE2s / X25519 / ChaChaPoly / WG / шум / отчёты)"
         run: ./gradlew --no-daemon :cli:selftest
-      - name: "Интеграция: независимый WireGuard-сервер на Python"
+
+      - name: "Векторы фейкового эндпоинта (независимая реализация на Python)"
         run: |
           python3 -m pip install --quiet cryptography
           python3 tools/fake_warp_endpoint.py --selftest
-          python3 tools/fake_warp_endpoint.py --test-key --port 34575 &
+
+      - name: "Интеграция: наш клиент против Python-сервера"
+        run: |
+          set -o pipefail
+          # Сервер поднимаем в фоне на локальном UDP-порту.
+          python3 tools/fake_warp_endpoint.py --test-key --port 34575 > /tmp/fake.log 2>&1 &
           sleep 2
-          ./gradlew --no-daemon :cli:run --args="selftest --integration 127.0.0.1:34575"
+          echo "--- порт 34575 ---"; ss -lun | grep 34575 || echo "порт не слушается!"
+          echo "--- лог сервера ---"; cat /tmp/fake.log
+
+          set +e
+          ./gradlew --no-daemon :cli:run --args="selftest --integration 127.0.0.1:34575" > /tmp/integration.log 2>&1
+          rc=$?
+          set -e
+
+          echo "--- хвост лога интеграции ---"; tail -80 /tmp/integration.log
+          if [ "$rc" -ne 0 ]; then
+            # Логи GitHub Actions из песочницы не читаются, а job summary — читается,
+            # поэтому при падении кладём диагностику туда.
+            {
+              echo "### Интеграция упала (exit $rc)"
+              echo '```'
+              tail -120 /tmp/integration.log
+              echo '```'
+              echo "### Лог фейкового сервера"
+              echo '```'
+              tail -40 /tmp/fake.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
 
   apk:
     name: "APK (scout + tunnel)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
       # SDK 35 на образе раннера может отсутствовать — ставим явно и принимаем лицензии.
-      - uses: android-actions/setup-android@v3
       - name: "Android SDK 35"
         run: |
-          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" > /dev/null
-          echo "sdk: $ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" 2>&1 | tail -5
       - uses: gradle/actions/setup-gradle@v4
       - name: "Ресурсы и форматные строки (без SDK)"
         run: python3 tools/android_stub_check.py
       - name: "Сборка отладочных APK"
-        run: ./gradlew --no-daemon :app:assembleScoutDebug :app:assembleTunnelDebug
+        run: |
+          set +e
+          ./gradlew --no-daemon :app:assembleScoutDebug :app:assembleTunnelDebug > /tmp/apk.log 2>&1
+          rc=$?
+          set -e
+          tail -60 /tmp/apk.log
+          if [ "$rc" -ne 0 ]; then
+            { echo "### Сборка APK упала (exit $rc)"; echo '```'; tail -150 /tmp/apk.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: warpscout-debug-apk
