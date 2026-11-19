@@ -353,7 +353,9 @@ class DataPlane(
             val age = if (sessionStartedAt == 0L) 0 else now - sessionStartedAt
             val keepaliveSeconds = config.persistentKeepalive ?: 0
             val nextKeepaliveAt = if (keepaliveSeconds > 0) {
-                lastOutboundAt + keepaliveIntervalMs(now) else Long.MAX_VALUE
+                lastOutboundAt + keepaliveIntervalMs(now)
+            } else {
+                Long.MAX_VALUE
             }
             val nextRekeyAt = if (age >= settings.rekeyAfterMs) now else {
                 val wait = settings.rekeyAfterMs - age
