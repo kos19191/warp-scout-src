@@ -56,8 +56,8 @@ class MainActivity : AppCompatActivity() {
     private val listChecks = LinkedHashMap<String, MaterialCheckBox>()
     private val tunnelHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
-    /** Сколько точек входа пробуем за одно подключение: 6 попыток по 6 с — это уже полминуты. */
-    private val MAX_ENDPOINT_TRIES = 6
+    /** Сколько точек входа пробуем за одно подключение: 8 попыток по 5 с — предел ожидания 40 с. */
+    private val MAX_ENDPOINT_TRIES = 8
     private val lists by lazy { AllowListsRepo(this) }
     private var lastConfigFile: File? = null
 
@@ -75,6 +75,10 @@ class MainActivity : AppCompatActivity() {
     private var connecting = false
     private var endpointIndex = 0
     private var exitRegion = ""
+    private var settingsReconnect: Runnable? = null
+
+    /** Пока true — переподключение по настройкам не затевается (идёт заполнение экрана из Prefs). */
+    private var suppressSettingsReconnect = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -97,6 +101,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        refreshInstalledApps()
         updateAppsState()
         updateTunnelButton()
         updateTunnelDiagnostics()
@@ -285,6 +290,7 @@ class MainActivity : AppCompatActivity() {
             if (!isChecked) return@addOnButtonCheckedListener
             prefs.appsMode = appsModeOf(checkedId)
             updateAppsState()
+            scheduleSettingsReconnect("режим туннелирования приложений")
         }
         binding.checkAppsSystem.setOnCheckedChangeListener { _, _ -> rebuildAppsList() }
         binding.editAppSearch.doAfterTextChanged { rebuildAppsList() }
@@ -314,6 +320,17 @@ class MainActivity : AppCompatActivity() {
                 AppEntry(info.packageName, pm.getApplicationLabel(info).toString(), system)
             }.sortedBy { it.label.lowercase() }
         }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Приложения могли установить, пока приложение открыто (или туннель уже поднят). Список
+     * перечитывается при возврате в приложение — иначе только что установленное приложение просто
+     * некуда отметить. Перезапускать для этого приложение не нужно.
+     */
+    private fun refreshInstalledApps() {
+        val before = appEntries.size
+        loadApps()
+        if (appEntries.size != before && ::binding.isInitialized) rebuildAppsList()
     }
 
     private fun rebuildAppsList() {
@@ -364,6 +381,9 @@ class MainActivity : AppCompatActivity() {
         appChecks.forEach { (pkg, cb) -> if (cb.isChecked) merged.add(pkg) else merged.remove(pkg) }
         prefs.appsSelected = merged
         updateAppsState()
+        // Список приложений в туннеле — часть конфигурации VpnService: применяется только при
+        // установлении туннеля. Поэтому при поднятом туннеле ставим переподключение в очередь.
+        scheduleSettingsReconnect("приложения в туннеле")
     }
 
     private fun labelOfPackage(pkg: String): String =
@@ -556,6 +576,39 @@ class MainActivity : AppCompatActivity() {
             if (!isChecked || suppressExportListener) return@addOnButtonCheckedListener
             prefs.routesMode = routesModeOf(checkedId)
             refreshRoutesState()
+            scheduleSettingsReconnect("режим маршрутов")
+        }
+
+        // Всё, что попадает в VpnService.Builder, меняется только переустановлением туннеля —
+        // поэтому правки настроек при поднятом туннеле ставят переподключение в очередь.
+        binding.switchIpv6.setOnCheckedChangeListener { _, isChecked ->
+            prefs.enableIpv6 = isChecked
+            scheduleSettingsReconnect("IPv6")
+        }
+        binding.dnsSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                prefs.dnsIndex = position
+                scheduleSettingsReconnect("DNS")
+            }
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+        binding.editMtu.doAfterTextChanged { text ->
+            text?.toString()?.toIntOrNull()?.takeIf { it in 576..1420 }?.let {
+                prefs.mtu = it
+                scheduleSettingsReconnect("MTU")
+            }
+        }
+        binding.editKeepalive.doAfterTextChanged { text ->
+            text?.toString()?.toIntOrNull()?.let {
+                prefs.keepalive = it
+                scheduleSettingsReconnect("keepalive")
+            }
+        }
+        binding.checkListChecks.setOnCheckedChangeListener { _, isChecked ->
+            prefs.checkByLists = isChecked
+            refreshRoutesState()
+            scheduleSettingsReconnect("списки маршрутов")
         }
 
         binding.btnPickServer.setOnClickListener { pickServerFromReport() }
@@ -1061,7 +1114,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun connectWithFallback(base: WarpConfig) {
-        if (connecting) return
+        if (connecting) {
+            // Молча игнорировать нельзя: со стороны это выглядит как «кнопка не работает».
+            toast(getString(R.string.tunnel_connecting_busy))
+            return
+        }
         val candidates = tunnelCandidates(base)
         if (candidates.isEmpty()) return noConfig()
         connecting = true
@@ -1070,15 +1127,17 @@ class MainActivity : AppCompatActivity() {
         Thread {
             var winner: WarpConfig? = null
             val failures = StringBuilder()
+            // Внимание: здесь НЕЛЬЗЯ проверять cancelled — это флаг отмены скана. Он остаётся true
+            // после любого нажатия «Стоп» и раньше тихо обрывал подключение на первой же итерации.
             for ((i, cfg) in candidates.withIndex()) {
-                if (winner != null || cancelled.get()) break
+                if (winner != null) break
                 val n = i + 1
                 runOnUiThread {
                     binding.btnTunnel.text =
                         getString(R.string.tunnel_trying, n, candidates.size, cfg.endpoint.render())
                 }
                 TunnelDebug.stage("точка $n/${candidates.size}: ${cfg.endpoint.render()}, шум ${cfg.junk.name}")
-                val ok = runCatching { tunnel.startAndAwait(cfg, 6000) }.getOrDefault(false)
+                val ok = runCatching { tunnel.startAndAwait(cfg, 5000) }.getOrDefault(false)
                 if (ok) {
                     winner = cfg
                     break
@@ -1086,9 +1145,10 @@ class MainActivity : AppCompatActivity() {
                 val why = tunnel.lastError() ?: "нет ответа"
                 if (failures.isNotEmpty()) failures.append("; ")
                 failures.append("${cfg.endpoint.render()} — $why")
-                // Без остановки следующий start() упрётся в «уже поднимается»: сервис асинхронный.
+                // Гасим неудачную попытку и ДОЖИДАЕМСЯ фактической остановки: сервис
+                // асинхронный, и без ожидания следующий старт упирался в «уже поднимается».
                 runCatching { tunnel.stop() }
-                Thread.sleep(400)
+                runCatching { tunnel.waitStopped(2500) }
             }
             val used = winner
             runOnUiThread {
@@ -1108,13 +1168,44 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     TunnelDebug.error(
                         "ни одна из ${candidates.size} точек не поднялась",
-                        "подробности по каждой — выше в журнале; нажми «Другая точка входа» или сгенерируй новый конфиг"
+                        failures.toString().take(300) +
+                            " · нажми «Другая точка входа» или сгенерируй новый конфиг"
                     )
                     updateEndpointNote()
                     toast(getString(R.string.tunnel_failed, failures.toString().take(180)))
                 }
             }
         }.apply { isDaemon = true; name = "warpscout-connect" }.start()
+    }
+
+    /**
+     * Настройки туннелирования применяются в момент `VpnService.Builder.establish()` — на лету их
+     * менять нельзя (это ограничение Android, а не наше). Поэтому любая правка «что идёт в туннель»
+     * при поднятом туннеле ставит переподключение в очередь: с задержкой ~1 с, чтобы отметить
+     * несколько приложений подряд = одно переподключение, а не пять.
+     *
+     * Приложения при этом перезапускать не нужно: маршрутизация по uid применяется сетевым стеком
+     * при подключении к туннелю, и уже открытые приложения просто начнут ходить по новому правил.
+     */
+    private fun scheduleSettingsReconnect(why: String) {
+        if (suppressSettingsReconnect || !tunnel.supported || !tunnel.isUp) return
+        settingsReconnect?.let { tunnelHandler.removeCallbacks(it) }
+        val task = Runnable {
+            settingsReconnect = null
+            if (!tunnel.isUp) return@Runnable
+            TunnelDebug.stage("настройки изменены ($why) — переподключаю туннель, чтобы применить")
+            toast(getString(R.string.tunnel_reconnect_settings))
+            val cfg = currentConfig() ?: return@Runnable
+            tunnel.stop()
+            runCatching { tunnel.waitStopped(2500) }
+            tunnelStartedAtLocal = 0L
+            exitRegion = ""
+            binding.btnTunnel.setText(R.string.btn_tunnel_on)
+            // Небольшая пауза: система отпускает старый tun не мгновенно.
+            tunnelHandler.postDelayed({ connectWithFallback(cfg) }, 500L)
+        }
+        settingsReconnect = task
+        tunnelHandler.postDelayed(task, 900L)
     }
 
     /** Очередь точек входа: своя, доказанно рабочая, из последнего скана, запасные anycast. */
@@ -1127,15 +1218,16 @@ class MainActivity : AppCompatActivity() {
         }
         add(base)
         endpointOf(prefs.lastEndpoint)?.let { add(base.copy(endpoint = it)) }
-        engine.last?.report?.candidates?.sortedByDescending { it.score }?.take(3)?.forEach { candidate ->
+        engine.last?.report?.candidates?.sortedByDescending { it.score }?.take(2)?.forEach { candidate ->
             add(runCatching { ConfigComposer.applyPrefs(candidate.config, prefs, prefs.junkPool) }.getOrNull())
         }
-        // Запасные точки: разные адреса и разные порты — переживают блокировку конкретной пары.
-        val hosts = listOf("162.159.192.1", "162.159.195.1", "188.114.97.1", "188.114.99.1", "162.159.192.7")
-        val ports = listOf(2408, 2408, 500, 1701, 4500)
-        hosts.forEachIndexed { i, host ->
-            add(runCatching { base.copy(endpoint = dev.warpscout.core.model.Endpoint(host, ports[i % ports.size])) }.getOrNull())
-        }
+        // Запасные точки: другой адрес и другой порт — переживают блокировку конкретной пары.
+        add(runCatching { base.copy(endpoint = dev.warpscout.core.model.Endpoint("162.159.192.1", 2408)) }.getOrNull())
+        add(runCatching { base.copy(endpoint = dev.warpscout.core.model.Endpoint("188.114.97.1", 500)) }.getOrNull())
+        // Последние две попытки — «чистые»: на сетях с DPI именно мусорные пакеты бывают причиной
+        // отказа, поэтому пробуем обычный WireGuard без шума и без IPv6-адреса на интерфейсе.
+        add(runCatching { base.copy(junk = JunkLibrary.none(), mtu = 1280) }.getOrNull())
+        add(runCatching { base.copy(enableIpv6Address = false, mtu = 1280) }.getOrNull())
         return out
     }
 

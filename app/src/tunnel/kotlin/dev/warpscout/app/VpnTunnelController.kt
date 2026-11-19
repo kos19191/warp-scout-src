@@ -25,6 +25,8 @@ class VpnTunnelController(private val context: Context) : TunnelController {
     }
 
     override fun start(config: WarpConfig): Boolean {
+        // Прошлая сессия могла не успеть закрыться: даём ей до 3 с, иначе старт молча «склеится».
+        runCatching { WarpVpnService.waitDown(3000) }
         if (runCatching { VpnService.prepare(context) != null }.getOrDefault(true)) {
             TunnelDebug.error(
                 "нет разрешения на VPN",
@@ -68,6 +70,8 @@ class VpnTunnelController(private val context: Context) : TunnelController {
     }
 
     override fun stop() = WarpVpnService.stop(context)
+
+    override fun waitStopped(timeoutMs: Int): Boolean = WarpVpnService.waitDown(timeoutMs)
 
     override fun lastError(): String? = TunnelDebug.lastError
 

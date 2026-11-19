@@ -42,6 +42,13 @@ class WarpVpnService : VpnService() {
     private var udpSocket: DatagramSocket? = null
     private val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    /**
+     * Номер попытки подъёма. Поток подъёма, который начался до «Отключить», обязан увидеть, что
+     * его эпоха устарела, и выйти, не трогая tun/сокет/plane: иначе он закрывал бы файловые
+     * дескрипторы уже следующей сессии — ровно то, из-за чего «после выключения больше не включается».
+     */
+    private val epoch = java.util.concurrent.atomic.AtomicInteger(0)
+
     /** Идёт подъём или уже работает — второй запуск (плитка, кнопка, шторка) игнорируем. */
     @Volatile
     private var starting = false
@@ -49,6 +56,9 @@ class WarpVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             shutdown()
+            // stopSelf обязателен: без него экземпляр живёт дальше со своим состоянием, и следующий
+            // запуск может прийти в него же (см. эпоху выше и сброс stopped в startVpn).
+            runCatching { stopSelf() }
             return START_NOT_STICKY
         }
         if (starting || plane != null) {
@@ -77,10 +87,13 @@ class WarpVpnService : VpnService() {
     }
 
     private fun startVpn(text: String, startId: Int) {
+        val myEpoch = epoch.incrementAndGet()
+        fun alive() = myEpoch == epoch.get() && !stopped.get()
         starting = true
         // Экземпляр сервиса переиспользуется: без сброса флага «остановлен» второй подъём после
         // «Отключить» жил бы с чужим состоянием (watchdog и статусы считали бы себя остановленными).
         stopped.set(false)
+        TunnelState.busy = true
         TunnelState.up = false
         TunnelState.error = null
         TunnelState.gaveUp = false
@@ -115,6 +128,11 @@ class WarpVpnService : VpnService() {
         runCatching { socket.connect(InetSocketAddress(cfg.endpoint.host, cfg.endpoint.port)) }
             .onFailure { runCatching { socket.close() }; fail("connect(): ${it.message}", startId); return }
         TunnelDebug.stage("UDP-сокет создан и защищён")
+        if (!alive()) {
+            // Пока поднимались, пользователь нажал «Отключить» (или пошла следующая попытка).
+            runCatching { socket.close() }
+            return
+        }
 
         val pfd = try {
             builderFor(cfg).establish()
@@ -126,6 +144,12 @@ class WarpVpnService : VpnService() {
         if (pfd == null) {
             runCatching { socket.close() }
             fail("VpnService не выдал tun (обычно уже работает другой VPN)", startId)
+            return
+        }
+        if (!alive()) {
+            // tun уже выдан, но эта попытка устарела: закрываем, иначе интерфейс останется чужим.
+            runCatching { pfd.close() }
+            runCatching { socket.close() }
             return
         }
         tun = pfd
@@ -240,6 +264,7 @@ class WarpVpnService : VpnService() {
     /** Единственная точка «мы сдались»: статус + журнал + аккуратная остановка. */
     private fun fail(reason: String, startId: Int) {
         starting = false
+        TunnelState.busy = false
         TunnelState.status = reason
         TunnelState.error = reason
         TunnelState.gaveUp = true
@@ -394,6 +419,9 @@ class WarpVpnService : VpnService() {
         getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     private fun shutdown() {
+        // Эпоха растёт первой: любой поток подъёма сразу становится недействительным.
+        epoch.incrementAndGet()
+        TunnelState.busy = false
         if (!stopped.compareAndSet(false, true)) return
         starting = false
         TunnelState.up = false
@@ -445,6 +473,16 @@ class WarpVpnService : VpnService() {
             runCatching {
                 context.startService(Intent(context, WarpVpnService::class.java).apply { action = ACTION_STOP })
             }
+        }
+
+        /** Ждём, пока сервис реально освободится: следующий старт иначе упрётся в «уже поднимается». */
+        fun waitDown(timeoutMs: Int): Boolean {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                if (!TunnelState.busy) return true
+                Thread.sleep(50)
+            }
+            return !TunnelState.busy
         }
 
         /** Поднять и дождаться handshake (для проверки ресурсов из-под туннеля). */

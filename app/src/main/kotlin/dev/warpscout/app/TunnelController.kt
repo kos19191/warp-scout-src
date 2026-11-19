@@ -35,6 +35,13 @@ interface TunnelController {
 
     /** Журнал этапов туннеля — то, что просят прислать в issue. */
     fun debugDump(): String = ""
+
+    /**
+     * Ждём, пока прошлая сессия действительно завершится. Без этого переподключение (смена точки,
+     * изменение настроек, «Отключить» + «Подключить») упирается в «уже поднимается»: сервис
+     * асинхронный, и старый подъём ещё жив.
+     */
+    fun waitStopped(timeoutMs: Int): Boolean = true
 }
 
 class UnsupportedTunnelController : TunnelController {

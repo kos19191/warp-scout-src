@@ -174,4 +174,6 @@
     <string name="btn_next_endpoint">Другая точка входа</string>
     <string name="region_unknown">не определён</string>
     <string name="endpoint_switch_hint">WARP — anycast: страну выхода выбирает Cloudflare по вашей сети, назначить её нельзя. Зато можно сменить точку входа (адрес и порт) — если текущая блокируется, следующая обычно проходит.</string>
+    <string name="tunnel_reconnect_settings">Настройки изменены — переподключаю туннель</string>
+    <string name="tunnel_connecting_busy">Уже подключаюсь — дождись результата</string>
 </resources>
