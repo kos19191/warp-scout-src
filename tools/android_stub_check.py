@@ -138,6 +138,36 @@ def value_resources() -> dict[str, list[str]]:
     return {k: v for k, v in out.items()}
 
 
+SCROLL_LIKE = {"ScrollView", "HorizontalScrollView"}
+
+
+def check_layout_nesting() -> list[str]:
+    """
+    Ловит то, что не видит ни aapt2, ни компилятор: разметку, которая роняет приложение при
+    старте. ScrollView умеет только одного ребёнка — лишний элемент даёт IllegalStateException
+    при инфляции, то есть «приложение сразу закрывается», и никакой журнал этого не покажет.
+    Проверяются также дубли `@+id` внутри одного файла (findViewById вернёт не тот view).
+    """
+    problems: list[str] = []
+    for f in sorted((RES / "layout").glob("*.xml")):
+        try:
+            root = parse(f).getroot()
+        except ET.ParseError:
+            continue  # про синтаксис скажет общий разбор XML
+        for node in root.iter():
+            tag = node.tag.split("}")[-1]
+            if tag in SCROLL_LIKE and len(list(node)) > 1:
+                vid = (node.attrib.get(A + "id") or "").replace("@+id/", "") or "?"
+                problems.append(
+                    f"layout/{f.name}: {tag} (@id/{vid}) имеет {len(list(node))} детей — "
+                    "допустим ровно один (иначе IllegalStateException при запуске)"
+                )
+        ids = [v.replace("@+id/", "") for v in (n.attrib.get(A + "id") or "" for n in root.iter()) if v]
+        duplicates = {i for i in ids if ids.count(i) > 1}
+        for d in sorted(duplicates):
+            problems.append(f"layout/{f.name}: @+id/{d} объявлен больше одного раза")
+    return problems
+
 def check_resources() -> list[str]:
     problems: list[str] = []
     seen: dict[tuple[str, str], str] = {}
@@ -196,6 +226,7 @@ def check_resources() -> list[str]:
                     if not has_generic and "FOREGROUND_SERVICE" not in text:
                         problems.append(f"{f.relative_to(ROOT)}: для типа «{t_.strip()}» не хватает {perm}")
     problems += check_format_strings(kt)
+    problems += check_layout_nesting()
     return problems
 
 

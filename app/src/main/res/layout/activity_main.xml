@@ -784,9 +784,7 @@
                     android:textIsSelectable="true" />
 
 
-            </LinearLayout>
-                <!-- ── шум: маскировка handshake (осталось от вкладки «Обход DPI») ── -->
-                <!-- ── шум ───────────────────────────────────────────────── -->
+                <!-- ── шум: маскировка handshake (перенесён из вкладки «Обход DPI») ── -->
                 <TextView
                     style="@style/SectionHeader"
                     android:text="@string/section_junk" />
@@ -812,10 +810,8 @@
                     android:layout_marginTop="8dp"
                     android:text="@string/btn_save_apply" />
 
+            </LinearLayout>
         </ScrollView>
-
-        <!-- ══════ вкладка «Туннель» ══════ -->
-        
 
         <!-- ══════ вкладка «Приложения» ══════ -->
         <ScrollView
