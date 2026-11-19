@@ -1,0 +1,21 @@
+.gradle/
+build/
+*/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+*.keystore
+!debug.keystore
+out/
+__pycache__/
+*.pyc
+
+# Kotlin/Gradle служебное
+.kotlin/
+*.hprof
+*.log
+.gradle-dists/
