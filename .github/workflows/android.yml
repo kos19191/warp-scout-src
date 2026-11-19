@@ -3,8 +3,18 @@ name: build
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Опубликовать оба APK в GitHub Release"
+        type: boolean
+        default: false
+      release_tag:
+        description: "Тег релиза (пусто → latest-preview)"
+        required: false
+        default: ""
 
 # Один прогон на ветку: новый пуш отменяет предыдущий, чтобы не жечь минуты.
 concurrency:
@@ -132,3 +142,81 @@ jobs:
           else
             cat /tmp/diag.md
           fi
+
+  # APK, который можно скачать одной ссылкой, а не искать в артефактах прогона.
+  # Запускается: на тег v*, на пуш в main (обновляет latest-preview) и вручную
+  # (workflow_dispatch → publish_release=true), чтобы собрать сборку из ветки/PR.
+  release:
+    name: "APK → GitHub Release"
+    needs: apk
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true') || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: warpscout-debug-apk
+          path: apk
+
+      - name: "Имена, версия и контрольные суммы"
+        id: pack
+        run: |
+          set -euo pipefail
+          ls -la apk
+          VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          mkdir -p out
+          SCOUT=$(find apk -name '*scout*.apk' | head -1)
+          TUNNEL=$(find apk -name '*tunnel*.apk' | head -1)
+          [ -n "$SCOUT" ] && [ -n "$TUNNEL" ] || { echo "не нашёл один из APK"; find apk -name '*.apk'; exit 1; }
+          cp "$SCOUT" "out/WarpScout-$VERSION-scout.apk"
+          cp "$TUNNEL" "out/WarpScout-$VERSION-tunnel.apk"
+          ( cd out && sha256sum *.apk | tee SHA256SUMS.txt )
+          ls -l out
+
+      - name: "Публикация релиза"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+          VERSION: ${{ steps.pack.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-}"
+          if [ -z "$TAG" ]; then
+            if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then TAG="${GITHUB_REF_NAME}"; else TAG="latest-preview"; fi
+          fi
+          echo "тег: $TAG"
+
+          {
+            echo "WarpScout $VERSION — сборка из коммита \`${GITHUB_SHA:0:7}\` (\`${GITHUB_REF_NAME}\`)."
+            echo
+            echo "Собрано автоматически: \`./gradlew :app:assembleScoutDebug :app:assembleTunnelDebug\`."
+            echo
+            echo "| Файл | Что внутри | applicationId |"
+            echo "|---|---|---|"
+            echo "| \`WarpScout-$VERSION-scout.apk\` | скан, подбор, генерация конфига, передача в AmneziaVPN; своего туннеля нет | \`dev.warpscout.app\` |"
+            echo "| \`WarpScout-$VERSION-tunnel.apk\` | то же + собственный туннель (VpnService) и проверки из-под него | \`dev.warpscout.app.tunnel\` |"
+            echo
+            echo "**Как поставить:** разрешить установку из неизвестных источников → открыть APK."
+            echo "Сборка **debug-подписанная** — для тестов и сайдлоада, не для магазина."
+            echo "Оба flavor'а ставятся рядом: у них разные applicationId."
+            echo
+            echo "Контрольные суммы — \`SHA256SUMS.txt\` в этом же релизе."
+            echo "Журнал прогона: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > notes.md
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" out/*.apk out/SHA256SUMS.txt --clobber
+            echo "обновил существующий релиз $TAG"
+          else
+            if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+              gh release create "$TAG" out/*.apk out/SHA256SUMS.txt                 --title "WarpScout $VERSION" --notes-file notes.md --verify-tag
+            else
+              gh release create "$TAG" out/*.apk out/SHA256SUMS.txt                 --title "WarpScout $VERSION ($TAG)" --notes-file notes.md --target "$GITHUB_SHA"
+            fi
+            echo "создал релиз $TAG"
+          fi
+          gh release view "$TAG" --json url,assets --jq '{url, assets: [.assets[].name]}'

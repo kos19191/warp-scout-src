@@ -11,6 +11,24 @@ AmneziaVPN — или поднимает туннель само.
 
 ---
 
+## Скачать APK
+
+Сборки публикуются автоматически в [Releases](https://github.com/kos19191/warp-scout-src/releases).
+Ссылки ниже всегда ведут на последний релиз — их можно давать людям как есть:
+
+| Скачать | Что внутри | applicationId |
+|---|---|---|
+| [WarpScout-1.1.0-scout.apk](https://github.com/kos19191/warp-scout-src/releases/latest/download/WarpScout-1.1.0-scout.apk) | скан, подбор, генерация конфига, передача в AmneziaVPN. Своего туннеля нет — ничего не надо разрешать | `dev.warpscout.app` |
+| [WarpScout-1.1.0-tunnel.apk](https://github.com/kos19191/warp-scout-src/releases/latest/download/WarpScout-1.1.0-tunnel.apk) | то же + собственный туннель (VpnService) и проверки доступности из-под него | `dev.warpscout.app.tunnel` |
+
+Ставятся рядом (разные applicationId), подписаны debug-ключом — это сайдлоад-сборки, не для
+магазина. Рядом с APK в релизе лежит `SHA256SUMS.txt`.
+
+Собрать самому: `./gradlew :app:assembleScoutDebug :app:assembleTunnelDebug` (нужен JDK 17 и
+Android SDK 35), файлы появятся в `app/build/outputs/apk/`.
+
+---
+
 ## Что он делает
 
 ```
