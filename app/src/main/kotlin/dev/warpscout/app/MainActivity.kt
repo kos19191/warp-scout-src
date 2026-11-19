@@ -24,6 +24,7 @@ import dev.warpscout.core.model.ResourceCheck
 import dev.warpscout.core.net.Socks5Endpoint
 import dev.warpscout.core.junk.JunkLibrary
 import dev.warpscout.core.keys.KeySource
+import dev.warpscout.core.lists.AllowListPlanner
 import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.net.WarpDefaults
 import dev.warpscout.core.presets.Presets
@@ -77,6 +78,10 @@ class MainActivity : AppCompatActivity() {
     private var exitRegion = ""
     private var settingsReconnect: Runnable? = null
 
+    /** Слежение за сетью: при её смене старый UDP-сокет туннеля становится мёртвым. */
+    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+    private var networkLost = false
+
     /** Пока true — переподключение по настройкам не затевается (идёт заполнение экрана из Prefs). */
     private var suppressSettingsReconnect = false
 
@@ -95,8 +100,19 @@ class MainActivity : AppCompatActivity() {
         buildListsChecks()
         refreshRoutesState()
         updateEndpointNote()
+        watchNetworkChanges()
         askNotificationPermission()
         binding.textStatus.setText(R.string.status_idle)
+    }
+
+    override fun onDestroy() {
+        networkCallback?.let { cb ->
+            runCatching {
+                getSystemService(android.net.ConnectivityManager::class.java)?.unregisterNetworkCallback(cb)
+            }
+        }
+        networkCallback = null
+        super.onDestroy()
     }
 
     override fun onResume() {
@@ -145,6 +161,10 @@ class MainActivity : AppCompatActivity() {
             this, android.R.layout.simple_spinner_dropdown_item, routeLabels()
         )
         binding.spinnerRoutes.setSelection(prefs.routesMode.coerceIn(0, 3))
+        binding.switchSecondExit.isChecked = prefs.secondExitOn
+        binding.editSecondConf.setText(prefs.secondConf)
+        binding.editSecondDomains.setText(prefs.secondDomains)
+        updateSecondState()
         suppressExportListener = false
         binding.editServer.setText(prefs.pinnedEndpoint)
         binding.editAllowedIps.setText(prefs.allowedIpsText)
@@ -176,6 +196,9 @@ class MainActivity : AppCompatActivity() {
         prefs.autoApply = binding.checkAutoApply.isChecked
         prefs.confTarget = confTargetOf(binding.exportGroup.checkedButtonId)
         prefs.routesMode = binding.spinnerRoutes.selectedItemPosition.coerceIn(0, 3)
+        prefs.secondExitOn = binding.switchSecondExit.isChecked
+        prefs.secondConf = binding.editSecondConf.text?.toString()?.trim().orEmpty()
+        prefs.secondDomains = binding.editSecondDomains.text?.toString()?.trim().orEmpty()
         prefs.pinnedEndpoint = binding.editServer.text?.toString()?.trim().orEmpty()
         prefs.allowedIpsText = binding.editAllowedIps.text?.toString()?.trim()?.replace("\n", " ").orEmpty()
         prefs.checkByLists = binding.checkListChecks.isChecked
@@ -622,6 +645,13 @@ class MainActivity : AppCompatActivity() {
         }
 
         // «Сохранить» на каждой вкладке, где что-то меняется: применяем и только потом переподключаем.
+        binding.switchSecondExit.setOnCheckedChangeListener { _, isChecked ->
+            prefs.secondExitOn = isChecked
+            updateSecondState()
+            markSettingsDirty("второй выход")
+        }
+        binding.btnSecondResolve.setOnClickListener { resolveSecondDomains() }
+
         binding.btnSaveAndApply.setOnClickListener { saveAndApply("конфиг") }
         binding.btnSaveAndSend.setOnClickListener { saveAndSend() }
         binding.btnSaveScan.setOnClickListener { saveAndApply("скан") }
@@ -888,6 +918,91 @@ class MainActivity : AppCompatActivity() {
                 .getOrNull()?.takeIf { it.exists() }
         }
         showKeys()
+    }
+
+    // ---------------------------------------------------------- второй выход
+
+    /**
+     * Домены → адреса через DoH. Системный резолвер не используем: он может отдать подменённые
+     * адреса, и правило уведёт не тот трафик. Дальше эти /32 и /128 раскладывает ExitRouter
+     * внутри сервиса: пакет на такой адрес уходит во второй туннель, остальные — в WARP.
+     */
+    private fun resolveSecondDomains() {
+        val hosts = binding.editSecondDomains.text?.toString().orEmpty()
+            .split(',', '\n', ';', ' ')
+            .map { it.trim().removePrefix("http://").removePrefix("https://").substringBefore('/') }
+            .filter { it.contains('.') }
+            .distinct()
+        if (hosts.isEmpty()) {
+            banner(getString(R.string.second_no_domains), error = true)
+            return
+        }
+        binding.btnSecondResolve.isEnabled = false
+        binding.textSecondState.text = getString(R.string.second_resolving)
+        Thread {
+            val resolved = runCatching { AllowListPlanner.resolveAll(hosts) }.getOrDefault(emptyMap())
+            val cidrs = LinkedHashSet<String>()
+            resolved.values.flatten().forEach { ip ->
+                if (ip.isNotBlank()) cidrs += if (ip.contains(':')) "$ip/128" else "$ip/32"
+            }
+            runOnUiThread {
+                binding.btnSecondResolve.isEnabled = true
+                prefs.secondDomains = hosts.joinToString(", ")
+                prefs.secondCidrs = cidrs.joinToString(", ")
+                updateSecondState()
+                if (cidrs.isEmpty()) {
+                    banner(getString(R.string.second_no_domains), error = true)
+                } else {
+                    banner(getString(R.string.second_resolved, cidrs.size, hosts.size))
+                    markSettingsDirty("второй выход: подсети")
+                }
+            }
+        }.apply { isDaemon = true; name = "warpscout-resolve-second" }.start()
+    }
+
+    private fun updateSecondState() {
+        val cidrs = prefs.secondCidrs.split(',', '\n').count { it.isNotBlank() }
+        val domains = prefs.secondDomains.split(',', '\n').count { it.isNotBlank() }
+        val server = runCatching {
+            WgConf.toWarpConfig("второй выход", prefs.secondConf)?.endpoint?.render()
+        }.getOrNull()
+        binding.textSecondState.text = when {
+            !prefs.secondExitOn -> getString(R.string.second_off)
+            cidrs == 0 -> getString(R.string.second_need_cidrs)
+            else -> getString(R.string.second_on_summary, domains, cidrs, server ?: "—") +
+                "\n" + getString(R.string.second_apply_note)
+        }
+    }
+
+    /**
+     * Из журнала пользователя: «sendto failed: ENETUNREACH» и туннель закрывается. Это не баг
+     * крипты — просто при смене сети (Wi-Fi → LTE, перезагрузка роутера) UDP-сокет теряет маршрут.
+     * Ловим смену сети и переподключаемся сами, вместо «туннель умер, делай что хочешь».
+     */
+    private fun watchNetworkChanges() {
+        if (networkCallback != null) return
+        val cm = runCatching { getSystemService(android.net.ConnectivityManager::class.java) }.getOrNull() ?: return
+        val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onLost(network: android.net.Network) {
+                networkLost = true
+            }
+
+            override fun onAvailable(network: android.net.Network) {
+                if (!networkLost) return
+                networkLost = false
+                if (!tunnel.supported || !tunnel.isUp) return
+                val cfg = currentConfig() ?: return
+                banner(getString(R.string.banner_network_changed))
+                TunnelDebug.stage("сеть сменилась — переподключаю туннель")
+                Thread {
+                    runCatching { tunnel.stop() }
+                    runCatching { tunnel.waitStopped(3000) }
+                    runOnUiThread { connectWithFallback(cfg) }
+                }.apply { isDaemon = true; name = "warpscout-netwatch" }.start()
+            }
+        }
+        runCatching { cm.registerDefaultNetworkCallback(callback) }
+        networkCallback = callback
     }
 
     private fun periodLabel(hours: Int): String = when {

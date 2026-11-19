@@ -18,10 +18,16 @@ import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.net.NetSettings
 import dev.warpscout.core.tunnel.DataPlane
+import dev.warpscout.core.tunnel.ExitRouter
+import dev.warpscout.core.tunnel.PacketQueueIn
+import dev.warpscout.core.tunnel.SharedPacketOut
+import dev.warpscout.core.tunnel.TunDispatcher
 import dev.warpscout.core.tunnel.SocketUdpChannel
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import java.util.concurrent.CountDownLatch
@@ -37,6 +43,12 @@ import java.util.concurrent.TimeUnit
 class WarpVpnService : VpnService() {
 
     private var plane: DataPlane? = null
+    /** Второй выход (другой сервер): свой data plane и сокет, если включён. */
+    private var plane2: DataPlane? = null
+    private var worker2: Thread? = null
+    private var secondSocket: DatagramSocket? = null
+    /** Разделитель пакетов между выходами: tun читает только он. */
+    private var dispatcher: TunDispatcher? = null
     private var tun: ParcelFileDescriptor? = null
     private var worker: Thread? = null
     private var udpSocket: DatagramSocket? = null
@@ -134,8 +146,26 @@ class WarpVpnService : VpnService() {
             return
         }
 
+        // Второй выход: другой сервер для выбранных подсетей (страна/провайдер на выбор).
+        // Внутри WARP выбрать регион нельзя, поэтому «регион для сайта» = второй туннель рядом.
+        val secondCfg = secondConfig()
+        val router = secondCfg?.let { ExitRouter.of(ExitRouter.parse(Prefs(this).secondCidrs)) }
+            ?.takeIf { !it.isEmpty } ?: ExitRouter.EMPTY
+        val multiExit = secondCfg != null && !router.isEmpty
+
+        val builder = builderFor(cfg)
+        if (multiExit) {
+            // В split-режиме подсети второго выхода должны попадать в tun, иначе они уйдут мимо.
+            router.cidrs.forEach { cidr ->
+                val host = cidr.substringBefore('/').trim()
+                val bits = cidr.substringAfter('/', "").trim().toIntOrNull()
+                if (host.isNotEmpty() && bits != null) runCatching { builder.addRoute(host, bits) }
+            }
+            TunnelDebug.stage("второй выход: ${router.size} подсетей, сервер ${secondCfg?.endpoint?.render()}")
+        }
+
         val pfd = try {
-            builderFor(cfg).establish()
+            builder.establish()
         } catch (e: Exception) {
             runCatching { socket.close() }
             fail("tun: ${e.javaClass.simpleName} ${e.message?.take(140)}", startId)
@@ -158,10 +188,25 @@ class WarpVpnService : VpnService() {
         TunnelDebug.stage("tun получен: ${routes.size} маршрутов, blocking=${isFullTunnel(cfg)}")
 
         val handshake = CountDownLatch(1)
+
+        // Со вторым выходом tun читает диспетчер, а каждый data plane читает свою очередь.
+        // Без второго выхода — ровно прежнее поведение (прямые потоки), регрессии быть не должно.
+        val secondSock = if (multiExit && secondCfg != null) openSecondSocket(secondCfg) else null
+        val rawIn = FileInputStream(pfd.fileDescriptor)
+        val rawOut = FileOutputStream(pfd.fileDescriptor)
+        val lanes = if (secondSock != null) listOf(PacketQueueIn("основной"), PacketQueueIn("второй")) else emptyList()
+        val tunOut: OutputStream = if (lanes.isEmpty()) rawOut else SharedPacketOut(rawOut)
+        val tunIn: InputStream = if (lanes.isEmpty()) rawIn else lanes[0]
+        if (lanes.isNotEmpty()) {
+            val dispatcher = TunDispatcher(rawIn, router, lanes) { line -> TunnelDebug.stage(line) }
+            this.dispatcher = dispatcher
+            Thread(dispatcher, "warpscout-tun-split").apply { isDaemon = true; start() }
+        }
+
         val plane = DataPlane(
             udp = SocketUdpChannel(socket, cfg.endpoint, 1500),
-            tunInput = FileInputStream(pfd.fileDescriptor),
-            tunOutput = FileOutputStream(pfd.fileDescriptor),
+            tunInput = tunIn,
+            tunOutput = tunOut,
             config = cfg,
             // Пять инициаций с интервалом 400 мс: первая же обычно отвечает за доли секунды,
             // а если датаграмм потерялся — следующая уходит не через 1.5 с, а почти сразу.
@@ -215,6 +260,43 @@ class WarpVpnService : VpnService() {
             }
         }.apply { isDaemon = true; name = "warpscout-vpn"; start() }
 
+        // Второй выход запускаем сразу после основного: он независим (своя сессия, свой rekey),
+        // и его падение не должно ронять туннель — трафик просто продолжит идти через WARP.
+        val secondary = if (lanes.size > 1 && secondCfg != null && secondSock != null) {
+            DataPlane(
+                udp = SocketUdpChannel(secondSock, secondCfg.endpoint, 1500),
+                tunInput = lanes[1],
+                tunOutput = tunOut,
+                config = secondCfg,
+                settings = NetSettings(attempts = 3, timeoutMs = 1000, retryEveryMs = 500, junkPacketsBeforeHandshake = 1),
+                log = { line ->
+                    when {
+                        line.contains("туннель поднят") ->
+                            TunnelDebug.ok("второй выход поднят: ${secondCfg.endpoint.render()}")
+                        line.contains("не прошёл") || line.contains("невозможен") ->
+                            TunnelDebug.error("второй выход: $line", "проверь второй конфиг и его endpoint")
+                        else -> TunnelDebug.stage("второй: $line")
+                    }
+                }
+            )
+        } else {
+            null
+        }
+        if (secondary != null) {
+            plane2 = secondary
+            secondSocket = secondSock
+            val lane2 = lanes.getOrNull(1)
+            worker2 = Thread {
+                val ok2 = runCatching { secondary.run() }.getOrDefault(false)
+                // Очередь закрываем: диспетчер увидит это и вернёт подсети в основной туннель.
+                runCatching { lane2?.close() }
+                TunnelDebug.stage(
+                    "второй выход остановлен: ${if (ok2) "закрыт" else "аварийно"}, " +
+                        "прошло ${secondary.bytesUp} вверх / ${secondary.bytesDown} вниз"
+                )
+            }.apply { isDaemon = true; name = "warpscout-vpn-2"; start() }
+        }
+
         // Handshake ждём НЕ здесь (мы и так на отдельном потоке, а главному потоку делать нечего):
         // ждёт [dev.warpscout.app.VpnTunnelController.startAndAwait], опрашивая TunnelState.
         // Тут только страховка: если за 25 с туннель не поднялся — сами себя снимаем и объясняем почему.
@@ -254,6 +336,36 @@ class WarpVpnService : VpnService() {
                 postNotification("Туннель поднят, трафик не идёт")
             }
         }
+    }
+
+    /** Конфиг второго выхода из настроек (null — выключен или пустой). */
+    private fun secondConfig(): WarpConfig? {
+        val prefs = Prefs(this)
+        if (!prefs.secondExitOn) return null
+        val text = prefs.secondConf
+        if (text.isBlank()) return null
+        return runCatching { WgConf.toWarpConfig("второй выход", text) }.getOrNull()
+    }
+
+    /** Отдельный защищённый сокет для второго выхода: свой protect() обязателен, иначе петля. */
+    private fun openSecondSocket(cfg: WarpConfig): DatagramSocket? {
+        val socket = runCatching {
+            DatagramSocket(null).apply { reuseAddress = true; soTimeout = 1500 }
+        }.getOrNull() ?: return null
+        if (!runCatching { protect(socket) }.getOrDefault(false)) {
+            runCatching { socket.close() }
+            TunnelDebug.error("второй выход: protect() отказал", "второй туннель не поднят, трафик идёт через WARP")
+            return null
+        }
+        val connected = runCatching {
+            socket.connect(InetSocketAddress(cfg.endpoint.host, cfg.endpoint.port))
+        }.isSuccess
+        if (!connected) {
+            runCatching { socket.close() }
+            TunnelDebug.error("второй выход: connect() не удался", "проверь endpoint второго конфига")
+            return null
+        }
+        return socket
     }
 
     private fun isFullTunnel(cfg: WarpConfig): Boolean =
@@ -426,6 +538,14 @@ class WarpVpnService : VpnService() {
         starting = false
         TunnelState.up = false
         TunnelState.status = "туннель остановлен"
+        runCatching { dispatcher?.stop() }
+        dispatcher = null
+        runCatching { plane2?.stop() }
+        plane2 = null
+        runCatching { secondSocket?.close() }
+        secondSocket = null
+        runCatching { worker2?.join(500) }
+        worker2 = null
         runCatching { plane?.stop() }
         plane = null
         // Поток закрыт → читающий его цикл выйдет сам; join только из чужого потока.

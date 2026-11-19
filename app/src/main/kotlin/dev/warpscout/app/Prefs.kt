@@ -78,6 +78,26 @@ class Prefs(private val context: Context) {
         get() = sp.getBoolean("schedule", false)
         set(v) = sp.edit().putBoolean("schedule", v).apply()
 
+    /** Второй выход: свой сервер (WireGuard/AmneziaWG) для выбранных подсетей. */
+    var secondExitOn: Boolean
+        get() = sp.getBoolean("secondExitOn", false)
+        set(v) = sp.edit().putBoolean("secondExitOn", v).apply()
+
+    /** Конфиг второго выхода: текст [Interface]/[Peer] от своего сервера. */
+    var secondConf: String
+        get() = sp.getString("secondConf", "").orEmpty()
+        set(v) = sp.edit().putString("secondConf", v).apply()
+
+    /** Домены, которые должны идти через второй выход (для человека и для повторного сбора IP). */
+    var secondDomains: String
+        get() = sp.getString("secondDomains", "").orEmpty()
+        set(v) = sp.edit().putString("secondDomains", v).apply()
+
+    /** Развёрнутые в CIDR адреса этих доменов — ровно их и раскладывает ExitRouter. */
+    var secondCidrs: String
+        get() = sp.getString("secondCidrs", "").orEmpty()
+        set(v) = sp.edit().putString("secondCidrs", v).apply()
+
     /** Период фонового подбора в часах: 0 — выключено. */
     var scheduleHours: Int
         get() = sp.getInt("scheduleHours", 6).coerceIn(0, 24)

@@ -8,6 +8,8 @@ import dev.warpscout.core.lists.AllowListPlanner
 import dev.warpscout.core.lists.AllowLists
 import dev.warpscout.core.lists.ListSide
 import dev.warpscout.core.report.ConfigExport
+import dev.warpscout.core.tunnel.ExitRouter
+import dev.warpscout.core.tunnel.IpPacket
 import dev.warpscout.core.crypto.Blake2s
 import dev.warpscout.core.crypto.Crypto
 import dev.warpscout.core.junk.JunkLibrary
@@ -980,6 +982,29 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             !routes.contains("PrivateKey") && routes.contains("AllowedIPs =") && routes.contains("0.0.0.0/0"))
         expect("конфиг: расширение по цели", ConfigExport.filename(cfg, ConfTarget.CLASH).substringAfterLast('.'), "yaml")
         expect("конфиг: расширение AmneziaWG", ConfigExport.filename(cfg, ConfTarget.AMNEZIA).substringAfterLast('.'), "conf")
+
+        // ---- второй выход: таблица «адрес → выход» и разбор IP-пакета ----
+        val router = ExitRouter.of(
+            ExitRouter.parse("31.13.0.0/16, 5.6.7.8/32, 2a00:1450:4001:800::/128, мусор, 1.2.3.4/33")
+        )
+        fun route(ip: String) = router.route(ExitRouter.ipBytes(ip)!!)
+        expect("router: во второй выход по /16", route("31.13.9.9"), 1)
+        expect("router: тот же диапазон — граница", route("31.13.255.255"), 1)
+        expect("router: вне диапазона", route("31.14.0.1"), 0)
+        expect("router: точный /32", route("5.6.7.8"), 1)
+        expect("router: соседний адрес", route("5.6.7.9"), 0)
+        expect("router: IPv6 /128", route("2a00:1450:4001:800::"), 1)
+        expect("router: IPv6 другой", route("2a00:1450:4001:801::"), 0)
+        expect("router: битый CIDR не ломает таблицу", router.size, 3)
+
+        val v4Packet = ByteArray(20).also {
+            it[0] = 0x45
+            it[9] = 6
+            it[16] = 31; it[17] = 13; it[18] = 9; it[19] = 9
+        }
+        expect("пакет: адрес назначения IPv4", ExitRouter.ipBytes("31.13.9.9")!!.toList(), IpPacket.dst(v4Packet)!!.toList())
+        expect("пакет: протокол TCP", IpPacket.protocol(v4Packet), 6)
+        expect("пакет: не IP", IpPacket.dst(ByteArray(4)), null)
         check("конфиг: имя файла различает цели",
             ConfigExport.filename(cfg, ConfTarget.AMNEZIA) != ConfigExport.filename(cfg, ConfTarget.WIREGUARD))
     }
