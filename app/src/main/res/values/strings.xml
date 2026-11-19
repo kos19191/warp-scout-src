@@ -1,0 +1,93 @@
+<resources>
+    <string name="app_name">WarpScout</string>
+    <string name="app_name_long">WarpScout — автоматический подбор WARP/AWG</string>
+    <string name="import_title">Импорт конфига</string>
+    <string name="vpn_notification">WarpScout: туннель активен</string>
+
+    <string name="tab_scan">Подбор</string>
+    <string name="tab_config">Конфиг</string>
+    <string name="tab_report">Отчёт</string>
+
+    <string name="section_endpoints">Эндпоинты</string>
+    <string name="hint_hosts">IP, диапазоны, звёздочка — по строке на точку: 8.6.112.*, 188.114.96.1-10:443, engage.cloudflareclient.com:443</string>
+    <string name="hint_ports">Порты: 500–510, 2408–2409 или свой список</string>
+    <string name="btn_pool_default">Пул генератора</string>
+    <string name="btn_pool_masque">Только MASQUE (443/8443)</string>
+    <string name="btn_pool_full">Полный перебор</string>
+    <string name="label_endpoint_count">Сколько точек проверять</string>
+
+    <string name="section_junk">Шум / обфускация (AWG)</string>
+    <string name="junk_note">Профиль считается годным, только если handshake проходит с этим шумом. Так приложение замечает, что провайдер начал резать конкретный паттерн.</string>
+    <string name="junk_none">Без шума (чистый WireGuard)</string>
+
+    <string name="section_network">Сеть и DNS</string>
+    <string name="label_dns">DNS в конфиге</string>
+    <string name="label_keepalive">Keepalive, c</string>
+    <string name="label_mtu">MTU</string>
+    <string name="switch_whitelist">Split-tunnel: whitelist путей обхода</string>
+    <string name="switch_ipv6">Отдавать IPv6-адрес</string>
+
+    <string name="section_checks">Доступность ресурсов</string>
+    <string name="switch_resources">Проверять сайты (ChatGPT, Google, Discord, …)</string>
+    <string name="switch_tunnel_verify">Проверять изнутри туннеля (нужна сборка с туннелем)</string>
+    <string name="resources_hint">Список проверяемых доменов редактируется в «Отчёт → ресурсы».</string>
+
+    <string name="btn_run">Сканировать и подобрать</string>
+    <string name="btn_stop">Остановить</string>
+    <string name="btn_schedule">Авто-обновление каждые 6 часов</string>
+    <string name="btn_schedule_off">Выключить авто-обновление</string>
+    <string name="schedule_on">Авто-обновление включено: раз в 6 часов, при любой доступной сети</string>
+    <string name="schedule_off">Авто-обновление выключено</string>
+
+    <string name="status_idle">Готово. Нажмите «Сканировать и подобрать».</string>
+    <string name="status_running">Идёт сканирование…</string>
+    <string name="status_done">Готово</string>
+    <string name="status_cancelled">Остановлено пользователем</string>
+
+    <string name="btn_export_amnezia">Передать в AmneziaVPN</string>
+    <string name="btn_save">Сохранить в Загрузки</string>
+    <string name="btn_share">Поделиться файлом</string>
+    <string name="btn_copy">Скопировать конфиг</string>
+    <string name="btn_tunnel_on">Включить туннель</string>
+    <string name="btn_tunnel_off">Выключить туннель</string>
+    <string name="tunnel_unavailable">В этой сборке собственного туннеля нет: используйте «Передать в AmneziaVPN».</string>
+
+    <string name="amnezia_hint">AmneziaVPN: Профили → ⋮ → Импорт из буфера/файла и вставьте этот текст. Если импорт не открывается — сохраните файл .conf и откройте его через Amnezia.</string>
+    <string name="saved_ok">Сохранено: %1$s</string>
+    <string name="copied_ok">Скопировано в буфер обмена</string>
+    <string name="err_no_config">Сначала выполните подбор — конфигурации ещё нет</string>
+    <string name="keys_source">Ключи: %1$s</string>
+    <string name="best_endpoint">Лучший endpoint: %1$s (%2$s, %3$d баллов)</string>
+    <string name="report_saved">Отчёт: %1$s</string>
+    <string name="import_failed">Не удалось прочитать конфигурацию</string>
+    <string name="import_partial">Файл сохранён как резервный: проверьте, что в нём есть PrivateKey и PublicKey</string>
+    <string name="share_title">Отдать конфигурацию</string>
+    <string name="share_failed">Нет приложения, которое приняло бы файл</string>
+    <string name="pool_summary_default">Режим: %1$s · %2$d подсетей × %3$d портов → %4$d точек. Список можно поправить сверху — тогда сканится ровно он.</string>
+    <string name="pool_summary_explicit">Режим: ваш список → %1$d точек (строки host:port / 8.6.112.*:943 / 188.114.96.1-10:443). Порты из поля выше применены ко всем строкам без порта.</string>
+    <string name="done_ok">✓ Готово в %1$s · подбор занял %2$s</string>
+    <string name="done_new">✓ Готово в %1$s · это НОВЫЙ конфиг (endpoint сменился %2$s)</string>
+    <string name="done_same">Тот же endpoint, что и раньше · просто перепроверен в %1$s</string>
+    <string name="done_last">Последний подбор: %1$s (%2$s назад)</string>
+    <string name="done_last_stale">Последний подбор: %1$s (%2$s назад) — давно, стоит повторить</string>
+    <string name="done_never">Подбор ещё не запускался</string>
+    <string name="check_auto_apply">Применять автоматически (сборка с туннелем)</string>
+    <string name="check_auto_apply_off">В этой сборке туннеля нет — конфиг применяешь ты сам, через Amnezia</string>
+    <string name="duration_min">%1$d мин</string>
+    <string name="duration_sec">%1$d с</string>
+    <string name="duration_hours">%1$d ч %2$d мин</string>
+    <string name="section_byedpi">Обход DPI (ByeDPI / GoodbyDPI)</string>
+    <string name="byedpi_note">ByeDPI для Android (https://github.com/dovecoteescapee/ByeDPIAndroid) поднимает локальный SOCKS5 и сам делает фрагментацию/фейные пакеты. Два VPN сразу Android не даёт, поэтому сравниваем «напрямую» и «через ByeDPI» и по разнице говорим, что у тебя: DPI или блокировка по IP.</string>
+    <string name="hint_socks">SOCKS5 ByeDPI, напр. 127.0.0.1:1080</string>
+    <string name="switch_via_byedpi">Гонять базовые замеры через ByeDPI</string>
+    <string name="btn_dpi_compare">Сравнить: напрямую vs через ByeDPI</string>
+    <string name="byedpi_running">ByeDPI в режиме VPN + наш туннель одновременно не встанут: или подбор через SOCKS5, или только WARP</string>
+    <string name="byedpi_not_installed">ByeDPI не найден среди установленных приложений (или у него нет режима прокси)</string>
+    <string name="byedpi_compare_running">Сравниваем…</string>
+    <string name="byedpi_saved">Полный разбор сохранён: %1$s</string>
+    <string name="dpi_outcome_open_both">открыто и напрямую, и через обход — блокировки нет</string>
+    <string name="dpi_outcome_dpi">лежит напрямую, открывается через ByeDPI → это DPI, лечится настройками обхода (frag/split/fake)</string>
+    <string name="dpi_outcome_proxy_bad">напрямую работает, через ByeDPI нет → мешают его настройки, попробуй отключить часть флагов</string>
+    <string name="dpi_outcome_ip">не открывается ни так, ни так → блокировка по IP/маршруту, нужен подобранный endpoint WARP</string>
+    <string name="dpi_outcome_no_proxy">SOCKS5 не отвечает → включи ByeDPI в режим прокси (127.0.0.1:1080)</string>
+</resources>
