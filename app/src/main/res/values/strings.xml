@@ -194,4 +194,20 @@
     <string name="backup_restore_message">Текущие настройки будут заменены содержимым %1$s. Туннель после этого лучше переподключить.</string>
     <string name="backup_restore_ok">Восстановить</string>
     <string name="backup_share_title">Бекап WarpScout</string>
+    <string name="btn_save_apply">Сохранить и применить</string>
+    <string name="btn_save_send">Сохранить и отправить</string>
+    <string name="btn_save_plain">Сохранить</string>
+    <string name="banner_unsaved">Есть несохранённые изменения — нажми «Сохранить и применить»</string>
+    <string name="banner_applying">Применяю настройки — переподключаю туннель (до 3 попыток)…</string>
+    <string name="banner_saved_only">Сохранено. Туннель не перезапускался — применится при следующем подключении.</string>
+    <string name="banner_sent">Конфиг сохранён и готов к отправке: %1$s</string>
+    <string name="banner_connect_ok">Туннель поднят: %1$s</string>
+    <string name="banner_connect_failed">Не удалось подключиться (3 попытки): %1$s</string>
+    <string name="banner_stopped">Туннель отключён</string>
+    <string name="routes_spinner_label">Что туннелировать (попадает в AllowedIPs конфига)</string>
+    <string name="routes_dropdown_hint">Выбранный режим превращается в строку AllowedIPs в конфиге: «весь трафик» → 0.0.0.0/0, ::/0; «список обхода» → готовый набор CIDR; «свой список» → ровно то, что вписано ниже. Именно эти CIDR и увидит любой клиент, которому вы отправите конфиг.</string>
+    <string name="route_all_dd">Весь трафик — 0.0.0.0/0, ::/0</string>
+    <string name="route_preset_dd">Пресет — только список обхода (готовые CIDR)</string>
+    <string name="route_lists_dd">Списки — CIDR из скачанных списков</string>
+    <string name="route_manual_dd">Вручную — мой список CIDR ниже</string>
 </resources>

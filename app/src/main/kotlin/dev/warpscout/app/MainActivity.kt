@@ -56,8 +56,8 @@ class MainActivity : AppCompatActivity() {
     private val listChecks = LinkedHashMap<String, MaterialCheckBox>()
     private val tunnelHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
-    /** Сколько точек входа пробуем за одно подключение: 8 попыток по 5 с — предел ожидания 40 с. */
-    private val MAX_ENDPOINT_TRIES = 8
+    /** Три попытки на подключение — по просьбе: если три точки не поднялись, показываем ошибку. */
+    private val MAX_ENDPOINT_TRIES = 3
     private val lists by lazy { AllowListsRepo(this) }
     private var lastConfigFile: File? = null
 
@@ -141,7 +141,10 @@ class MainActivity : AppCompatActivity() {
         )
         suppressExportListener = true
         binding.exportGroup.check(exportButtonId(prefs.confTarget))
-        binding.routeGroup.check(routeButtonId(prefs.routesMode))
+        binding.spinnerRoutes.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item, routeLabels()
+        )
+        binding.spinnerRoutes.setSelection(prefs.routesMode.coerceIn(0, 3))
         suppressExportListener = false
         binding.editServer.setText(prefs.pinnedEndpoint)
         binding.editAllowedIps.setText(prefs.allowedIpsText)
@@ -172,7 +175,7 @@ class MainActivity : AppCompatActivity() {
         prefs.tuneViaByedpi = binding.switchViaByedpi.isChecked
         prefs.autoApply = binding.checkAutoApply.isChecked
         prefs.confTarget = confTargetOf(binding.exportGroup.checkedButtonId)
-        prefs.routesMode = routesModeOf(binding.routeGroup.checkedButtonId)
+        prefs.routesMode = binding.spinnerRoutes.selectedItemPosition.coerceIn(0, 3)
         prefs.pinnedEndpoint = binding.editServer.text?.toString()?.trim().orEmpty()
         prefs.allowedIpsText = binding.editAllowedIps.text?.toString()?.trim()?.replace("\n", " ").orEmpty()
         prefs.checkByLists = binding.checkListChecks.isChecked
@@ -237,11 +240,11 @@ class MainActivity : AppCompatActivity() {
     private fun setupTabs(initial: Int) {
         pages = listOf(
             binding.pageStart, binding.pageScan, binding.pageConfig,
-            binding.pageTunnel, binding.pageApps, binding.pageDpi, binding.pageLog
+            binding.pageApps, binding.pageDpi, binding.pageLog
         )
         val titles = listOf(
             R.string.tab_start, R.string.tab_scan, R.string.tab_config,
-            R.string.tab_tunnel, R.string.tab_apps, R.string.tab_dpi, R.string.tab_log
+            R.string.tab_apps, R.string.tab_dpi, R.string.tab_log
         )
         binding.tabs.removeAllTabs()
         titles.forEach { binding.tabs.addTab(binding.tabs.newTab().setText(it)) }
@@ -294,7 +297,7 @@ class MainActivity : AppCompatActivity() {
             if (!isChecked) return@addOnButtonCheckedListener
             prefs.appsMode = appsModeOf(checkedId)
             updateAppsState()
-            scheduleSettingsReconnect("режим туннелирования приложений")
+            markSettingsDirty("режим туннелирования приложений")
         }
         binding.checkAppsSystem.setOnCheckedChangeListener { _, _ -> rebuildAppsList() }
         binding.editAppSearch.doAfterTextChanged { rebuildAppsList() }
@@ -387,7 +390,7 @@ class MainActivity : AppCompatActivity() {
         updateAppsState()
         // Список приложений в туннеле — часть конфигурации VpnService: применяется только при
         // установлении туннеля. Поэтому при поднятом туннеле ставим переподключение в очередь.
-        scheduleSettingsReconnect("приложения в туннеле")
+        markSettingsDirty("приложения в туннеле")
     }
 
     private fun labelOfPackage(pkg: String): String =
@@ -576,23 +579,26 @@ class MainActivity : AppCompatActivity() {
             refreshRoutesState()
         }
 
-        binding.routeGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
-            if (!isChecked || suppressExportListener) return@addOnButtonCheckedListener
-            prefs.routesMode = routesModeOf(checkedId)
-            refreshRoutesState()
-            scheduleSettingsReconnect("режим маршрутов")
+        binding.spinnerRoutes.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                prefs.routesMode = position.coerceIn(0, 3)
+                refreshRoutesState()
+                markSettingsDirty("режим маршрутов")
+            }
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
 
         // Всё, что попадает в VpnService.Builder, меняется только переустановлением туннеля —
         // поэтому правки настроек при поднятом туннеле ставят переподключение в очередь.
         binding.switchIpv6.setOnCheckedChangeListener { _, isChecked ->
             prefs.enableIpv6 = isChecked
-            scheduleSettingsReconnect("IPv6")
+            markSettingsDirty("IPv6")
         }
         binding.dnsSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
                 prefs.dnsIndex = position
-                scheduleSettingsReconnect("DNS")
+                markSettingsDirty("DNS")
             }
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
@@ -600,20 +606,28 @@ class MainActivity : AppCompatActivity() {
         binding.editMtu.doAfterTextChanged { text ->
             text?.toString()?.toIntOrNull()?.takeIf { it in 576..1420 }?.let {
                 prefs.mtu = it
-                scheduleSettingsReconnect("MTU")
+                markSettingsDirty("MTU")
             }
         }
         binding.editKeepalive.doAfterTextChanged { text ->
             text?.toString()?.toIntOrNull()?.let {
                 prefs.keepalive = it
-                scheduleSettingsReconnect("keepalive")
+                markSettingsDirty("keepalive")
             }
         }
         binding.checkListChecks.setOnCheckedChangeListener { _, isChecked ->
             prefs.checkByLists = isChecked
             refreshRoutesState()
-            scheduleSettingsReconnect("списки маршрутов")
+            markSettingsDirty("списки маршрутов")
         }
+
+        // «Сохранить» на каждой вкладке, где что-то меняется: применяем и только потом переподключаем.
+        binding.btnSaveAndApply.setOnClickListener { saveAndApply("конфиг") }
+        binding.btnSaveAndSend.setOnClickListener { saveAndSend() }
+        binding.btnSaveScan.setOnClickListener { saveAndApply("скан") }
+        binding.btnSaveApps.setOnClickListener { saveAndApply("приложения") }
+        binding.btnSaveDpi.setOnClickListener { saveAndApply("профили шума") }
+        binding.cardBanner.setOnClickListener { hideBanner() }
 
         binding.btnPickServer.setOnClickListener { pickServerFromReport() }
 
@@ -1043,21 +1057,14 @@ class MainActivity : AppCompatActivity() {
         else -> 0
     }
 
-    private fun routeButtonId(mode: Int): Int = when (mode) {
-        1 -> R.id.btnRoutePreset
-        2 -> R.id.btnRouteLists
-        3 -> R.id.btnRouteManual
-        else -> R.id.btnRouteAll
-    }
+    /** Подписи выпадающего списка режимов маршрутов (порядок = значение Prefs.routesMode). */
+    private fun routeLabels(): List<String> = listOf(
+        getString(R.string.route_all_dd),
+        getString(R.string.route_preset_dd),
+        getString(R.string.route_lists_dd),
+        getString(R.string.route_manual_dd)
+    )
 
-    private fun routesModeOf(buttonId: Int): Int = when (buttonId) {
-        R.id.btnRoutePreset -> 1
-        R.id.btnRouteLists -> 2
-        R.id.btnRouteManual -> 3
-        else -> 0
-    }
-
-    /** Чекбоксы категорий allow-domains: слева — что туннелируем, справа — что не трогаем. */
     private fun buildListsChecks() {
         binding.listsBlockBox.removeAllViews()
         binding.listsDirectBox.removeAllViews()
@@ -1127,7 +1134,7 @@ class MainActivity : AppCompatActivity() {
                 result.onSuccess { r ->
                     val summary = lists.savePlan(prefs, r.plan)
                     binding.editAllowedIps.setText(r.plan.allowedIps.replace(", ", ",\n"))
-                    binding.routeGroup.check(R.id.btnRouteLists)
+                    binding.spinnerRoutes.setSelection(2)
                     toast(getString(R.string.routes_built, summary))
                     if (r.missing().isNotEmpty()) {
                         sink().log("не скачано: ${r.missing().joinToString(", ") { it.id }} — нажми «Скачать списки»")
@@ -1193,13 +1200,14 @@ class MainActivity : AppCompatActivity() {
      */
     private fun toggleTunnel() {
         if (!tunnel.supported) {
-            toast(getString(R.string.tunnel_unavailable))
+            banner(getString(R.string.tunnel_unavailable), error = true)
             return
         }
         if (tunnel.isUp) {
             tunnel.stop()
             tunnelStartedAtLocal = 0L
             binding.btnTunnel.setText(R.string.btn_tunnel_on)
+            banner(getString(R.string.banner_stopped))
             return
         }
         val cfg = currentConfig() ?: return noConfig()
@@ -1210,7 +1218,7 @@ class MainActivity : AppCompatActivity() {
     private fun connectWithFallback(base: WarpConfig) {
         if (connecting) {
             // Молча игнорировать нельзя: со стороны это выглядит как «кнопка не работает».
-            toast(getString(R.string.tunnel_connecting_busy))
+            banner(getString(R.string.tunnel_connecting_busy))
             return
         }
         val candidates = tunnelCandidates(base)
@@ -1220,6 +1228,12 @@ class MainActivity : AppCompatActivity() {
         binding.btnTunnel.isEnabled = false
         startTunnelPolling()
         Thread {
+            // Если туннель уже поднят (переподключение по «Сохранить и применить»), сначала гасим
+            // текущую сессию: иначе сервис ответит «уже поднимается» и попытки пройдут впустую.
+            if (tunnel.isUp) {
+                runCatching { tunnel.stop() }
+                runCatching { tunnel.waitStopped(3000) }
+            }
             var winner: WarpConfig? = null
             val failures = StringBuilder()
             // Внимание: здесь НЕЛЬЗЯ проверять cancelled — это флаг отмены скана. Он остаётся true
@@ -1261,7 +1275,7 @@ class MainActivity : AppCompatActivity() {
                     tunnelStartedAtLocal = System.currentTimeMillis()
                     exitRegion = ""
                     updateEndpointNote()
-                    toast(getString(R.string.tunnel_up, used.endpoint.render()))
+                    banner(getString(R.string.banner_connect_ok, used.endpoint.render()))
                     // Бекап «на всякий случай»: после каждого удачного подключения, молча.
                     runCatching { Backup.save(this, "подключение ${used.endpoint.render()}") }
                     probeExitRegion()
@@ -1272,40 +1286,104 @@ class MainActivity : AppCompatActivity() {
                             " · нажми «Другая точка входа» или сгенерируй новый конфиг"
                     )
                     updateEndpointNote()
-                    toast(getString(R.string.tunnel_failed, failures.toString().take(180)))
+                    // «Не получилось» — на первой вкладке, а не всплывающей плашкой поверх любой вкладки.
+                    banner(getString(R.string.banner_connect_failed, failures.toString().take(200)), error = true)
+                    showPage(TAB_START)
                 }
             }
         }.apply { isDaemon = true; name = "warpscout-connect" }.start()
     }
 
     /**
-     * Настройки туннелирования применяются в момент `VpnService.Builder.establish()` — на лету их
-     * менять нельзя (это ограничение Android, а не наше). Поэтому любая правка «что идёт в туннель»
-     * при поднятом туннеле ставит переподключение в очередь: с задержкой ~1 с, чтобы отметить
-     * несколько приложений подряд = одно переподключение, а не пять.
-     *
-     * Приложения при этом перезапускать не нужно: маршрутизация по uid применяется сетевым стеком
-     * при подключении к туннелю, и уже открытые приложения просто начнут ходить по новому правил.
+     * Правка настроек больше не переподключает туннель сама: сначала пользователь нажимает
+     * «Сохранить и применить» на соответствующей вкладке. Здесь только напоминание об этом.
      */
-    private fun scheduleSettingsReconnect(why: String) {
-        if (suppressSettingsReconnect || !tunnel.supported || !tunnel.isUp) return
-        settingsReconnect?.let { tunnelHandler.removeCallbacks(it) }
-        val task = Runnable {
-            settingsReconnect = null
-            if (!tunnel.isUp) return@Runnable
-            TunnelDebug.stage("настройки изменены ($why) — переподключаю туннель, чтобы применить")
-            toast(getString(R.string.tunnel_reconnect_settings))
-            val cfg = currentConfig() ?: return@Runnable
-            tunnel.stop()
-            runCatching { tunnel.waitStopped(2500) }
-            tunnelStartedAtLocal = 0L
-            exitRegion = ""
-            binding.btnTunnel.setText(R.string.btn_tunnel_on)
-            // Небольшая пауза: система отпускает старый tun не мгновенно.
-            tunnelHandler.postDelayed({ connectWithFallback(cfg) }, 500L)
+    private fun markSettingsDirty(why: String) {
+        if (suppressSettingsReconnect) return
+        TunnelDebug.stage("изменено: $why (не применено)")
+        banner(getString(R.string.banner_unsaved))
+    }
+
+    /**
+     * «Сохранить и применить»: сохраняем экран в Prefs и — если туннель поднят — переподключаем
+     * его с новыми настройками (до трёх попыток). Если туннель не поднят, применять нечего:
+     * настройки вступят в силу при следующем подключении.
+     */
+    private fun saveAndApply(why: String) {
+        persistUi()
+        updateServerNote()
+        refreshRoutesState()
+        binding.textConfig.text = runCatching { currentConfig()?.let { currentConfigText(it) } }.getOrNull().orEmpty()
+        if (tunnel.supported && tunnel.isUp) {
+            val cfg = currentConfig()
+            if (cfg == null) {
+                banner(getString(R.string.banner_saved_only))
+                return
+            }
+            banner(getString(R.string.banner_applying))
+            Thread {
+                runCatching { tunnel.stop() }
+                runCatching { tunnel.waitStopped(3000) }
+                tunnelStartedAtLocal = 0L
+                exitRegion = ""
+                runOnUiThread {
+                    binding.btnTunnel.setText(R.string.btn_tunnel_on)
+                    connectWithFallback(cfg)
+                }
+            }.apply { isDaemon = true; name = "warpscout-apply" }.start()
+        } else {
+            banner(getString(R.string.banner_saved_only))
         }
-        settingsReconnect = task
-        tunnelHandler.postDelayed(task, 900L)
+    }
+
+    /**
+     * «Сохранить и отправить»: конфиг собирается с текущими настройками (включая AllowedIPs —
+     * то есть CIDR вписаны жёстко), сохраняется в «Загрузки» и отдаётся в «Поделиться». Туннель
+     * при этом не трогаем: это режим «сделать конфиг для других / для другого клиента».
+     */
+    private fun saveAndSend() {
+        persistUi()
+        val cfg = currentConfig()
+        if (cfg == null) {
+            noConfig()
+            return
+        }
+        val text = currentConfigText(cfg)
+        val name = runCatching { ConfigComposer.fileName(cfg, prefs) }.getOrDefault("warpscout.conf")
+        val path = runCatching { ConfigFiles.saveToDownloads(this, cfg, text, name) }.getOrNull()
+        binding.textConfig.text = text
+        if (path == null) {
+            banner(getString(R.string.err_no_config), error = true)
+            return
+        }
+        lastConfigFile = runCatching { File(ConfigFiles.dir(this, "configs"), name).takeIf { it.exists() } }
+            .getOrNull() ?: lastConfigFile
+        banner(getString(R.string.banner_sent, path))
+        val file = lastConfigFile
+        if (file != null) {
+            runCatching {
+                startActivity(Intent.createChooser(ConfigFiles.shareIntent(this, file), getString(R.string.share_title)))
+            }
+        }
+    }
+
+    /** Сообщение внизу первой вкладки вместо всплывающей плашки. Ошибки висят до следующего действия. */
+    private fun banner(text: String, error: Boolean = false) {
+        if (!::binding.isInitialized) return
+        binding.textBanner.text = text
+        binding.textBanner.setTextColor(if (error) 0xFFB3261E.toInt() else 0xFF1B5E20.toInt())
+        binding.cardBanner.visibility = View.VISIBLE
+        tunnelHandler.removeCallbacks(bannerHide)
+        if (!error) tunnelHandler.postDelayed(bannerHide, 8000L)
+    }
+
+    private val bannerHide = Runnable {
+        if (::binding.isInitialized) binding.cardBanner.visibility = View.GONE
+    }
+
+    private fun hideBanner() {
+        tunnelHandler.removeCallbacks(bannerHide)
+        if (::binding.isInitialized) binding.cardBanner.visibility = View.GONE
     }
 
     /** Очередь точек входа: своя, доказанно рабочая, из последнего скана, запасные anycast. */
@@ -1314,7 +1392,8 @@ class MainActivity : AppCompatActivity() {
         val seen = HashSet<String>()
         fun add(cfg: WarpConfig?) {
             if (cfg == null || out.size >= MAX_ENDPOINT_TRIES) return
-            if (seen.add(cfg.endpoint.render())) out += cfg
+            val key = cfg.endpoint.render() + "|" + cfg.junk.name + "|" + cfg.mtu
+            if (seen.add(key)) out += cfg
         }
         // Сначала ровно то, что работало в прошлый раз (включая шум и MTU), потом — собранное сейчас.
         add(savedConfig())
