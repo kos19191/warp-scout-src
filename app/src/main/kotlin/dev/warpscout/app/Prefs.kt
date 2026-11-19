@@ -78,6 +78,11 @@ class Prefs(private val context: Context) {
         get() = sp.getBoolean("schedule", false)
         set(v) = sp.edit().putBoolean("schedule", v).apply()
 
+    /** С какой пары «адрес:порт» начинать перебор: ротация между попытками подключения. */
+    var endpointCursor: Int
+        get() = sp.getInt("endpointCursor", 0)
+        set(v) = sp.edit().putInt("endpointCursor", v).apply()
+
     /** Второй выход: свой сервер (WireGuard/AmneziaWG) для выбранных подсетей. */
     var secondExitOn: Boolean
         get() = sp.getBoolean("secondExitOn", false)

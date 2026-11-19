@@ -57,8 +57,11 @@ class MainActivity : AppCompatActivity() {
     private val listChecks = LinkedHashMap<String, MaterialCheckBox>()
     private val tunnelHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
-    /** Три попытки на подключение — по просьбе: если три точки не поднялись, показываем ошибку. */
-    private val MAX_ENDPOINT_TRIES = 3
+    /**
+     * Пять попыток: три подряд по просьбе было слишком мало — сеть режет несколько адресов, и
+     * ошибка появлялась, хотя рабочая точка ещё не проверена. Каждая попытка — другая пара адрес:порт.
+     */
+    private val MAX_ENDPOINT_TRIES = 5
     private val lists by lazy { AllowListsRepo(this) }
     private var lastConfigFile: File? = null
 
@@ -81,6 +84,13 @@ class MainActivity : AppCompatActivity() {
     /** Слежение за сетью: при её смене старый UDP-сокет туннеля становится мёртвым. */
     private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
     private var networkLost = false
+    private var lastNetReconnectAt = 0L
+
+    private fun isVpn(network: android.net.Network): Boolean = runCatching {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return false
+        cm.getNetworkCapabilities(network)
+            ?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true
+    }.getOrDefault(false)
 
     /** Пока true — переподключение по настройкам не затевается (идёт заполнение экрана из Prefs). */
     private var suppressSettingsReconnect = false
@@ -573,6 +583,16 @@ class MainActivity : AppCompatActivity() {
     private fun setupButtons() {
         binding.btnRun.setOnClickListener {
             persistUi()
+            // Важно: при поднятом туннеле замеры идут через сам туннель (и через WARP), поэтому
+            // «живых 0 из 120» — это не сеть, а самообман. Перед подбором туннель гасим.
+            if (tunnel.supported && tunnel.isUp) {
+                banner(getString(R.string.banner_scan_stops_tunnel))
+                tunnel.stop()
+                runCatching { tunnel.waitStopped(3000) }
+                tunnelStartedAtLocal = 0L
+                exitRegion = ""
+                binding.btnTunnel.setText(R.string.btn_tunnel_on)
+            }
             runStartedAt = System.currentTimeMillis()
             endpointBeforeRun = prefs.lastTunedEndpoint
             log.setLength(0)
@@ -984,13 +1004,21 @@ class MainActivity : AppCompatActivity() {
         val cm = runCatching { getSystemService(android.net.ConnectivityManager::class.java) }.getOrNull() ?: return
         val callback = object : android.net.ConnectivityManager.NetworkCallback() {
             override fun onLost(network: android.net.Network) {
+                // Наш собственный туннель — это тоже «сеть». Его исчезновение не повод
+                // переподключаться: так мы бы получили бесконечный цикл «стоп → реконнект».
+                if (isVpn(network)) return
                 networkLost = true
             }
 
             override fun onAvailable(network: android.net.Network) {
+                if (isVpn(network)) return
                 if (!networkLost) return
                 networkLost = false
                 if (!tunnel.supported || !tunnel.isUp) return
+                // Не чаще раза в 20 секунд: на границе сетей система кидает несколько событий.
+                val now = System.currentTimeMillis()
+                if (now - lastNetReconnectAt < 20_000L) return
+                lastNetReconnectAt = now
                 val cfg = currentConfig() ?: return
                 banner(getString(R.string.banner_network_changed))
                 TunnelDebug.stage("сеть сменилась — переподключаю туннель")
@@ -1385,6 +1413,7 @@ class MainActivity : AppCompatActivity() {
                 updateTunnelButton()
                 updateTunnelDiagnostics()
                 if (used != null) {
+                    prefs.endpointCursor = 0
                     prefs.lastConfigText = runCatching { WgConf.render(used) }.getOrDefault("")
                     prefs.lastEndpoint = used.endpoint.render()
                     tunnelStartedAtLocal = System.currentTimeMillis()
@@ -1398,11 +1427,15 @@ class MainActivity : AppCompatActivity() {
                     TunnelDebug.error(
                         "ни одна из ${candidates.size} точек не поднялась",
                         failures.toString().take(300) +
-                            " · нажми «Другая точка входа» или сгенерируй новый конфиг"
+                            " · " + getString(R.string.tunnel_failed_hint)
                     )
                     updateEndpointNote()
                     // «Не получилось» — на первой вкладке, а не всплывающей плашкой поверх любой вкладки.
-                    banner(getString(R.string.banner_connect_failed, failures.toString().take(200)), error = true)
+                    prefs.endpointCursor = prefs.endpointCursor + 1
+                    banner(
+                        getString(R.string.banner_connect_failed, candidates.size, failures.toString().take(200)),
+                        error = true
+                    )
                     showPage(TAB_START)
                 }
             }
@@ -1501,7 +1534,13 @@ class MainActivity : AppCompatActivity() {
         if (::binding.isInitialized) binding.cardBanner.visibility = View.GONE
     }
 
-    /** Очередь точек входа: своя, доказанно рабочая, из последнего скана, запасные anycast. */
+    /**
+     * Очередь точек входа. Главное здесь — **разнообразие**: если сеть не пропускает handshake на
+     * одну пару «адрес:порт», три попытки на почти одинаковых точках бессмысленны (именно так и
+     * вышло в 1.8.0). Поэтому: сохранённая точка, затем разные anycast-адреса на разных портах
+     * (с ротацией от попытки к попытке), затем два «чистых» варианта — без мусорных пакетов и без
+     * IPv6-адреса на интерфейсе.
+     */
     private fun tunnelCandidates(base: WarpConfig): List<WarpConfig> {
         val out = mutableListOf<WarpConfig>()
         val seen = HashSet<String>()
@@ -1510,18 +1549,24 @@ class MainActivity : AppCompatActivity() {
             val key = cfg.endpoint.render() + "|" + cfg.junk.name + "|" + cfg.mtu
             if (seen.add(key)) out += cfg
         }
-        // Сначала ровно то, что работало в прошлый раз (включая шум и MTU), потом — собранное сейчас.
+        // 1) то, что работало в прошлый раз
         add(savedConfig())
         add(base)
-        endpointOf(prefs.lastEndpoint)?.let { add(base.copy(endpoint = it)) }
-        engine.last?.report?.candidates?.sortedByDescending { it.score }?.take(2)?.forEach { candidate ->
-            add(runCatching { ConfigComposer.applyPrefs(candidate.config, prefs, prefs.junkPool) }.getOrNull())
+        // 2) разные адреса и порты, с ротацией: следующая попытка начнётся со следующего
+        val dials = listOf(
+            "162.159.192.1" to 2408,
+            "188.114.97.1" to 500,
+            "162.159.195.1" to 1701,
+            "188.114.99.1" to 2408,
+            "162.159.192.9" to 854,
+            "188.114.96.1" to 4500
+        )
+        val start = prefs.endpointCursor.mod(dials.size)
+        for (i in dials.indices) {
+            val (host, port) = dials[(start + i) % dials.size]
+            add(runCatching { base.copy(endpoint = dev.warpscout.core.model.Endpoint(host, port)) }.getOrNull())
         }
-        // Запасные точки: другой адрес и другой порт — переживают блокировку конкретной пары.
-        add(runCatching { base.copy(endpoint = dev.warpscout.core.model.Endpoint("162.159.192.1", 2408)) }.getOrNull())
-        add(runCatching { base.copy(endpoint = dev.warpscout.core.model.Endpoint("188.114.97.1", 500)) }.getOrNull())
-        // Последние две попытки — «чистые»: на сетях с DPI именно мусорные пакеты бывают причиной
-        // отказа, поэтому пробуем обычный WireGuard без шума и без IPv6-адреса на интерфейсе.
+        // 3) «чистые» варианты: на сетях с DPI отказ чаще всего даёт именно мусор
         add(runCatching { base.copy(junk = JunkLibrary.none(), mtu = 1280) }.getOrNull())
         add(runCatching { base.copy(enableIpv6Address = false, mtu = 1280) }.getOrNull())
         return out

@@ -202,7 +202,7 @@
     <string name="banner_saved_only">Сохранено. Туннель не перезапускался — применится при следующем подключении.</string>
     <string name="banner_sent">Конфиг сохранён и готов к отправке: %1$s</string>
     <string name="banner_connect_ok">Туннель поднят: %1$s</string>
-    <string name="banner_connect_failed">Не удалось подключиться (3 попытки): %1$s</string>
+    <string name="banner_connect_failed">Не удалось подключиться (%1$d попыток): %2$s</string>
     <string name="banner_stopped">Туннель отключён</string>
     <string name="routes_spinner_label">Что туннелировать (попадает в AllowedIPs конфига)</string>
     <string name="routes_dropdown_hint">Выбранный режим превращается в строку AllowedIPs в конфиге: «весь трафик» → 0.0.0.0/0, ::/0; «список обхода» → готовый набор CIDR; «свой список» → ровно то, что вписано ниже. Именно эти CIDR и увидит любой клиент, которому вы отправите конфиг.</string>
@@ -224,4 +224,6 @@
     <string name="second_no_domains">Впиши домены — тогда будет что разворачивать</string>
     <string name="second_apply_note">Применится по «Сохранить и применить»: туннель переподключится, и подсети пойдут через второй сервер.</string>
     <string name="banner_network_changed">Сеть сменилась — переподключаю туннель</string>
+    <string name="banner_scan_stops_tunnel">Остановил туннель для подбора: из-под туннеля замеры врут (идут через WARP)</string>
+    <string name="tunnel_failed_hint">Ни одна точка не ответила на handshake. Это сетевая блокировка UDP к WARP: попробуйте другой профиль шума, порт, включить или выключить IPv6 и Wi-Fi/мобильные данные по очереди.</string>
 </resources>

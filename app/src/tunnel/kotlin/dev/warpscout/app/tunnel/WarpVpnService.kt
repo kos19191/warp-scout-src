@@ -101,6 +101,15 @@ class WarpVpnService : VpnService() {
     private fun startVpn(text: String, startId: Int) {
         val myEpoch = epoch.incrementAndGet()
         fun alive() = myEpoch == epoch.get() && !stopped.get()
+        // Выход из устаревшей попытки обязан снять свои флаги, иначе сервис навсегда останется
+        // «занятым»: следующий старт получит «уже поднимается» и не сделает ничего. Именно это
+        // выглядело как «немного работает, потом больше не подключается».
+        fun abandon() {
+            if (myEpoch == epoch.get() && !stopped.get()) {
+                starting = false
+                TunnelState.busy = false
+            }
+        }
         starting = true
         // Экземпляр сервиса переиспользуется: без сброса флага «остановлен» второй подъём после
         // «Отключить» жил бы с чужим состоянием (watchdog и статусы считали бы себя остановленными).
@@ -143,6 +152,7 @@ class WarpVpnService : VpnService() {
         if (!alive()) {
             // Пока поднимались, пользователь нажал «Отключить» (или пошла следующая попытка).
             runCatching { socket.close() }
+            abandon()
             return
         }
 
@@ -180,6 +190,7 @@ class WarpVpnService : VpnService() {
             // tun уже выдан, но эта попытка устарела: закрываем, иначе интерфейс останется чужим.
             runCatching { pfd.close() }
             runCatching { socket.close() }
+            abandon()
             return
         }
         tun = pfd
