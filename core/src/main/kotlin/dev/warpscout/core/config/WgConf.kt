@@ -181,25 +181,39 @@ object WgConf {
         return Endpoint(host, port, family)
     }
 
-    /** Сборка текста конфига (то, что кладётся в Amnezia). Порядок ключей — как у генератора. */
-    fun render(cfg: WarpConfig): String = buildString {
-        for (c in cfg.comments) append("# ").append(c).append('\n')
-        append("[Interface]\n")
-        append("PrivateKey = ").append(cfg.account.privateB64).append('\n')
-        val address = buildList {
-            add(cfg.account.ipv4)
-            if (cfg.enableIpv6Address && cfg.account.ipv6 != null) add(cfg.account.ipv6!!)
-        }.joinToString(", ")
-        append("Address = ").append(address).append('\n')
-        if (cfg.dns.isNotEmpty()) append("DNS = ").append(cfg.dns.joinToString(", ")).append('\n')
-        append("MTU = ").append(cfg.mtu).append('\n')
-        append(cfg.junk.awg.renderInterfaceLines().joinToString("\n")).append('\n')
-        if (cfg.junk.i1.isNotEmpty()) append("I1 = ").append(renderJunk(cfg.junk.i1)).append('\n')
-        if (cfg.junk.i2.isNotEmpty()) append("I2 = ").append(renderJunk(cfg.junk.i2)).append('\n')
-        append("\n[Peer]\n")
-        append("PublicKey = ").append(cfg.account.peerPublicB64).append('\n')
-        append("AllowedIPs = ").append(cfg.allowedIps).append('\n')
-        append("Endpoint = ").append(cfg.endpoint.render()).append('\n')
-        cfg.persistentKeepalive?.let { append("PersistentKeepalive = ").append(it).append('\n') }
+    /**
+     * Сборка текста конфига. Порядок ключей — как у генератора WARP.
+     *
+     * [target] решает, писать ли AWG-поля: для [ConfigTarget.WIREGUARD] конфиг остаётся чистым
+     * WireGuard (его понимают сток-клиент и роутеры), для [ConfigTarget.AMNEZIAWG] добавляются
+     * `Jc/Jmin/Jmax/H1..H4/S1..S4` и шаблоны `I1/I2`.
+     */
+    fun render(cfg: WarpConfig, target: ConfigTarget = ConfigTarget.AMNEZIAWG): String {
+        require(!target.yaml) { "YAML-таргет рендерится не здесь: см. ConfigExport.clashYaml()" }
+        val withJunk = target.supportsJunk
+        return buildString {
+            for (c in cfg.comments) append("# ").append(c).append('\n')
+            if (!withJunk) append("# формат: WireGuard (без AmneziaWG-полей)\n")
+            append("[Interface]\n")
+            append("PrivateKey = ").append(cfg.account.privateB64).append('\n')
+            val address = buildList {
+                add(cfg.account.ipv4)
+                if (cfg.enableIpv6Address && cfg.account.ipv6 != null) add(cfg.account.ipv6!!)
+            }.joinToString(", ")
+            append("Address = ").append(address).append('\n')
+            if (cfg.dns.isNotEmpty()) append("DNS = ").append(cfg.dns.joinToString(", ")).append('\n')
+            append("MTU = ").append(cfg.mtu).append('\n')
+            if (withJunk) {
+                append(cfg.junk.awg.renderInterfaceLines().joinToString("\n")).append('\n')
+                if (cfg.junk.i1.isNotEmpty()) append("I1 = ").append(renderJunk(cfg.junk.i1)).append('\n')
+                if (cfg.junk.i2.isNotEmpty()) append("I2 = ").append(renderJunk(cfg.junk.i2)).append('\n')
+            }
+            append("\n[Peer]\n")
+            append("PublicKey = ").append(cfg.account.peerPublicB64).append('\n')
+            append("AllowedIPs = ").append(cfg.allowedIps).append('\n')
+            append("Endpoint = ").append(cfg.endpoint.render()).append('\n')
+            cfg.persistentKeepalive?.let { append("PersistentKeepalive = ").append(it).append('\n') }
+        }
     }
+
 }

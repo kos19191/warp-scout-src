@@ -20,8 +20,10 @@ object Presets {
     )
 
     /**
-     * Домены, по которым строится split-tunnel (AllowedIPs). Резолвим их через DoH в момент генерации —
-     * так список маршрутов не протухает, в отличие от «вечных» CSV с IP.
+     * Домены, по которым строится split-tunnel (AllowedIPs).
+     *
+     * @deprecated набор «на глазок»; актуальные домены и подсети берутся из снапшота allow-domains
+     * ([dev.warpscout.core.net.RuleData], см. [ResourceChecks] и [SplitTunnel]).
      */
     val SITE_DOMAINS: Map<String, List<String>> = linkedMapOf(
         "YouTube / Google" to listOf(
@@ -43,6 +45,16 @@ object Presets {
         "ChatGPT" to listOf("chatgpt.com", "api.openai.com", "auth.openai.com", "files.oaiusercontent.com"),
         "Instagram/Meta" to listOf("instagram.com", "graph.instagram.com", "static.xx.fbcdn.net", "x.com", "api.x.com")
     )
+
+    /**
+     * Проверки доступности по выбранным категориям allow-domains.
+     *
+     * Именно это стоит использовать в UI: проверяем то, что пользователь собрался туннелировать,
+     * а не абстрактный список. Сайты, которые блокируют нас сами, помечаются `blockedByTarget`
+     * и не влияют на балл.
+     */
+    fun resourceChecks(ids: Collection<String> = RuleCatalog.DEFAULT_SELECTED): List<ResourceCheck> =
+        ResourceChecks.forCategories(ids)
 
     /** Стандартный набор проверок доступности («то, ради чего всё это»). */
     val RESOURCE_CHECKS: List<ResourceCheck> = listOf(

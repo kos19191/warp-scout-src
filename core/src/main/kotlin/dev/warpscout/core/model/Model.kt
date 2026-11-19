@@ -182,7 +182,13 @@ data class ResourceCheck(
     val mustContain: String? = null,
     val timeoutMs: Int = 8000,
     /** true — ресурс должен работать без VPN (контрольная точка: если падает и она, проблема не в блокировке). */
-    val baselineExpected: Boolean = false
+    val baselineExpected: Boolean = false,
+    /**
+     * true — ресурс блокирует НАС, а не мы его: сайты, закрытые для РФ-адресов или для дата-центров
+     * (категории BLOCKS_RU в списках allow-domains). Через WARP такой сайт часто тоже не откроется,
+     * поэтому его недоступность НЕ должна портить балл кандидата — она только справочная.
+     */
+    val blockedByTarget: Boolean = false
 )
 
 data class ResourceResult(

@@ -1,11 +1,23 @@
 package dev.warpscout.core.test
 
 import dev.warpscout.core.config.WgConf
+import dev.warpscout.core.config.ConfigTarget
+import dev.warpscout.core.net.Cidr
+import dev.warpscout.core.net.RuleData
+import dev.warpscout.core.presets.ResourceChecks
+import dev.warpscout.core.presets.RuleCatalog
+import dev.warpscout.core.presets.SplitMode
+import dev.warpscout.core.presets.SplitTunnel
+
 import dev.warpscout.core.crypto.Blake2s
 import dev.warpscout.core.crypto.Crypto
 import dev.warpscout.core.junk.QuicMask
 import dev.warpscout.core.keys.KeySource
+import dev.warpscout.core.model.AddrFamily
 import dev.warpscout.core.model.AwgParams
+import dev.warpscout.core.model.JunkProfile
+import dev.warpscout.core.model.WarpAccount
+import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.model.Endpoint
 import dev.warpscout.core.model.EndpointStats
 import dev.warpscout.core.model.JunkChunk
@@ -23,6 +35,7 @@ import dev.warpscout.core.net.PoolMode
 import dev.warpscout.core.net.TlsProber
 import dev.warpscout.core.net.WgProber
 import dev.warpscout.core.presets.RoutePresets
+import dev.warpscout.core.report.ConfigExport
 import dev.warpscout.core.report.Report
 import dev.warpscout.core.tune.Scoring
 import dev.warpscout.core.tune.Weights
@@ -59,6 +72,13 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("конфиги") {
             confRoundTrip()
             sampleFiles()
+            configTargets()
+        }
+        section("списки allow-domains и split-tunnel") {
+            cidrAlgebra()
+            ruleSnapshot()
+            splitModes()
+            resourceChecksFromRules()
         }
         section("пул endpoint'ов") {
             endpointPool()
@@ -109,6 +129,129 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
 
     private fun expect(name: String, actual: Any?, expected: Any?) =
         check(name, actual?.toString() == expected?.toString(), "факт=$actual ожидалось=$expected")
+
+    // ------------------------------------------- списки allow-domains / split-tunnel
+
+    private fun cidrAlgebra() {
+        expect("cidr: разбор и обратная запись", Cidr.parse("10.0.0.0/8")?.render(), "10.0.0.0/8")
+        expect("cidr: хвост без маски", Cidr.parse("192.168.1.7")?.render(), "192.168.1.7/32")
+        expect("cidr: хостовые биты обнуляются", Cidr.parse("10.1.2.3/16")?.render(), "10.1.0.0/16")
+        expect("cidr: ipv6", Cidr.parse("2001:db8::/32")?.render(), "2001:db8::/32")
+        expect("cidr: ipv6 с ::1", Cidr.parse("::1/128")?.render(), "::1/128")
+        expect("cidr: ipv6 dns", Cidr.parse("2606:4700:4700::1111/128")?.render(), "2606:4700:4700::1111/128")
+
+        val halves = listOfNotNull(Cidr.parse("10.0.0.0/9"), Cidr.parse("10.128.0.0/9"))
+        expect("cidr: соседи схлопываются в /8", Cidr.union(halves).singleOrNull()?.render(), "10.0.0.0/8")
+
+        val nested = listOfNotNull(Cidr.parse("10.0.0.0/8"), Cidr.parse("10.1.0.0/16"), Cidr.parse("10.2.0.0/16"))
+        expect("cidr: вложенные не размножаются", Cidr.union(nested).size, 1)
+
+        val mixed = Cidr.union(listOfNotNull(Cidr.parse("192.168.0.0/24"), Cidr.parse("192.168.1.0/24")))
+        expect("cidr: сумма адресов сохраняется", mixed.sumOf { it.size.toLong() }, 512L)
+
+        expect("cidr: мусор не парсится", Cidr.parseList("не-сеть, 1.2.3.4/33, ,").size, 0)
+        expect("cidr: список через запятую и переводы строк",
+            Cidr.parseList("10.0.0.0/8, 2001:db8::/32\n192.168.0.0/16").size, 3)
+    }
+
+    private fun ruleSnapshot() {
+        check("правила: каталог не пуст", RuleCatalog.ALL.size >= 20, "категорий=${RuleCatalog.ALL.size}")
+        check("правила: снапшот датирован", RuleCatalog.SNAPSHOT_DATE.isNotBlank(), RuleCatalog.SNAPSHOT_DATE)
+        check("правила: дефолтный набор существует",
+            RuleCatalog.DEFAULT_SELECTED.all { RuleCatalog.BY_ID.containsKey(it) },
+            RuleCatalog.DEFAULT_SELECTED.toString())
+
+        val telegram = RuleData.cidrs("04-telegram", 4)
+        check("правила: подсети Telegram загрузились", telegram.isNotEmpty(), "префиксов=${telegram.size}")
+        check("правила: все префиксы разобрались", telegram.all { it.version == 4 && it.prefix in 0..32 })
+
+        val union = RuleData.unionCidrs(4)
+        check("правила: объединение подсетей не пусто", union.size > 500, "префиксов=${union.size}")
+        check("правила: объединение уже схлопнуто", Cidr.union(union).size == union.size,
+            "повторный union меняет размер: ${Cidr.union(union).size} vs ${union.size}")
+
+        val domains = RuleData.domains("01-youtube")
+        check("правила: домены YouTube на месте", domains.any { it.contains("youtube") }, "доменов=${domains.size}")
+        check("правила: у категории с подсетями есть флаг", RuleCatalog.BY_ID["04-telegram"]?.hasSubnets == true)
+        check("правила: сводка снапшота читается", RuleData.snapshotSummary().contains("allow-domains"))
+    }
+
+    private fun splitModes() {
+        val full = SplitTunnel.build(SplitMode.FULL, ipv6 = true)
+        expect("split: режим «всё»", full.allowedIps, "0.0.0.0/0, ::/0")
+        expect("split: режим «всё» без ipv6", SplitTunnel.build(SplitMode.FULL, ipv6 = false).allowedIps, "0.0.0.0/0")
+
+        val bypass = SplitTunnel.build(SplitMode.ALL_EXCEPT_RU, ipv6 = true)
+        check("split: «кроме РФ» даёт много маршрутов", bypass.prefixesV4 >= 30, "v4=${bypass.prefixesV4}")
+        check("split: «кроме РФ» не содержит 0.0.0.0/0", !bypass.allowedIps.contains("0.0.0.0/0"))
+
+        val only = SplitTunnel.build(SplitMode.ONLY_SELECTED, selected = setOf("04-telegram", "02-discord"))
+        check("split: выбранные категории дают маршруты", only.prefixesV4 >= 10, "v4=${only.prefixesV4}")
+        check("split: DNS-маршрут добавлен", only.allowedIps.contains("1.1.1.1/32"), only.allowedIps.take(120))
+        check("split: выбранные категории без 0.0.0.0/0", !only.allowedIps.contains("0.0.0.0/0"))
+
+        val blocked = SplitTunnel.build(SplitMode.ONLY_BLOCKED_IN_RU)
+        check("split: «заблокированное в РФ» — большая таблица", blocked.total > 500, "маршрутов=${blocked.total}")
+
+        val custom = SplitTunnel.build(SplitMode.CUSTOM, custom = "10.0.0.0/8, 2001:db8::/32", includeDnsRoute = false)
+        expect("split: свой список — два маршрута", custom.total, 2)
+        val customDns = SplitTunnel.build(SplitMode.CUSTOM, custom = "10.0.0.0/8")
+        check("split: в свой список добавляется DNS-маршрут", customDns.allowedIps.contains("1.1.1.1/32"))
+
+        val junk = SplitTunnel.build(SplitMode.CUSTOM, custom = "не список")
+        expect("split: мусор в своём списке → откат на «всё»", junk.mode, SplitMode.FULL)
+        check("split: откат объяснён", junk.notes.any { it.contains("не разобрался") }, junk.notes.toString())
+
+        val empty = SplitTunnel.build(SplitMode.ONLY_SELECTED, selected = setOf("01-youtube"))
+        check("split: категория без подсетей не оставляет без туннеля",
+            empty.mode == SplitMode.FULL || empty.prefixesV4 > 0, "режим=${empty.mode}")
+    }
+
+    private fun configTargets() {
+        val jwt = JunkProfile(name = "none", i1 = emptyList())
+        val cfg = WarpConfig(
+            name = "targets",
+            account = WarpAccount(privateB64 = "cHJpdmF0ZQ==", peerPublicB64 = "cGVlcg==",
+                ipv4 = "172.16.0.2", ipv6 = null, source = "test"),
+            endpoint = Endpoint("engage.cloudflareclient.com", 2408, AddrFamily.HOSTNAME),
+            junk = jwt,
+            allowedIps = "0.0.0.0/0, ::/0",
+            dns = listOf("1.1.1.1")
+        )
+        val wg = WgConf.render(cfg, ConfigTarget.WIREGUARD)
+        val awg = WgConf.render(cfg, ConfigTarget.AMNEZIAWG)
+        check("конфиг WG: есть [Interface]/[Peer]", wg.contains("[Interface]") && wg.contains("[Peer]"))
+        check("конфиг WG: без AWG-полей", !wg.contains("Jc =") && !wg.contains("I1 =") && !wg.contains("H1 ="))
+        check("конфиг AWG: с AWG-полями", awg.contains("Jc =") && awg.contains("H1 ="))
+        check("конфиг WG: Endpoint и AllowedIPs на месте",
+            wg.contains("Endpoint = engage.cloudflareclient.com:2408") && wg.contains("AllowedIPs = 0.0.0.0/0"))
+
+        val parsed = WgConf.toWarpConfig("wg", wg)
+        check("конфиг WG: разбирается обратно", parsed != null)
+        expect("конфиг WG: ключи сохранились", parsed?.account?.privateB64, "cHJpdmF0ZQ==")
+        expect("конфиг WG: порт endpoint", parsed?.endpoint?.port, 2408)
+
+        check("таргет по имени", ConfigTarget.byName("wireguard") == ConfigTarget.WIREGUARD)
+        check("таргет по умолчанию — WireGuard", ConfigTarget.DEFAULT == ConfigTarget.WIREGUARD)
+        check("подсказка под WG упоминает WireGuard",
+            ConfigExport.handoffHint(cfg, ConfigTarget.WIREGUARD).contains("WireGuard"))
+    }
+
+    private fun resourceChecksFromRules() {
+        val ids = setOf("04-telegram", "02-discord", "15-ru-ip-blocked")
+        val checks = ResourceChecks.forCategories(ids)
+        check("проверки: контрольная точка есть", checks.any { it.baselineExpected })
+        check("проверки: по категории на выбор", checks.count { !it.baselineExpected } >= 2,
+            "всего=${checks.size}")
+        check("проверки: сайты, блокирующие нас, помечены", checks.any { it.blockedByTarget })
+        val scored = ResourceChecks.scored(checks)
+        check("проверки: в балл идут только «наши»",
+            scored.none { it.baselineExpected || it.blockedByTarget } && scored.isNotEmpty(),
+            "scored=${scored.size} из ${checks.size}")
+        check("проверки: URL собраны", checks.all { it.url.startsWith("https://") && it.url.endsWith("/") })
+        check("проверки: без инфраструктурных категорий",
+            ResourceChecks.forCategories(setOf("14-hodca")).none { !it.baselineExpected })
+    }
 
     // ------------------------------------------------------------------- crypto
 

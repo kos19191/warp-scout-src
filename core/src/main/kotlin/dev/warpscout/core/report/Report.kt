@@ -1,5 +1,6 @@
 package dev.warpscout.core.report
 
+import dev.warpscout.core.config.ConfigTarget
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.json.JsonVal
 import dev.warpscout.core.model.Candidate
@@ -46,7 +47,9 @@ object Report {
                     "ok" to JsonVal.bool(r.ok),
                     "status" to (r.status?.let { JsonVal.num(it) } ?: JsonVal.Null),
                     "error" to (r.errorClass?.let { JsonVal.str(it) } ?: JsonVal.Null),
-                    "elapsed_ms" to JsonVal.num(r.elapsedMs)
+                    "elapsed_ms" to JsonVal.num(r.elapsedMs),
+                    // true — сайт блокирует нас сам (РФ/дата-центры): его недоступность не про кандидата
+                    "blocked_by_target" to JsonVal.bool(r.check.blockedByTarget)
                 )
             }),
             "candidates" to candidates
@@ -98,7 +101,8 @@ object Report {
             appendLine("| ресурс | итог | код/ошибка | время |")
             appendLine("|---|---|---|---|")
             report.resources.forEach { r ->
-                appendLine("| ${r.check.name} | ${if (r.ok) "✅" else "⛔"} | ${r.status ?: r.errorClass ?: "—"} | ${r.elapsedMs} мс |")
+                val note = if (r.check.blockedByTarget) " · *нас блокируют*" else ""
+                appendLine("| ${r.check.name}$note | ${if (r.ok) "✅" else "⛔"} | ${r.status ?: r.errorClass ?: "—"} | ${r.elapsedMs} мс |")
             }
         }
     }
@@ -121,7 +125,8 @@ object Report {
         }.joinToString("\n")
 
         val resRows = report.resources.joinToString("\n") { r ->
-            """<tr><td class="${if (r.ok) "ok" else "bad"}">${esc(r.check.name)}</td><td>${r.status ?: esc(r.errorClass ?: "—")}</td>
+            val mark = if (r.check.blockedByTarget) " <span class=dim>(нас блокируют)</span>" else ""
+            """<tr><td class="${if (r.ok) "ok" else "bad"}">${esc(r.check.name)}$mark</td><td>${r.status ?: esc(r.errorClass ?: "—")}</td>
                <td>${r.elapsedMs} мс</td><td>${esc(r.check.url)}</td></tr>"""
         }
         val bestConf = report.best?.let { "<pre>${esc(WgConf.render(it.config))}</pre>" }
@@ -223,8 +228,21 @@ object ConfigExport {
     }
 
     /** Короткая подсказка, что делать с конфигом (показывается в UI и в CLI). */
-    fun handoffHint(cfg: WarpConfig): String = """
-        |AmneziaVPN: Настройки → Настройки протокола → включите AmneziaWG → «Добавить профиль» → «Добавить из файла» (этот .conf) → включить.
-        |Или вручную: раздел Interface, параметр Endpoint = ${cfg.endpoint.render()}, I1/I2 = профиль «${cfg.junk.name}».
-    """.trimMargin()
+    fun handoffHint(cfg: WarpConfig, target: ConfigTarget = ConfigTarget.DEFAULT): String = when (target) {
+        ConfigTarget.WIREGUARD -> """
+            |WireGuard: «Добавить туннель» → «Импорт из файла/буфера» (этот .conf).
+            |AmneziaVPN: раздел WireGuard → «Добавить из файла». Для AmneziaWG этот конфиг не подойдёт — там нужны поля I1/Jc, выберите формат AmneziaWG.
+            |Endpoint: ${cfg.endpoint.render()}
+        """.trimMargin()
+
+        ConfigTarget.AMNEZIAWG -> """
+            |AmneziaVPN: Настройки → Настройки протокола → включите AmneziaWG → «Добавить профиль» → «Добавить из файла» (этот .conf) → включить.
+            |Или вручную: раздел Interface, параметр Endpoint = ${cfg.endpoint.render()}, I1/I2 = профиль «${cfg.junk.name}».
+        """.trimMargin()
+
+        ConfigTarget.CLASH -> """
+            |Clash Meta / Stash / FlClash: добавьте блок proxies в конфиг (или импортируйте YAML целиком).
+            |Endpoint: ${cfg.endpoint.render()}, amnezia-wg-option уже внутри.
+        """.trimMargin()
+    }
 }

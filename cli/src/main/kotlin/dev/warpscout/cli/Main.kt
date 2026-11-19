@@ -1,5 +1,6 @@
 package dev.warpscout.cli
 
+import dev.warpscout.core.config.ConfigTarget
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.crypto.Crypto
 import dev.warpscout.core.junk.JunkLibrary
@@ -15,6 +16,8 @@ import dev.warpscout.core.net.NetSettings
 import dev.warpscout.core.net.PoolMode
 import dev.warpscout.core.net.WgProber
 import dev.warpscout.core.presets.Presets
+import dev.warpscout.core.presets.SplitMode
+import dev.warpscout.core.presets.SplitTunnel
 import dev.warpscout.core.report.ConfigExport
 import dev.warpscout.core.report.Report
 import dev.warpscout.core.test.SelfCheck
@@ -95,11 +98,15 @@ WARP Scout CLI — подбор доступной WARP/AmneziaWG конфигу
       --masque          добавить маска-подсети и их TLS-проверку
       --full            перебор всех 255 октетов вместо 1..10 (долго!)
       --json            только JSON-отчёт
+      --target wg|amneziawg|clash   под что компилировать конфиг (по умолчанию wg)
   scan                  только скан доступности (без генератора отчётов)
   gen                   сгенерировать один конфиг
       --priv B64        приватный ключ (или --from file.conf, или --fetch — со свежими ключами)
       --endpoint h:p    конечная точка
       --junk none|tls|quic|sip|http   --sni домен   --level 1..4
+      --target wg|amneziawg|clash    формат итогового конфига (по умолчанию wg)
+      --split FULL|ALL_EXCEPT_RU|ONLY_SELECTED|ONLY_BLOCKED_IN_RU|CUSTOM   что гнать через туннель
+      --allowed "10.0.0.0/8, …"      AllowedIPs для --split CUSTOM
   parse FILE.conf       разобрать конфиг и показать, что внутри
         """.trimIndent()
     )
@@ -140,7 +147,12 @@ private fun tune(opts: Map<String, String?>) {
 
     println("Подбираю конфигурацию… (endpoint'ов: ${effectiveSpec.maxEndpoints}, профилей шума: ${profiles.size})")
     val result = AutoTuner(keySource, WgProber(net)).run(
-        TuningSpec(endpointSpec = effectiveSpec, junkProfiles = profiles, net = net),
+        TuningSpec(
+            endpointSpec = effectiveSpec,
+            junkProfiles = profiles,
+            net = net,
+            target = ConfigTarget.byName(opts["target"])
+        ),
         ProgressSink.STDOUT
     )
 
@@ -200,25 +212,31 @@ private fun gen(opts: Map<String, String?>) {
         else -> JunkLibrary.quic(opts["sni"] ?: JunkLibrary.SNI_DOMAINS.random(), opts["level"]?.toIntOrNull() ?: 3)
     }
 
+    val target = ConfigTarget.byName(opts["target"])
+    val split = SplitTunnel.build(
+        mode = SplitMode.entries.firstOrNull { it.name.equals(opts["split"] ?: "FULL", true) } ?: SplitMode.FULL,
+        custom = opts["allowed"] ?: "",
+        ipv6 = opts["ipv6-only"] != "true"
+    )
     val cfg = WarpConfig(
         name = opts["name"] ?: "WARP ${endpoint.render()}",
         account = account,
         endpoint = endpoint,
         junk = junk,
-        allowedIps = if (opts["bypass"] == "true") dev.warpscout.core.presets.RoutePresets.BYPASS_WHITELIST_CSV else "0.0.0.0/0, ::/0",
+        allowedIps = if (opts["bypass"] == "true") dev.warpscout.core.presets.RoutePresets.BYPASS_WHITELIST_CSV else split.allowedIps,
         dns = (opts["dns"] ?: Presets.DNS.first().servers.joinToString(", ")).split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() },
         mtu = opts["mtu"]?.toIntOrNull() ?: 1280,
         persistentKeepalive = opts["keepalive"]?.toIntOrNull() ?: 25,
         enableIpv6Address = opts["ipv6-only"] != "true"
     )
-    val text = WgConf.render(cfg)
+    val text = WgConf.render(cfg, target)
     val out = opts["out"]?.let { File(it) } ?: File(ConfigExport.filename(cfg))
     out.parentFile?.mkdirs()
     out.writeText(text)
     File(out.path + ".yaml").writeText(ConfigExport.clashYaml(cfg))
     println(text)
     println("записано: ${out.path} (и ${out.name}.yaml для Clash/Mihomo)")
-    println(ConfigExport.handoffHint(cfg))
+    println(ConfigExport.handoffHint(cfg, target))
 }
 
 private fun parse(opts: Map<String, String?>) {

@@ -20,6 +20,8 @@ import dev.warpscout.core.net.ResourceProber
 import dev.warpscout.core.net.TlsProber
 import dev.warpscout.core.net.WgProber
 import dev.warpscout.core.presets.Presets
+import dev.warpscout.core.presets.ResourceChecks
+import dev.warpscout.core.config.ConfigTarget
 import dev.warpscout.core.config.WgConf
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -62,6 +64,8 @@ data class TuningSpec(
     val dns: List<String> = Presets.DNS.first().servers,
     val mtu: Int = 1280,
     val allowedIps: String = "0.0.0.0/0, ::/0",
+    /** Под что компилировать итоговый конфиг: чистый WG или AmneziaWG с мусором. */
+    val target: ConfigTarget = ConfigTarget.DEFAULT,
     val keepalive: Int? = 25,
     val enableIpv6Address: Boolean = true,
     /** Сколько точек проверять подробно (с профилями шума и лишними попытками). */
@@ -217,10 +221,18 @@ class AutoTuner(
                         notes += "Туннель не поднялся (${it.javaClass.simpleName}) — пропускаю проверку изнутри."
                         emptyList()
                     }
-                val ok = results.count { it.ok }
-                progress.log("  ${cand.config.endpoint.render()} · ${cand.junk.name} → ${ok}/${spec.resources.size} ресурсов")
-                val parts = Scoring.evaluate(cand.stats, cand.stats.replies > 0, ok, spec.resources.size, weights)
-                verified.add(cand.copy(parts = parts, config = cand.config.copy(name = "${spec.namePrefix}-${ok}of${spec.resources.size}")))
+                // В балл идут только «наши» проверки: контрольная точка и сайты, которые блокируют
+                // нас сами (blockedByTarget), не должны ни помогать, ни мешать кандидату.
+                val scoredChecks = ResourceChecks.scored(spec.resources)
+                val ok = results.count { it.ok && !it.check.baselineExpected && !it.check.blockedByTarget }
+                val infoOk = results.count { it.ok && it.check.blockedByTarget }
+                val infoTotal = spec.resources.count { it.blockedByTarget }
+                progress.log(
+                    "  ${cand.config.endpoint.render()} · ${cand.junk.name} → $ok/${scoredChecks.size} ресурсов" +
+                        if (infoTotal > 0) " (+$infoOk/$infoTotal сайтов, которые блокируют нас — справочно)" else ""
+                )
+                val parts = Scoring.evaluate(cand.stats, cand.stats.replies > 0, ok, scoredChecks.size, weights)
+                verified.add(cand.copy(parts = parts, config = cand.config.copy(name = "${spec.namePrefix}-${ok}of${scoredChecks.size}")))
             }
             finalList = (verified + ordered.drop(verified.size)).sortedByDescending { it.score }
         } else if (tunnel == null && spec.verifyThroughTunnel) {
@@ -291,7 +303,7 @@ class AutoTuner(
             notes = notes
         )
         val best = candidates.maxByOrNull { it.score }
-        val text = best?.let { WgConf.render(it.config) }
+        val text = best?.let { WgConf.render(it.config, spec.target) }
         progress.log(
             if (best == null) "Готово: ни один кандидат не набрал баллов."
             else "Лучший: ${best.config.endpoint.render()} · ${best.junk.name} · ${best.score} балла"
