@@ -641,54 +641,7 @@
                     android:layout_marginTop="4dp"
                     android:textAppearance="?attr/textAppearanceBodySmall" />
 
-                <!-- ── диагностика туннеля (flavor tunnel) ───────────────── -->
-                <LinearLayout
-                    android:id="@+id/tunnelDiagBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical">
 
-                    <TextView
-                        style="@style/SectionHeader"
-                        android:text="@string/section_tunnel_diag" />
-
-                    <TextView
-                        android:id="@+id/textTunnelState"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:fontFamily="monospace"
-                        android:textAppearance="?attr/textAppearanceBodySmall"
-                        android:textIsSelectable="true" />
-
-                    <LinearLayout
-                        android:id="@+id/tunnelAdviceBox"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:orientation="vertical" />
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="horizontal">
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnTunnelRefresh"
-                            style="@style/Widget.Material3.Button.TextButton"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="@string/btn_tunnel_refresh" />
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnTunnelCopy"
-                            style="@style/Widget.Material3.Button.TextButton"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="@string/btn_tunnel_copy" />
-                    </LinearLayout>
-                </LinearLayout>
 
 
             </LinearLayout>
@@ -796,6 +749,14 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="12dp"
                     android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnAppTraffic"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/apps_traffic_button" />
             </LinearLayout>
         </ScrollView>
 
@@ -908,6 +869,55 @@
                     android:textAppearance="?attr/textAppearanceBodySmall"
                     android:textIsSelectable="true" />
 
+                <!-- ── диагностика туннеля (flavor tunnel) ───────────────── -->
+                <LinearLayout
+                    android:id="@+id/tunnelDiagBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/SectionHeader"
+                        android:text="@string/section_tunnel_diag" />
+
+                    <TextView
+                        android:id="@+id/textTunnelState"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:textIsSelectable="true" />
+
+                    <LinearLayout
+                        android:id="@+id/tunnelAdviceBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:orientation="vertical" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnTunnelRefresh"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/btn_tunnel_refresh" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnTunnelCopy"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/btn_tunnel_copy" />
+                    </LinearLayout>
+                </LinearLayout>
+
                 <TextView
                     android:id="@+id/textNetwork"
                     android:layout_width="match_parent"
@@ -925,6 +935,25 @@
                     style="@style/SectionHeader"
                     android:text="@string/tab_report" />
 
+
+                <!-- ── что реально открылось: проверки ресурсов с ✓/✗ ── -->
+                <TextView
+                    style="@style/SectionHeader"
+                    android:text="@string/section_resource_results" />
+
+                <LinearLayout
+                    android:id="@+id/resourceResultsBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+
+                <TextView
+                    android:id="@+id/textServicesHint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/services_hint"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
                 <TextView
                     android:id="@+id/textReport"
                     android:layout_width="match_parent"

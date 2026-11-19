@@ -67,6 +67,9 @@ class MainActivity : AppCompatActivity() {
     private data class AppEntry(val pkg: String, val label: String, val system: Boolean)
     private var selectedTab = 0
 
+    /** Когда туннель поднялся (мс, локальные часы): от этой точки считаем расход по приложениям. */
+    private var tunnelStartedAtLocal = 0L
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -397,6 +400,119 @@ class MainActivity : AppCompatActivity() {
         else -> String.format(java.util.Locale.getDefault(), "%.1f МБ", value / 1048576.0)
     }
 
+    // ------------------------------------------------ проверки ресурсов (Журнал)
+
+    /**
+     * «Что реально открылось» — построчный список проверок с ✓/✗, а не пересказ отчёта.
+     * Сюда смотришь, когда сайт «вроде должен работать, но не работает».
+     */
+    private fun renderResources(results: List<dev.warpscout.core.model.ResourceResult>) {
+        binding.resourceResultsBox.removeAllViews()
+        if (results.isEmpty()) {
+            binding.resourceResultsBox.addView(verdictRow(getString(R.string.resources_off), false))
+            return
+        }
+        results.forEach { r ->
+            val via = if (r.via == dev.warpscout.core.model.NetworkVia.TUNNEL) {
+                ", " + getString(R.string.resource_via_tunnel)
+            } else {
+                ""
+            }
+            val tail = when {
+                !r.ok -> ", " + (r.errorClass ?: "нет ответа") + (r.status?.let { " ($it)" } ?: "")
+                r.status != null && r.elapsedMs > 0 -> ", ${r.status}, ${r.elapsedMs} мс"
+                r.status != null -> ", ${r.status}"
+                else -> ""
+            }
+            binding.resourceResultsBox.addView(
+                verdictRow((if (r.ok) "✓ " else "✗ ") + r.check.name + tail + via, r.ok)
+            )
+        }
+    }
+
+    private fun verdictRow(text: String, ok: Boolean): android.widget.TextView =
+        android.widget.TextView(this).apply {
+            this.text = text
+            textSize = 13f
+            setPadding(0, 4, 0, 4)
+            setTextColor(if (ok) 0xFF2E7D32.toInt() else 0xFFC62828.toInt())
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+    // ---------------------------------------------------- расход по приложениям
+
+    /** Без «Доступа к истории использования» Android не отдаёт расход по приложениям. */
+    private fun hasUsageAccess(): Boolean = runCatching {
+        val ops = getSystemService(android.app.AppOpsManager::class.java)
+        val uid = android.os.Process.myUid()
+        val op = android.app.AppOpsManager.OPSTR_GET_USAGE_STATS
+        val mode = if (android.os.Build.VERSION.SDK_INT >= 29) {
+            ops.unsafeCheckOpNoThrow(op, uid, packageName)
+        } else {
+            @Suppress("DEPRECATION")
+            ops.checkOpNoThrow(op, uid, packageName)
+        }
+        mode == android.app.AppOpsManager.MODE_ALLOWED
+    }.getOrDefault(false)
+
+    /**
+     * Живой расход по приложениям. Честная оговорка: Android не умеет сказать «сколько ушло
+     * именно через туннель», поэтому считаем весь трафик приложения за время, пока туннель поднят.
+     * Для полного туннеля это одно и то же, для раздельного — верхняя оценка.
+     */
+    private fun showAppTraffic() {
+        if (!hasUsageAccess()) {
+            toast(getString(R.string.apps_traffic_need_access))
+            runCatching {
+                startActivity(android.content.Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS))
+            }
+            return
+        }
+        val from = tunnelStartedAtLocal.takeIf { it > 0L } ?: (System.currentTimeMillis() - 3_600_000L)
+        val to = System.currentTimeMillis()
+        val stats = runCatching { getSystemService(android.app.usage.NetworkStatsManager::class.java) }.getOrNull()
+        val rows = mutableListOf<Pair<String, Long>>()
+        if (stats != null) {
+            val types = listOf(
+                android.net.ConnectivityManager.TYPE_MOBILE,
+                android.net.ConnectivityManager.TYPE_WIFI
+            )
+            appEntries.forEach { app ->
+                val uid = runCatching { packageManager.getApplicationInfo(app.pkg, 0).uid }.getOrDefault(-1)
+                if (uid >= 0) {
+                    var bytes = 0L
+                    for (type in types) {
+                        bytes += runCatching {
+                            stats.queryDetailsForUid(type, null, from, to, uid).use { bucketSet ->
+                                var sum = 0L
+                                while (bucketSet.hasNextBucket()) {
+                                    val bucket = android.app.usage.NetworkStats.Bucket()
+                                    bucketSet.getNextBucket(bucket)
+                                    sum += bucket.rxBytes + bucket.txBytes
+                                }
+                                sum
+                            }
+                        }.getOrDefault(0L)
+                    }
+                    if (bytes > 0L) rows += app.label to bytes
+                }
+            }
+        }
+        binding.textAppsTraffic.text = if (rows.isEmpty()) {
+            getString(R.string.apps_traffic_none)
+        } else {
+            buildString {
+                appendLine(getString(R.string.apps_traffic_header))
+                rows.sortedByDescending { it.second }.take(12).forEach { row ->
+                    appendLine("• ${row.first} — ${humanBytes(row.second)}")
+                }
+            }
+        }
+    }
+
     private fun setupButtons() {
         binding.btnRun.setOnClickListener {
             persistUi()
@@ -442,6 +558,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnBuildRoutes.setOnClickListener { buildRoutes() }
 
         binding.btnTunnelRefresh.setOnClickListener { updateTunnelDiagnostics() }
+        binding.btnAppTraffic.setOnClickListener { showAppTraffic() }
 
         binding.btnTunnelCopy.setOnClickListener {
             ConfigFiles.copyToClipboard(this, TunnelDebug.dump())
@@ -548,6 +665,7 @@ class MainActivity : AppCompatActivity() {
             }
             if (tunnel.isUp) {
                 tunnel.stop()
+                tunnelStartedAtLocal = 0L
                 binding.btnTunnel.setText(R.string.btn_tunnel_on)
                 return@setOnClickListener
             }
@@ -563,6 +681,7 @@ class MainActivity : AppCompatActivity() {
                 // 15 с, а не 25: сервис всё равно продолжает попытки, но пользователь не должен
                 // смотреть на «Поднимаю…» полминуты — при быстром рукопожатии ответ придёт за секунды.
                 val ok = runCatching { tunnel.startAndAwait(cfg, 15000) }.getOrDefault(false)
+                if (ok) tunnelStartedAtLocal = System.currentTimeMillis()
                 val why = tunnel.lastError()
                 runOnUiThread {
                     binding.btnTunnel.isEnabled = true
@@ -640,6 +759,7 @@ class MainActivity : AppCompatActivity() {
             ?: result.configText
             ?: best?.let { ConfigFiles.render(it) }.orEmpty()
         updateServerNote()
+        renderResources(result.report.resources)
         binding.textReport.text = runCatching { Report.toMarkdown(result.report) }
             .getOrElse { "Отчёт сломался: ${it.message}" }
         lastConfigFile = engine.storedConfigFile ?: best?.let { cfg ->

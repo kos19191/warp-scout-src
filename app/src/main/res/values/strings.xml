@@ -26,6 +26,14 @@
     <string name="apps_traffic">Туннель сейчас: %1$s. Счётчики трафика — во вкладке «Туннель».</string>
     <string name="apps_traffic_off">Туннель выключен.</string>
     <string name="apps_more">…и ещё %1$d — уточните поиск</string>
+    <string name="apps_traffic_button">Показать расход по приложениям</string>
+    <string name="apps_traffic_need_access">Нужно разрешение «Доступ к истории использования» — открою настройки. Без него Android не отдаёт расход по приложениям.</string>
+    <string name="apps_traffic_none">Данных пока нет: либо туннель только что подключён, либо расход нулевой.</string>
+    <string name="apps_traffic_header">Расход с момента подключения (весь трафик приложения, пока туннель поднят):</string>
+    <string name="section_resource_results">Что реально открылось</string>
+    <string name="services_hint">Если сайт открывается и пишет «Unable to load site» или «try turning off VPN» — туннель работает, это отказ сервиса (Cloudflare/OpenAI) на нашу сторону. Обычно помогает отключить IPv6 и переподключиться, сменить endpoint или профиль шума.</string>
+    <string name="resources_off">Проверки ресурсов выключены — включите их во вкладке «Скан».</string>
+    <string name="resource_via_tunnel">из-под туннеля</string>
     <string name="tunnel_bytes">%1$s вверх / %2$s вниз</string>
     <string name="tab_log">Журнал</string>
     <string name="tab_report">Отчёт</string>

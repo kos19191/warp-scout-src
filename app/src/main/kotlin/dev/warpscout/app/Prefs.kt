@@ -273,12 +273,18 @@ class Prefs(private val context: Context) {
      */
     fun allowedIps(): String {
         val plan = allowedIpsText
-        return when (routesMode) {
+        val raw = when (routesMode) {
             1 -> dev.warpscout.core.presets.RoutePresets.BYPASS_WHITELIST_CSV
             2 -> plan.ifBlank { "0.0.0.0/0, ::/0" }
             3 -> plan.ifBlank { "0.0.0.0/0, ::/0" }
             else -> "0.0.0.0/0, ::/0"
         }
+        if (enableIpv6) return raw
+        // Без IPv6-адреса в туннеле маршрут ::/0 — чёрная дыра: браузер радостно выбирает IPv6
+        // и половина сайтов «не открывается», хотя туннель поднят. Поэтому при выключенном IPv6
+        // v6-маршруты не выпускаем вовсе.
+        val v4 = raw.split(',').map { it.trim() }.filter { it.isNotEmpty() && !it.contains(':') }
+        return if (v4.isEmpty()) "0.0.0.0/0" else v4.joinToString(", ")
     }
 
     /** Проверки по спискам: берём кеш `.lst` и превращаем в canary-запросы. */

@@ -264,6 +264,10 @@ class WarpVpnService : VpnService() {
         if (v6 != null) runCatching { builder.addAddress(v6.substringBefore('/'), 128) }
         cfg.dns.forEach { if (it.isNotBlank()) runCatching { builder.addDnsServer(it.trim()) } }
         cfg.allowedIps.split(',').map { it.trim() }.filter { it.contains('/') }.forEach { cidr ->
+            // IPv6-маршрут без IPv6-адреса на интерфейсе — чёрная дыра (пакеты уходят в tun и
+            // пропадают). Проверено на живом запросе: с таким маршрутом Telegram и браузер
+            // «открывались наполовину». Поэтому v6-маршруты добавляем только с адресом.
+            if (cidr.contains(':') && v6 == null) return@forEach
             val parts = cidr.split('/')
             val bits = parts[1].trim().toIntOrNull() ?: return@forEach
             runCatching { builder.addRoute(parts[0].trim(), bits) }
