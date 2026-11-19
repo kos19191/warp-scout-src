@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Пустой small icon для уведомления туннеля: в строке состояния значок приложения не появляется.
+  Раньше здесь стоял android.R.drawable.stat_sys_data_bluetooth — отсюда и «значок блютуза».
+  Полностью убрать иконку система не даёт (foreground-сервис обязан её иметь), поэтому она
+  прозрачная. Ключик VPN в строке состояния рисует сама Android — он останется.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M0,0h24v24h-24z" />
+</vector>

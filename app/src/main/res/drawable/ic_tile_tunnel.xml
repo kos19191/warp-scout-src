@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Значок плитки быстрых настроек: щит (монохром, как требует системный UI). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2L4,5v6.09c0,4.79 3.41,9.27 8,10.91 4.59,-1.64 8,-6.12 8,-10.91V5l-8,-3zM12,15.5l-3.5,-3.5 1.41,-1.41L11,11.67V7h2v4.67l1.09,-1.08L15.5,12 12,15.5z" />
+</vector>

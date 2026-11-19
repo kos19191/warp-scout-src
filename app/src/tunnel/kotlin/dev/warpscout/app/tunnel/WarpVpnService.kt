@@ -10,6 +10,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
+import dev.warpscout.app.Prefs
 import dev.warpscout.app.R
 import dev.warpscout.app.TunnelDebug
 import dev.warpscout.core.config.SplitRoutes
@@ -41,10 +42,21 @@ class WarpVpnService : VpnService() {
     private var udpSocket: DatagramSocket? = null
     private val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    /** Идёт подъём или уже работает — второй запуск (плитка, кнопка, шторка) игнорируем. */
+    @Volatile
+    private var starting = false
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             shutdown()
             return START_NOT_STICKY
+        }
+        if (starting || plane != null) {
+            // Повторное нажатие «Подключить» (кнопка, плитка быстрых настроек) не должно
+            // поднимать второй туннель поверх первого — только напомнить, что уже работаем.
+            TunnelState.status = "туннель уже поднимается или работает"
+            postNotification(TunnelState.status)
+            return START_REDELIVER_INTENT
         }
         val text = intent?.getStringExtra(EXTRA_CONF)
         if (text.isNullOrBlank()) {
@@ -65,6 +77,7 @@ class WarpVpnService : VpnService() {
     }
 
     private fun startVpn(text: String, startId: Int) {
+        starting = true
         TunnelState.error = null
         TunnelState.gaveUp = false
         TunnelState.startedAt = System.currentTimeMillis()
@@ -218,6 +231,7 @@ class WarpVpnService : VpnService() {
 
     /** Единственная точка «мы сдались»: статус + журнал + аккуратная остановка. */
     private fun fail(reason: String, startId: Int) {
+        starting = false
         TunnelState.status = reason
         TunnelState.error = reason
         TunnelState.gaveUp = true
@@ -266,12 +280,30 @@ class WarpVpnService : VpnService() {
     private val mainLooperThread: Thread get() = android.os.Looper.getMainLooper().thread
 
     private fun postNotificationNow(text: String) {
+        createChannel()
+        val open = android.app.PendingIntent.getActivity(
+            this, 0,
+            Intent(this, dev.warpscout.app.MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        val stopPi = android.app.PendingIntent.getService(
+            this, 1,
+            Intent(this, WarpVpnService::class.java).apply { action = ACTION_STOP },
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
         val n = NotificationCompat.Builder(this, CHANNEL)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            // Пустая иконка: значок приложения в строке состояния не появляется (см. ic_stat_blank).
+            .setSmallIcon(R.drawable.ic_stat_blank)
             .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setSilent(true)
+            .setShowWhen(false)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            .setContentIntent(open)
+            .addAction(0, getString(R.string.notif_stop), stopPi)
             .build()
         // Тип сервиса — specialUse (см. манифест): «vpn» приложению недоступен. На 34+
         // тип передаём явно, иначе летит MissingForegroundServiceTypeException.
@@ -285,14 +317,30 @@ class WarpVpnService : VpnService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching { notifyManager().notify(NOTIF_ID, n) }
         }
+        refreshTile()
+    }
+
+    /** Плитка быстрых настроек показывает не своё «я», а реальное состояние сервиса. */
+    private fun refreshTile() = runCatching {
+        android.service.quicksettings.TileService.requestListeningState(
+            this, android.content.ComponentName(this, TunnelTileService::class.java)
+        )
     }
 
     private fun createChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            notifyManager().createNotificationChannel(
-                NotificationChannel(CHANNEL, "WarpScout: туннель", NotificationManager.IMPORTANCE_LOW)
-            )
-        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val mgr = notifyManager()
+        // Важность канала нельзя понизить после создания — поэтому новый id и удаление старого.
+        // IMPORTANCE_MIN: уведомление сворачивается в самый низ шторки и молчит.
+        mgr.createNotificationChannel(
+            NotificationChannel(CHANNEL, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_MIN).apply {
+                setShowBadge(false)
+                enableVibration(false)
+                setSound(null, null)
+                lockscreenVisibility = Notification.VISIBILITY_SECRET
+            }
+        )
+        runCatching { mgr.deleteNotificationChannel(LEGACY_CHANNEL) }
     }
 
     private fun notifyManager(): NotificationManager =
@@ -300,6 +348,7 @@ class WarpVpnService : VpnService() {
 
     private fun shutdown() {
         if (!stopped.compareAndSet(false, true)) return
+        starting = false
         TunnelState.up = false
         TunnelState.status = "туннель остановлен"
         runCatching { plane?.stop() }
@@ -319,13 +368,21 @@ class WarpVpnService : VpnService() {
         const val ACTION_START = "dev.warpscout.app.tunnel.START"
         const val ACTION_STOP = "dev.warpscout.app.tunnel.STOP"
         const val EXTRA_CONF = "conf"
-        private const val CHANNEL = "warpscout.tunnel"
+        private const val CHANNEL = "warpscout.tunnel.quiet"
+        private const val LEGACY_CHANNEL = "warpscout.tunnel"
         private const val NOTIF_ID = 4200
 
-        fun start(context: Context, config: WarpConfig) {
+        fun start(context: Context, config: WarpConfig) = startWithText(context, WgConf.render(config))
+
+        /**
+         * Запуск готовым текстом конфига. Нужен плитке быстрых настроек: она не собирает конфиг
+         * заново, а берёт последний использованный ([Prefs.lastConfigText]) — то есть ровно то,
+         * что в последний раз реально работало.
+         */
+        fun startWithText(context: Context, text: String) {
             val intent = Intent(context, WarpVpnService::class.java).apply {
                 action = ACTION_START
-                putExtra(EXTRA_CONF, WgConf.render(config))
+                putExtra(EXTRA_CONF, text)
             }
             runCatching { context.startForegroundService(intent) }
                 .onFailure { TunnelState.status = "сервис не запустился: ${it.message}" }

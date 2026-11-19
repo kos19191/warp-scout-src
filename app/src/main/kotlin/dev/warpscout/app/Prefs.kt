@@ -172,6 +172,14 @@ class Prefs(private val context: Context) {
         get() = sp.getLong("lastTunedAt", 0L)
         set(v) = sp.edit().putLong("lastTunedAt", v).apply()
 
+    /**
+     * Последний конфиг, которым поднимали туннель (текст WireGuard/AmneziaWG). Нужен плитке
+     * быстрых настроек: она подключает «то же, что в прошлый раз», не собирая конфиг заново.
+     */
+    var lastConfigText: String
+        get() = sp.getString("lastConfigText", "").orEmpty()
+        set(v) = sp.edit().putString("lastConfigText", v).apply()
+
     var lastTunedEndpoint: String
         get() = sp.getString("lastTunedEndpoint", "").orEmpty()
         set(v) = sp.edit().putString("lastTunedEndpoint", v).apply()

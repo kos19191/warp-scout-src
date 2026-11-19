@@ -19,5 +19,29 @@
                 <action android:name="android.net.VpnService" />
             </intent-filter>
         </service>
+
+        <!-- Плитка в быстрых настройках: нажатие — подключить последний конфиг, удержание —
+             открыть приложение (через QS_TILE_PREFERENCES ниже). Только во flavor'е tunnel:
+             в scout своего туннеля нет, и плитка была бы обманом. -->
+        <service
+            android:name=".tunnel.TunnelTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_tunnel"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- Долгое нажатие по плитке: Android открывает активность с этим фильтром. -->
+        <activity-alias
+            android:name=".tunnel.TilePreferences"
+            android:exported="true"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+            </intent-filter>
+        </activity-alias>
     </application>
 </manifest>

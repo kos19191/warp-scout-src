@@ -247,6 +247,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         binding.textConfig.text = currentConfigText(cfg)
+        prefs.lastConfigText = runCatching { WgConf.render(cfg) }.getOrDefault(prefs.lastConfigText)
         showPage(TAB_CONFIG)
         toast(getString(R.string.quick_config_ready))
     }
@@ -406,6 +407,9 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             val cfg = currentConfig() ?: return@setOnClickListener noConfig()
+            // Запоминаем именно этот конфиг: плитка быстрых настроек потом поднимет «то же самое»
+            // одним нажатием, не собирая конфиг заново и не требуя открывать приложение.
+            prefs.lastConfigText = runCatching { WgConf.render(cfg) }.getOrDefault("")
             if (!tunnel.ensurePermission(this)) return@setOnClickListener
             binding.btnTunnel.isEnabled = false
             toast(getString(R.string.tunnel_starting, cfg.endpoint.render()))

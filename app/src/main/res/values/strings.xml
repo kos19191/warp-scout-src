@@ -136,4 +136,11 @@
     <string name="tunnel_failed">Туннель не поднялся: %1$s</string>
     <string name="tunnel_advice_title">Почему так:</string>
     <string name="tunnel_saved">Журнал сохранён: %1$s</string>
+    <!-- плитка быстрых настроек и тихое уведомление туннеля -->
+    <string name="tile_label">Туннель</string>
+    <string name="tile_on">WarpScout: включён</string>
+    <string name="tile_off">WarpScout: выключен</string>
+    <string name="tile_no_config">Сначала проверь сеть в приложении</string>
+    <string name="notif_channel">Туннель (тихий)</string>
+    <string name="notif_stop">Отключить</string>
 </resources>
