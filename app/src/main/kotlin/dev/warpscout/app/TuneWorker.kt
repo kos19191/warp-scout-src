@@ -26,7 +26,8 @@ class TuneWorker(appContext: Context, params: WorkerParameters) : Worker(appCont
 
             override fun isCancelled(): Boolean = isStopped
         }
-        val result = Engine(context).runBlocking(prefs.tuningSpec(), manual, sink, 15 * 60_000L)
+        // Через prefs: так в фоне тоже работает DoH-резолв категорий и план AllowedIPs.
+        val result = Engine(context).runBlocking(prefs, manual, sink, 15 * 60_000L)
             ?: return Result.retry()
         val best = result.best
         notify(context, best?.let { "Лучший endpoint: ${it.endpoint.render()} (${it.junk.name})" }

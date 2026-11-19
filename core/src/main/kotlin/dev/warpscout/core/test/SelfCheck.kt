@@ -527,7 +527,7 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         expect("парсинг: I1 → чанки", JunkChunk.renderAll(cfg.junk.i1), "<b 0xdeadbeef><r 16>")
         expect("парсинг: IPv6-адрес подхвачен", cfg.account.ipv6, "2606:4700:110:8b63:28c5:b72d:11d1:de72")
 
-        val rendered = WgConf.render(cfg)
+        val rendered = WgConf.render(cfg, ConfigTarget.AMNEZIAWG)
         val again = WgConf.toWarpConfig("тест2", rendered)!!
         expect("round-trip: endpoint", again.endpoint.render(), cfg.endpoint.render())
         expect("round-trip: I1", JunkChunk.renderAll(again.junk.i1), JunkChunk.renderAll(cfg.junk.i1))
@@ -649,7 +649,7 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             html.contains("188.114.98.2:943") && html.contains("&lt;1&gt;") && html.startsWith("<!doctype html"))
         check("отчёт CSV: строка на кандидата", Report.toCsv(report).trim().lines().size == 2)
         check("отчёт MD: таблица кандидатов", Report.toMarkdown(report).contains("188.114.98.2:943"))
-        val conf = WgConf.render(cfg)
+        val conf = WgConf.render(cfg, ConfigTarget.AMNEZIAWG)
         check("конфиг: содержит AWG-параметры", conf.contains("Jc = 4") && conf.contains("I1 = <b 0x"))
         check("конфиг: Clash YAML собирается", dev.warpscout.core.report.ConfigExport.clashYaml(cfg).contains("amnezia-wg-option"))
     }

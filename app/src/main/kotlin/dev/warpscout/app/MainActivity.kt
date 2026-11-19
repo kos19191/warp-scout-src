@@ -1,19 +1,26 @@
 package dev.warpscout.app
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
+import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.LinearLayout
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.google.android.material.checkbox.MaterialCheckBox
 import dev.warpscout.app.databinding.ActivityMainBinding
 import android.net.Uri
+import dev.warpscout.core.config.ConfigTarget
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.dpi.DpiComparator
 import dev.warpscout.core.dpi.DpiComparison
@@ -25,6 +32,8 @@ import dev.warpscout.core.keys.KeySource
 import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.net.WarpDefaults
 import dev.warpscout.core.presets.Presets
+import dev.warpscout.core.presets.RuleCatalog
+import dev.warpscout.core.presets.SplitMode
 import dev.warpscout.core.report.ConfigExport
 import dev.warpscout.core.report.Report
 import dev.warpscout.core.tune.ProgressSink
@@ -51,6 +60,39 @@ class MainActivity : AppCompatActivity() {
     private var suppressPoolListener = false
     private var lastConfigFile: File? = null
 
+    /** Категории, отмеченные в диалоге (до нажатия «ОК» живут здесь, а не в Prefs). */
+    private var selectedCategories: MutableSet<String> = linkedSetOf()
+
+    /** Конфиг, который поднимем сразу после выдачи разрешения на VPN. */
+    private var pendingTunnelConfig: WarpConfig? = null
+
+    private val statusHandler = Handler(Looper.getMainLooper())
+
+    private val statusTick = object : Runnable {
+        override fun run() {
+            refreshTunnelLine()
+            statusHandler.postDelayed(this, 1000)
+        }
+    }
+
+    /**
+     * Разрешение на VPN возвращается отдельным активити. Раньше после «Разрешить» приложение
+     * просто оставалось на месте: `ensurePermission` возвращал false, а повторного запуска
+     * туннеля никто не делал — со стороны это выглядело как «нажал и ничего не произошло».
+     */
+    private val vpnPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        val cfg = pendingTunnelConfig
+        pendingTunnelConfig = null
+        val granted = runCatching { VpnService.prepare(this) == null }.getOrDefault(false)
+        if (!granted) {
+            toast(getString(R.string.vpn_denied))
+            refreshTunnelLine()
+            return@registerForActivityResult
+        }
+        toast(getString(R.string.vpn_granted))
+        if (cfg != null) launchTunnel(cfg)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -69,6 +111,14 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         updateTunnelButton()
         showKeys()
+        refreshTunnelLine()
+        statusHandler.removeCallbacks(statusTick)
+        statusHandler.post(statusTick)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        statusHandler.removeCallbacks(statusTick)
     }
 
     // ------------------------------------------------------------- заполнение UI
@@ -79,7 +129,6 @@ class MainActivity : AppCompatActivity() {
         binding.editCount.setText(prefs.endpointCount.toString())
         binding.editKeepalive.setText(prefs.keepalive.toString())
         binding.editMtu.setText(prefs.mtu.toString())
-        binding.switchWhitelist.isChecked = prefs.splitWhitelist
         binding.switchIpv6.isChecked = prefs.enableIpv6
         binding.switchResources.isChecked = prefs.checkResources
         binding.switchTunnelVerify.isChecked = prefs.verifyInTunnel
@@ -102,6 +151,8 @@ class MainActivity : AppCompatActivity() {
         binding.editSocks.setText(prefs.byedpiProxy)
         binding.switchViaByedpi.isChecked = prefs.tuneViaByedpi
         binding.textByedpiState.text = byedpiState()
+        setupSplitUi()
+        setupTargetUi()
         updatePoolSummary()
         showLastRun()
         binding.textNetwork.text = CleanNetwork.statusLine(this)
@@ -114,7 +165,6 @@ class MainActivity : AppCompatActivity() {
         binding.editCount.text?.toString()?.toIntOrNull()?.let { prefs.endpointCount = it }
         binding.editKeepalive.text?.toString()?.toIntOrNull()?.let { prefs.keepalive = it }
         binding.editMtu.text?.toString()?.toIntOrNull()?.let { prefs.mtu = it }
-        prefs.splitWhitelist = binding.switchWhitelist.isChecked
         prefs.enableIpv6 = binding.switchIpv6.isChecked
         prefs.checkResources = binding.switchResources.isChecked
         prefs.verifyInTunnel = binding.switchTunnelVerify.isChecked
@@ -147,7 +197,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildResourceList() {
         binding.resourceBox.removeAllViews()
-        Presets.RESOURCE_CHECKS.forEach { check ->
+        prefs.resourceChecks().forEach { check ->
             binding.resourceBox.addView(
                 android.widget.TextView(this).apply {
                     text = "• ${check.name}"
@@ -185,7 +235,7 @@ class MainActivity : AppCompatActivity() {
             binding.progress.visibility = View.VISIBLE
             binding.progress.isIndeterminate = true
             binding.textStatus.setText(R.string.status_running)
-            engine.start(prefs.tuningSpec(), manualConfig(), sink()) { result, error ->
+            engine.start(prefs, manualConfig(), sink()) { result, error ->
                 binding.progress.visibility = View.GONE
                 when {
                     error != null -> binding.textStatus.text = "Ошибка: $error"
@@ -196,6 +246,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnDpiCompare.setOnClickListener { runDpiCompare() }
+
+        binding.btnTunnelCheck.setOnClickListener { runTunnelSelfTest() }
+
+        binding.btnTunnelLog.setOnClickListener { showTunnelLog() }
 
         binding.btnStop.setOnClickListener {
             cancelled.set(true)
@@ -251,11 +305,11 @@ class MainActivity : AppCompatActivity() {
             ConfigFiles.copyToClipboard(this, text)
             val send = Intent(Intent.ACTION_SEND).apply {
                 type = "text/plain"
-                putExtra(Intent.EXTRA_TEXT, ConfigFiles.amneziaHandoff(cfg, text))
+                putExtra(Intent.EXTRA_TEXT, ConfigFiles.amneziaHandoff(cfg, text, prefs.configTarget))
             }
             runCatching { startActivity(Intent.createChooser(send, getString(R.string.share_title))) }
                 .onFailure { toast(getString(R.string.share_failed)) }
-            toast(getString(R.string.copied_ok) + " · " + getString(R.string.amnezia_hint))
+            toast(getString(R.string.copied_ok) + " · " + prefs.configTarget.title)
         }
 
         binding.btnCopy.setOnClickListener {
@@ -266,14 +320,18 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnSave.setOnClickListener {
             val cfg = currentConfig() ?: return@setOnClickListener noConfig()
-            val path = ConfigFiles.saveToDownloads(this, cfg, currentConfigText(cfg))
+            val path = ConfigFiles.saveToDownloads(
+                this, cfg, currentConfigText(cfg), ConfigFiles.fileName(cfg, prefs.configTarget)
+            )
             toast(getString(R.string.saved_ok, path))
         }
 
         binding.btnShare.setOnClickListener {
             val cfg = currentConfig() ?: return@setOnClickListener noConfig()
             val file = lastConfigFile
-                ?: runCatching { ConfigFiles.write(this, cfg, currentConfigText(cfg)) }.getOrNull()
+                ?: runCatching {
+                    ConfigFiles.write(this, cfg, currentConfigText(cfg), ConfigFiles.fileName(cfg, prefs.configTarget))
+                }.getOrNull()
             if (file == null) {
                 toast(getString(R.string.err_no_config))
             } else {
@@ -289,17 +347,18 @@ class MainActivity : AppCompatActivity() {
             }
             if (tunnel.isUp) {
                 tunnel.stop()
-                binding.btnTunnel.setText(R.string.btn_tunnel_on)
+                refreshTunnelLine()
                 return@setOnClickListener
             }
             val cfg = currentConfig() ?: return@setOnClickListener noConfig()
-            if (!tunnel.ensurePermission(this)) return@setOnClickListener
-            if (tunnel.start(cfg)) {
-                binding.btnTunnel.setText(R.string.btn_tunnel_off)
-                toast("Туннель поднимается: ${cfg.endpoint.render()}")
-            } else {
-                toast(tunnel.status.ifBlank { getString(R.string.tunnel_unavailable) })
+            val request = runCatching { VpnService.prepare(this) }.getOrNull()
+            if (request != null) {
+                pendingTunnelConfig = cfg
+                runCatching { vpnPermission.launch(request) }
+                    .onFailure { toast("диалог VPN не открылся: ${it.message}") }
+                return@setOnClickListener
             }
+            launchTunnel(cfg)
         }
     }
 
@@ -333,7 +392,7 @@ class MainActivity : AppCompatActivity() {
     private fun currentConfig(): WarpConfig? = engine.last?.best ?: manualConfig()
 
     private fun currentConfigText(cfg: WarpConfig): String =
-        engine.last?.configText?.takeIf { it.isNotBlank() } ?: ConfigFiles.render(cfg)
+        engine.last?.configText?.takeIf { it.isNotBlank() } ?: ConfigFiles.render(cfg, prefs.configTarget)
 
     private fun showResult(result: TuningResult) {
         binding.textStatus.setText(R.string.status_done)
@@ -459,7 +518,7 @@ class MainActivity : AppCompatActivity() {
         }
         binding.btnDpiCompare.isEnabled = false
         binding.textByedpiState.setText(R.string.byedpi_compare_running)
-        val checks = Presets.RESOURCE_CHECKS
+        val checks = prefs.resourceChecks()
         Thread {
             val cmp = runCatching { DpiComparator().compare(checks, proxy) }
             runOnUiThread {
@@ -498,6 +557,164 @@ class MainActivity : AppCompatActivity() {
         DpiOutcome.OPEN_ONLY_DIRECT -> R.string.dpi_outcome_proxy_bad
         DpiOutcome.BLOCKED_BOTH -> R.string.dpi_outcome_ip
         DpiOutcome.PROXY_UNREACHABLE -> R.string.dpi_outcome_no_proxy
+    }
+
+    // ------------------------------------------------- выбор формата и каналов
+
+    private fun setupSplitUi() {
+        selectedCategories = prefs.selectedCategories.toMutableSet()
+        binding.spinnerSplit.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item,
+            SplitMode.entries.map { it.title }
+        )
+        binding.spinnerSplit.setSelection(prefs.splitMode.ordinal)
+        binding.spinnerSplit.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                prefs.splitMode = SplitMode.entries[position]
+                refreshSplitSummary()
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+        binding.btnCategories.setOnClickListener { pickCategories() }
+        refreshSplitSummary()
+    }
+
+    private fun setupTargetUi() {
+        binding.spinnerTarget.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item,
+            ConfigTarget.entries.map { it.title }
+        )
+        binding.spinnerTarget.setSelection(prefs.configTarget.ordinal)
+        binding.spinnerTarget.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                prefs.configTarget = ConfigTarget.entries[position]
+                refreshTargetHint()
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+        refreshTargetHint()
+    }
+
+    private fun refreshTargetHint() {
+        val target = prefs.configTarget
+        binding.textTargetHint.text = buildString {
+            append(target.note)
+            if (!target.supportsJunk) append(" · AWG-поля (Jc/H1/I1…) в файл не попадут")
+        }
+    }
+
+    /** Что именно попадёт в AllowedIPs — до запуска подбора, без единого сетевого запроса. */
+    private fun refreshSplitSummary() {
+        val plan = prefs.splitPlan()
+        binding.textSplitSummary.text = buildString {
+            append(plan.summary)
+            when (plan.mode) {
+                SplitMode.ONLY_SELECTED -> append(" · категорий: ${selectedCategories.size}")
+                SplitMode.CUSTOM -> if (prefs.customAllowedIps.isBlank()) {
+                    appendLine()
+                    append(getString(R.string.split_custom_empty))
+                }
+                else -> Unit
+            }
+            plan.notes.firstOrNull()?.let { appendLine(); append(it) }
+            if (plan.mode == SplitMode.ONLY_SELECTED || plan.mode == SplitMode.ONLY_BLOCKED_IN_RU) {
+                appendLine()
+                append(getString(R.string.split_doh_note))
+            }
+        }
+        binding.btnCategories.setText(
+            getString(R.string.btn_categories_fmt, selectedCategories.size, RuleCatalog.ALL.size)
+        )
+    }
+
+    private fun pickCategories() {
+        val all = RuleCatalog.ALL
+        val labels = all.map { c ->
+            val kind = when (c.kind) {
+                RuleCatalog.Kind.RU_BLOCKED -> "режут в РФ"
+                RuleCatalog.Kind.BLOCKS_RU -> "нас блокируют"
+                RuleCatalog.Kind.INFRA -> "служебное"
+            }
+            val nets = if (c.hasSubnets) "подсети ${c.prefixesV4}/${c.prefixesV6}" else "только домены"
+            "${c.id} · ${c.title} · $nets · $kind"
+        }
+        val checked = BooleanArray(all.size) { all[it].id in selectedCategories }
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.categories_title, RuleCatalog.SNAPSHOT_DATE))
+            .setMultiChoiceItems(labels.toTypedArray(), checked) { _, which, isChecked ->
+                if (isChecked) selectedCategories += all[which].id else selectedCategories -= all[which].id
+            }
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                prefs.selectedCategories = selectedCategories.toSet()
+                refreshSplitSummary()
+                buildResourceList()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    // ---------------------------------------------------------------- туннель
+
+    private fun launchTunnel(cfg: WarpConfig) {
+        val started = tunnel.start(cfg)
+        binding.textTunnelState.text = if (started) {
+            getString(R.string.tunnel_starting, cfg.endpoint.render())
+        } else {
+            tunnel.lastError?.let { "$it · ${tunnel.status}" } ?: tunnel.status
+        }
+        statusHandler.removeCallbacks(statusTick)
+        statusHandler.post(statusTick)
+    }
+
+    private fun refreshTunnelLine() {
+        binding.textTunnelState.text = when {
+            tunnel.supported -> tunnel.statusLine
+            else -> getString(R.string.tunnel_unavailable)
+        }
+        updateTunnelButton()
+    }
+
+    /** Пробы «через туннель»: endpoint может отвечать, а трафик при этом не идти. */
+    private fun runTunnelSelfTest() {
+        if (!tunnel.isUp) {
+            toast(getString(R.string.tunnel_selftest_need_up))
+            return
+        }
+        binding.btnTunnelCheck.isEnabled = false
+        binding.textTunnelState.setText(R.string.tunnel_selftest_running)
+        Thread {
+            val report = runCatching { tunnel.selfTest() }
+                .getOrElse { "проба сломалась: ${it.javaClass.simpleName}: ${it.message}" }
+            runOnUiThread {
+                binding.btnTunnelCheck.isEnabled = true
+                binding.textTunnelState.text = report
+                sink().log("туннель: " + report.lineSequence().firstOrNull().orEmpty())
+            }
+        }.apply { isDaemon = true }.start()
+    }
+
+    private fun showTunnelLog() {
+        val dump = tunnel.diagnostics().ifBlank { getString(R.string.tunnel_log_empty) }
+        val view = android.widget.ScrollView(this).apply {
+            addView(android.widget.TextView(this@MainActivity).apply {
+                text = dump
+                textSize = 11f
+                setTextIsSelectable(true)
+                typeface = android.graphics.Typeface.MONOSPACE
+                setPadding(32, 24, 32, 24)
+            })
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.tunnel_log_title)
+            .setView(view)
+            .setPositiveButton(R.string.tunnel_log_copy) { _, _ ->
+                ConfigFiles.copyToClipboard(this, dump)
+                toast(getString(R.string.copied_ok))
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     private fun noConfig() {

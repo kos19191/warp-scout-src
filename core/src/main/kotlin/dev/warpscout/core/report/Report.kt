@@ -12,7 +12,11 @@ import java.io.File
 /** Отчёты: JSON (машиночитаемо), HTML (человечески, один файл), CSV (в таблицу), Markdown (в чат). */
 object Report {
 
-    fun toJson(report: TuningReport, includeConfig: Boolean = true): String {
+    fun toJson(
+        report: TuningReport,
+        includeConfig: Boolean = true,
+        target: ConfigTarget = ConfigTarget.DEFAULT
+    ): String {
         val candidates = JsonVal.arr(report.candidates.map { cand ->
             val fields = linkedMapOf<String, JsonVal>(
                 "endpoint" to JsonVal.str(cand.config.endpoint.render()),
@@ -28,7 +32,7 @@ object Report {
                 "replies" to JsonVal.num(cand.stats.replies),
                 "parts" to JsonVal.obj(cand.parts.asMap().mapValues { JsonVal.num(it.value) })
             )
-            if (includeConfig) fields["config"] = JsonVal.str(WgConf.render(cand.config))
+            if (includeConfig) fields["config"] = JsonVal.str(ConfigExport.configText(cand.config, target))
             JsonVal.obj(fields)
         })
 
@@ -107,7 +111,7 @@ object Report {
         }
     }
 
-    fun toHtml(report: TuningReport): String {
+    fun toHtml(report: TuningReport, target: ConfigTarget = ConfigTarget.DEFAULT): String {
         val rows = report.candidates.take(40).mapIndexed { i, c ->
             val cls = when (c.stats.bestVerdict) {
                 Verdict.HANDSHAKE_OK -> "ok"
@@ -129,7 +133,7 @@ object Report {
             """<tr><td class="${if (r.ok) "ok" else "bad"}">${esc(r.check.name)}$mark</td><td>${r.status ?: esc(r.errorClass ?: "—")}</td>
                <td>${r.elapsedMs} мс</td><td>${esc(r.check.url)}</td></tr>"""
         }
-        val bestConf = report.best?.let { "<pre>${esc(WgConf.render(it.config))}</pre>" }
+        val bestConf = report.best?.let { "<pre>${esc(ConfigExport.configText(it.config, target))}</pre>" }
             ?: "<p class=dim>Нет кандидатов.</p>"
 
         return """<!doctype html><html lang="ru"><meta charset="utf-8">
@@ -163,7 +167,12 @@ ${if (report.resources.isNotEmpty()) "<h2>Доступность ресурсо�
 </html>"""
     }
 
-    fun writeAll(report: TuningReport, dir: File, baseName: String = "warpscout-report"): List<File> {
+    fun writeAll(
+        report: TuningReport,
+        dir: File,
+        baseName: String = "warpscout-report",
+        target: ConfigTarget = ConfigTarget.DEFAULT
+    ): List<File> {
         dir.mkdirs()
         val stamp = report.finishedAt.replace(Regex("[^0-9A-Za-z-]"), "-")
         val files = listOf(
@@ -173,7 +182,11 @@ ${if (report.resources.isNotEmpty()) "<h2>Доступность ресурсо�
             File(dir, "$baseName-$stamp.md") to toMarkdown(report)
         )
         files.forEach { (f, content) -> f.writeText(content) }
-        report.best?.let { File(dir, "best-${it.config.endpoint.host}_${it.config.endpoint.port}.conf").writeText(WgConf.render(it.config)) }
+        report.best?.let { best ->
+            val ext = if (target.yaml) "yaml" else "conf"
+            File(dir, "best-${best.config.endpoint.host}_${best.config.endpoint.port}.$ext")
+                .writeText(ConfigExport.configText(best.config, target))
+        }
         return files.map { it.first } + report.best?.let { listOf(File(dir, "best-${it.config.endpoint.host}_${it.config.endpoint.port}.conf")) }.orEmpty()
     }
 
@@ -226,6 +239,14 @@ object ConfigExport {
         appendLine("    s3: ${cfg.junk.awg.s3}")
         appendLine("    s4: ${cfg.junk.awg.s4}")
     }
+
+    /**
+     * Один вход для экспорта: формат выбирается в настройках.
+     * WireGuard/AmneziaWG — .conf, Clash — YAML. YAML через [WgConf.render] не рендерится
+     * (`require(!target.yaml)`), поэтому все места обязаны идти через этот метод.
+     */
+    fun configText(cfg: WarpConfig, target: ConfigTarget = ConfigTarget.DEFAULT): String =
+        if (target.yaml) clashYaml(cfg) else WgConf.render(cfg, target)
 
     /** Короткая подсказка, что делать с конфигом (показывается в UI и в CLI). */
     fun handoffHint(cfg: WarpConfig, target: ConfigTarget = ConfigTarget.DEFAULT): String = when (target) {

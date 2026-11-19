@@ -1,14 +1,20 @@
 package dev.warpscout.app
 
 import android.content.Context
+import dev.warpscout.core.config.ConfigTarget
 import dev.warpscout.core.junk.JunkLibrary
+import dev.warpscout.core.model.ResourceCheck
 import dev.warpscout.core.model.JunkProfile
 import dev.warpscout.core.net.EndpointPool
 import dev.warpscout.core.net.EndpointSpec
 import dev.warpscout.core.net.NetSettings
 import dev.warpscout.core.net.PoolMode
 import dev.warpscout.core.presets.Presets
-import dev.warpscout.core.presets.RoutePresets
+import dev.warpscout.core.net.Cidr
+import dev.warpscout.core.presets.RuleCatalog
+import dev.warpscout.core.presets.SplitMode
+import dev.warpscout.core.presets.SplitPlan
+import dev.warpscout.core.presets.SplitTunnel
 import dev.warpscout.core.tune.TuningSpec
 
 /**
@@ -45,9 +51,36 @@ class Prefs(context: Context) {
         get() = sp.getInt("mtu", 1280)
         set(v) = sp.edit().putInt("mtu", v.coerceIn(576, 1420)).apply()
 
+    /** Режим «что гнать через туннель». По умолчанию — всё, кроме РФ (как было раньше). */
+    var splitMode: SplitMode
+        get() = SplitMode.entries.firstOrNull { it.name == sp.getString("split_mode", null) }
+            ?: SplitMode.ALL_EXCEPT_RU
+        set(v) = sp.edit().putString("split_mode", v.name).apply()
+
+    /** Категории из снапшота allow-domains, отмеченные пользователем. */
+    var selectedCategories: Set<String>
+        get() = (sp.getStringSet("categories", null) ?: RuleCatalog.DEFAULT_SELECTED)
+            .filter { RuleCatalog.BY_ID.containsKey(it) }
+            .toSet()
+        set(v) = sp.edit().putStringSet("categories", v).apply()
+
+    /** AllowedIPs для режима «свой список». */
+    var customAllowedIps: String
+        get() = sp.getString("custom_allowed", "") ?: ""
+        set(v) = sp.edit().putString("custom_allowed", v).apply()
+
+    /** Под что компилировать конфиг. По умолчанию чистый WireGuard. */
+    var configTarget: ConfigTarget
+        get() = ConfigTarget.ofOrdinal(sp.getInt("target", ConfigTarget.DEFAULT.ordinal))
+        set(v) = sp.edit().putInt("target", v.ordinal).apply()
+
+    /** Старый переключатель: оставлен для совместимости с уже сохранёнными настройками. */
     var splitWhitelist: Boolean
-        get() = sp.getBoolean("whitelist", true)
-        set(v) = sp.edit().putBoolean("whitelist", v).apply()
+        get() = splitMode == SplitMode.ALL_EXCEPT_RU
+        set(v) {
+            if (v) splitMode = SplitMode.ALL_EXCEPT_RU
+            else if (splitMode == SplitMode.ALL_EXCEPT_RU) splitMode = SplitMode.FULL
+        }
 
     var enableIpv6: Boolean
         get() = sp.getBoolean("ipv6", true)
@@ -173,6 +206,18 @@ class Prefs(context: Context) {
             maxEndpoints = maxOf(endpointCount, explicit.size))
     }
 
+    /** План AllowedIPs по текущим настройкам (без сетевых резолвов — быстро, можно звать из UI). */
+    fun splitPlan(extraCidrs: List<Cidr> = emptyList()): SplitPlan = SplitTunnel.build(
+        mode = splitMode,
+        selected = selectedCategories,
+        custom = customAllowedIps,
+        ipv6 = enableIpv6,
+        extraCidrs = extraCidrs
+    )
+
+    /** Проверки доступности по отмеченным категориям. */
+    fun resourceChecks(): List<ResourceCheck> = Presets.resourceChecks(selectedCategories)
+
     /** Как объяснить пользователю, что он сейчас выбрал. */
     fun poolModeName(): String = when (poolMode) {
         POOL_MASQUE -> "Только MASQUE"
@@ -180,14 +225,18 @@ class Prefs(context: Context) {
         else -> "Пул генератора"
     }
 
-    fun tuningSpec(): TuningSpec = TuningSpec(
+    fun tuningSpec(
+        plan: SplitPlan? = null,
+        checks: List<ResourceCheck>? = null
+    ): TuningSpec = TuningSpec(
         endpointSpec = endpointSpec(),
         junkProfiles = junkPool,
         net = NetSettings(attempts = attempts, timeoutMs = timeoutMs, concurrency = concurrency),
-        resources = if (checkResources) Presets.RESOURCE_CHECKS else emptyList(),
+        resources = if (checkResources) (checks ?: resourceChecks()) else emptyList(),
         dns = Presets.DNS[dnsIndex.coerceIn(0, Presets.DNS.size - 1)].servers,
         mtu = mtu,
-        allowedIps = if (splitWhitelist) RoutePresets.BYPASS_WHITELIST_CSV else "0.0.0.0/0, ::/0",
+        allowedIps = (plan ?: splitPlan()).allowedIps,
+        target = configTarget,
         keepalive = keepalive.takeIf { it > 0 },
         enableIpv6Address = enableIpv6,
         checkBaselineResources = checkResources,

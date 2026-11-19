@@ -6,22 +6,25 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import dev.warpscout.app.R
+import dev.warpscout.core.config.ConfigTarget
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.net.NetSettings
 import dev.warpscout.core.tunnel.DataPlane
 import dev.warpscout.core.tunnel.SocketUdpChannel
+import dev.warpscout.core.tunnel.TunnelDiagnostics
+import dev.warpscout.core.tunnel.TunnelDiagnostics.Stage
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Собственный туннель: VpnService + data plane из `:core` (handshake AWG, transport-пакеты,
@@ -29,108 +32,162 @@ import java.util.concurrent.TimeUnit
  * инициацией, а его отправляет тот же [DataPlane].
  *
  * Существует только во flavor'е `tunnel` (см. app/src/tunnel/AndroidManifest.xml).
+ *
+ * Что изменилось после разбора «запускается и молчит»:
+ *  • всё поднятие идёт в отдельном потоке: `onStartCommand` живёт в main-потоке, и ожидание
+ *    handshake (до 12 с) подвешивало UI целиком;
+ *  • каждая причина падения фиксируется кодом (`E_TUN`, `E_PROTECT`, …) и **не затирается**
+ *    остановкой сервиса;
+ *  • журнал этапов доступен из UI ([TunnelDiagnostics.dump]);
+ *  • есть `onRevoke()` и `setUnderlyingNetworks()`: отзыв разрешения и переключение Wi-Fi↔LTE
+ *    больше не оставляют «мёртвый, но включённый» туннель;
+ *  • счётчики трафика обновляются раз в секунду, чтобы «активен» можно было проверить глазами.
  */
 class WarpVpnService : VpnService() {
 
     private var plane: DataPlane? = null
     private var tun: ParcelFileDescriptor? = null
-    private var worker: Thread? = null
-    private val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
+    private var tunnelThread: Thread? = null
+    private var ticker: Thread? = null
+
+    private val running = AtomicBoolean(false)
+    private val stopping = AtomicBoolean(false)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            shutdown()
+            shutdown("остановлено пользователем")
             return START_NOT_STICKY
         }
         val text = intent?.getStringExtra(EXTRA_CONF)
         if (text.isNullOrBlank()) {
-            TunnelState.status = "нет конфигурации — запуск пропущен"
+            fail(Stage.CONFIG, "E_CONFIG", "в интенте нет конфигурации")
             stopSelf()
             return START_NOT_STICKY
         }
-        startVpn(text)
-        return START_STICKY
-    }
-
-    override fun onDestroy() {
-        shutdown()
-        super.onDestroy()
-    }
-
-    private fun startVpn(text: String) {
+        if (!running.compareAndSet(false, true)) {
+            // Повторный старт во время поднятия — не ошибка, просто не плодим второй туннель.
+            TunnelDiagnostics.log(Stage.START, "сервис уже поднимается — повторный старт проигнорирован")
+            return START_NOT_STICKY
+        }
+        stopping.set(false)
+        TunnelDiagnostics.clear()
+        TunnelState.reset()
+        TunnelState.set(Stage.START, "поднимаю туннель…")
         createChannel()
         postNotification("Поднимаю туннель…")
-
-        val cfg = runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull()
-        if (cfg == null) {
-            TunnelState.status = "конфиг не разбирается"
-            stopSelf()
-            return
+        tunnelThread = Thread({ runTunnel(text) }, "warpscout-tunnel").apply {
+            isDaemon = true
+            start()
         }
-        TunnelState.endpoint = cfg.endpoint.render()
+        return START_NOT_STICKY
+    }
 
-        val socket = try {
-            DatagramSocket().apply {
-                soTimeout = 1500
-                connect(InetSocketAddress(cfg.endpoint.host, cfg.endpoint.port))
+    // ------------------------------------------------------------------ поднятие
+
+    private fun runTunnel(text: String) {
+        var socket: DatagramSocket? = null
+        try {
+            val cfg = runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull()
+            if (cfg == null) {
+                fail(Stage.CONFIG, "E_CONFIG", "конфигурация не разбирается (нет PrivateKey/PublicKey)")
+                return
             }
-        } catch (e: Exception) {
-            TunnelState.status = "сокет: ${e.message}"
-            stopSelf()
-            return
-        }
-        if (!runCatching { protect(socket) }.getOrDefault(false)) {
-            // Без protect() пакеты туннеля попадут в сам туннель — трафик замкнётся по кругу.
-            TunnelState.status = "protect() отказал — туннель не поднят во избежание петли"
-            runCatching { socket.close() }
-            stopSelf()
-            return
-        }
+            TunnelState.endpoint = cfg.endpoint.render()
+            TunnelDiagnostics.log(Stage.CONFIG, "endpoint ${cfg.endpoint.render()}, mtu ${cfg.mtu}, allowed-ips ${cfg.allowedIps.take(80)}")
 
-        val pfd = try {
-            builderFor(cfg).establish()
-        } catch (e: Exception) {
-            TunnelState.status = "tun: ${e.message}"
-            runCatching { socket.close() }
-            stopSelf()
-            return
-        }
-        if (pfd == null) {
-            TunnelState.status = "VpnService не выдал tun"
-            runCatching { socket.close() }
-            stopSelf()
-            return
-        }
-        tun = pfd
-
-        val handshake = CountDownLatch(1)
-        val plane = DataPlane(
-            udp = SocketUdpChannel(socket, cfg.endpoint, 1500),
-            tunInput = FileInputStream(pfd.fileDescriptor),
-            tunOutput = FileOutputStream(pfd.fileDescriptor),
-            config = cfg,
-            settings = NetSettings(attempts = 3, timeoutMs = 1500, junkPacketsBeforeHandshake = 1),
-            log = { line ->
-                TunnelState.status = line
-                if (line.contains("туннель поднят")) {
-                    TunnelState.up = true
-                    handshake.countDown()
-                    postNotification("Туннель активен: ${cfg.endpoint.render()}")
+            socket = try {
+                DatagramSocket().apply {
+                    soTimeout = 1500
+                    connect(InetSocketAddress(cfg.endpoint.host, cfg.endpoint.port))
                 }
+            } catch (e: Exception) {
+                fail(Stage.SOCKET, "E_SOCKET", "сокет до ${cfg.endpoint.render()}: ${e.message}")
+                return
             }
-        )
-        this.plane = plane
-        worker = Thread {
-            val ok = runCatching { plane.run() }.getOrDefault(false)
-            TunnelState.up = false
-            if (!ok && !stopped.get()) TunnelState.status = "handshake не прошёл — endpoint молчит"
-            else if (stopped.get()) TunnelState.status = "туннель остановлен"
-            else TunnelState.status = "туннель закрыт (пира не стало)"
-            stopSelf()
-        }.apply { isDaemon = true; name = "warpscout-vpn"; start() }
+            TunnelDiagnostics.log(Stage.SOCKET, "UDP-сокет готов")
 
-        // Ждём handshake, чтобы UI/верификатор не начали проверять ресурсы в пустоту.
-        runCatching { handshake.await(12, TimeUnit.SECONDS) }
+            if (!runCatching { protect(socket) }.getOrDefault(false)) {
+                // Без protect() пакеты туннеля попадут в сам туннель — трафик замкнётся по кругу.
+                fail(Stage.PROTECT, "E_PROTECT", "protect() отказал — туннель не поднимаю, иначе петля")
+                return
+            }
+            TunnelDiagnostics.log(Stage.PROTECT, "protect() выдан")
+
+            val pfd = try {
+                builderFor(cfg).establish()
+            } catch (e: Exception) {
+                fail(Stage.TUN, "E_TUN", "establish(): ${e.javaClass.simpleName}: ${e.message}")
+                return
+            }
+            if (pfd == null) {
+                fail(Stage.TUN, "E_TUN", "VpnService не выдал tun (нет разрешения на VPN?)")
+                return
+            }
+            tun = pfd
+            bindUnderlyingNetwork()
+            TunnelDiagnostics.log(
+                Stage.TUN,
+                "tun: fd=${pfd.fd}, адрес ${cfg.account.ipv4}, DNS ${cfg.dns.joinToString(",")}, " +
+                    "маршрутов ${cfg.allowedIps.split(',').count { it.contains('/') }}"
+            )
+
+            val dataPlane = DataPlane(
+                udp = SocketUdpChannel(socket, cfg.endpoint, 1500),
+                tunInput = FileInputStream(pfd.fileDescriptor),
+                tunOutput = FileOutputStream(pfd.fileDescriptor),
+                config = cfg,
+                settings = NetSettings(attempts = 3, timeoutMs = 1500, junkPacketsBeforeHandshake = 1),
+                log = { line -> onPlaneLog(line) }
+            )
+            plane = dataPlane
+            startTicker()
+
+            val ok = runCatching { dataPlane.run() }.getOrElse { e ->
+                fail(Stage.TRANSPORT, "E_CRASH", "${e.javaClass.simpleName}: ${e.message}")
+                false
+            }
+            if (ok) {
+                TunnelDiagnostics.log(Stage.STOP, "передача завершилась (пир перестал отвечать)")
+                if (!stopping.get()) TunnelState.stopped("туннель закрыт: пир перестал отвечать")
+            } else if (!stopping.get() && TunnelState.error == null) {
+                fail(Stage.HANDSHAKE, "E_HANDSHAKE", "handshake не прошёл — endpoint молчит или режет UDP")
+            }
+        } finally {
+            runCatching { socket?.close() }
+            shutdown(if (stopping.get()) "туннель остановлен" else "туннель остановлен после ошибки")
+        }
+    }
+
+    private fun onPlaneLog(line: String) {
+        when {
+            line.contains("туннель поднят") -> {
+                TunnelState.started()
+                TunnelState.set(Stage.TRANSPORT, "туннель поднят — трафик пошёл")
+                postNotification("Туннель активен: ${TunnelState.endpoint}")
+            }
+
+            line.contains("handshake") || line.contains("попытка") || line.contains("cookie") ->
+                TunnelState.set(Stage.HANDSHAKE, line)
+
+            else -> TunnelState.set(Stage.TRANSPORT, line)
+        }
+    }
+
+    /** Раз в секунду перекладываем счётчики data plane в состояние: видно, что трафик реально идёт. */
+    private fun startTicker() {
+        ticker = Thread({
+            while (running.get() && !stopping.get()) {
+                val p = plane
+                if (p != null) {
+                    TunnelState.bytesUp = p.bytesUp
+                    TunnelState.bytesDown = p.bytesDown
+                }
+                runCatching { Thread.sleep(1000) }
+            }
+        }, "warpscout-tunnel-stats").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     private fun builderFor(cfg: WarpConfig): Builder {
@@ -150,6 +207,62 @@ class WarpVpnService : VpnService() {
         return builder
     }
 
+    /** Привязка к текущей сети: без неё после Wi-Fi↔LTE туннель умирает молча. */
+    private fun bindUnderlyingNetwork() {
+        runCatching {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val network = cm.activeNetwork
+            if (network != null) {
+                setUnderlyingNetworks(arrayOf(network))
+                TunnelDiagnostics.log(Stage.TUN, "underlying network: $network")
+            } else {
+                setUnderlyingNetworks(null)
+            }
+        }.onFailure {
+            TunnelDiagnostics.log(Stage.TUN, "underlying network не привязан: ${it.message}")
+        }
+    }
+
+    // ------------------------------------------------------------------ сервис
+
+    override fun onRevoke() {
+        TunnelDiagnostics.log(Stage.REVOKE, "система отозвала разрешение на VPN")
+        fail(Stage.REVOKE, "E_REVOKE", "VPN отозван системой (или включён другой VPN)")
+        shutdown("туннель отозван системой")
+        super.onRevoke()
+    }
+
+    override fun onDestroy() {
+        shutdown("сервис уничтожен")
+        super.onDestroy()
+    }
+
+    private fun fail(stage: Stage, code: String, message: String) {
+        TunnelState.fail(stage, code, message)
+        postNotification("$code: $message")
+    }
+
+    private fun shutdown(reason: String) {
+        stopping.set(true)
+        if (!running.getAndSet(false)) {
+            // Уже остановлены — только гасим хвосты, статус с ошибкой не трогаем.
+            runCatching { tun?.close() }
+            tun = null
+            return
+        }
+        runCatching { plane?.stop() }
+        plane = null
+        val t = tunnelThread
+        if (t != null && t !== Thread.currentThread()) runCatching { t.join(800) }
+        runCatching { ticker?.interrupt() }
+        ticker = null
+        runCatching { tun?.close() }
+        tun = null
+        TunnelState.stopped(reason)
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        runCatching { stopSelf() }
+    }
+
     private fun postNotification(text: String) {
         val n = NotificationCompat.Builder(this, CHANNEL)
             .setContentTitle(getString(R.string.app_name))
@@ -166,7 +279,9 @@ class WarpVpnService : VpnService() {
         } else {
             runCatching { startForeground(NOTIF_ID, n) }
         }
-        if (started.isFailure) TunnelState.status = "startForeground отказал: ${started.exceptionOrNull()?.message}"
+        if (started.isFailure) {
+            TunnelDiagnostics.fail(Stage.START, "E_FGS", "startForeground: ${started.exceptionOrNull()?.message}")
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching { notifyManager().notify(NOTIF_ID, n) }
         }
@@ -183,21 +298,6 @@ class WarpVpnService : VpnService() {
     private fun notifyManager(): NotificationManager =
         getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-    private fun shutdown() {
-        if (!stopped.compareAndSet(false, true)) return
-        TunnelState.up = false
-        TunnelState.status = "туннель остановлен"
-        runCatching { plane?.stop() }
-        plane = null
-        // Поток закрыт → читающий его цикл выйдет сам; join только из чужого потока.
-        val w = worker
-        if (w != null && w !== Thread.currentThread()) runCatching { w.join(1000) }
-        worker = null
-        runCatching { tun?.close() }
-        tun = null
-        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
-    }
-
     companion object {
         const val ACTION_START = "dev.warpscout.app.tunnel.START"
         const val ACTION_STOP = "dev.warpscout.app.tunnel.STOP"
@@ -208,15 +308,20 @@ class WarpVpnService : VpnService() {
         fun start(context: Context, config: WarpConfig) {
             val intent = Intent(context, WarpVpnService::class.java).apply {
                 action = ACTION_START
-                putExtra(EXTRA_CONF, WgConf.render(config))
+                // Внутри туннеля нужен полный конфиг: формат экспорта на работу data plane не влияет.
+                putExtra(EXTRA_CONF, WgConf.render(config, ConfigTarget.AMNEZIAWG))
             }
             runCatching { context.startForegroundService(intent) }
-                .onFailure { TunnelState.status = "сервис не запустился: ${it.message}" }
+                .onFailure { TunnelState.fail(Stage.START, "E_FGS", "сервис не запустился: ${it.message}") }
         }
 
         fun stop(context: Context) {
-            runCatching {
-                context.startService(Intent(context, WarpVpnService::class.java).apply { action = ACTION_STOP })
+            val intent = Intent(context, WarpVpnService::class.java).apply { action = ACTION_STOP }
+            // С Android 12 startService из фона может быть запрещён — тогда просто снимаем сервис,
+            // onDestroy всё равно сделает shutdown().
+            val asked = runCatching { context.startService(intent) }.isSuccess
+            if (!asked) {
+                runCatching { context.stopService(Intent(context, WarpVpnService::class.java)) }
             }
         }
 
@@ -226,7 +331,8 @@ class WarpVpnService : VpnService() {
             val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(2000)
             while (System.currentTimeMillis() < deadline) {
                 if (TunnelState.up) return true
-                Thread.sleep(200)
+                if (TunnelState.error != null) return false
+                Thread.sleep(150)
             }
             stop(context)
             return false

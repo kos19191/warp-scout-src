@@ -24,13 +24,33 @@
     <string name="label_dns">DNS в конфиге</string>
     <string name="label_keepalive">Keepalive, c</string>
     <string name="label_mtu">MTU</string>
-    <string name="switch_whitelist">Split-tunnel: whitelist путей обхода</string>
     <string name="switch_ipv6">Отдавать IPv6-адрес</string>
 
     <string name="section_checks">Доступность ресурсов</string>
     <string name="switch_resources">Проверять сайты (ChatGPT, Google, Discord, …)</string>
     <string name="switch_tunnel_verify">Проверять изнутри туннеля (нужна сборка с туннелем)</string>
-    <string name="resources_hint">Список проверяемых доменов редактируется в «Отчёт → ресурсы».</string>
+    <string name="resources_hint">Проверяются домены отмеченных категорий (см. «Что гнать через туннель»).</string>
+
+    <string name="split_title">Что гнать через туннель (AllowedIPs)</string>
+    <string name="btn_categories">Категории…</string>
+    <string name="btn_categories_fmt">Категории: %1$d из %2$d</string>
+    <string name="split_summary_empty">маршруты появятся здесь</string>
+    <string name="split_custom_empty">свой список пуст — впишите подсети, иначе маршрутов не будет</string>
+    <string name="split_doh_note">Домены категорий без подсетей резолвятся через DoH в момент запуска подбора.</string>
+    <string name="categories_title">Категории (снапшот %1$s)</string>
+    <string name="target_title">Формат конфига</string>
+
+    <string name="tunnel_state_idle">туннель выключен</string>
+    <string name="tunnel_starting">Туннель поднимается: %1$s</string>
+    <string name="btn_tunnel_check">Проверить туннель</string>
+    <string name="btn_tunnel_log">Журнал</string>
+    <string name="tunnel_selftest_need_up">Сначала включите туннель — проверять нечего</string>
+    <string name="tunnel_selftest_running">Проверяю трафик через туннель…</string>
+    <string name="tunnel_log_title">Журнал туннеля</string>
+    <string name="tunnel_log_copy">Скопировать</string>
+    <string name="tunnel_log_empty">Журнал пуст: туннель ещё не запускали.</string>
+    <string name="vpn_granted">Разрешение на VPN получено — поднимаю туннель</string>
+    <string name="vpn_denied">Без разрешения на VPN туннель не поднять: Android не даёт перехватывать трафик</string>
 
     <string name="btn_run">Сканировать и подобрать</string>
     <string name="btn_stop">Остановить</string>

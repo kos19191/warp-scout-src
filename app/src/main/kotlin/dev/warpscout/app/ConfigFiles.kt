@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import androidx.core.content.FileProvider
+import dev.warpscout.core.config.ConfigTarget
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.report.ConfigExport
@@ -21,15 +22,20 @@ object ConfigFiles {
     fun dir(context: Context, name: String): File =
         File(context.filesDir, name).apply { mkdirs() }
 
-    fun write(context: Context, cfg: WarpConfig, text: String): File {
-        val file = File(dir(context, "configs"), ConfigExport.filename(cfg))
+    fun write(context: Context, cfg: WarpConfig, text: String, name: String = ConfigExport.filename(cfg)): File {
+        val file = File(dir(context, "configs"), name)
         file.writeText(text)
         return file
     }
 
     /** Кладёт .conf в «Загрузки» через MediaStore (без разрешений) либо в app-specific каталог. */
-    fun saveToDownloads(context: Context, cfg: WarpConfig, text: String): String {
-        val name = ConfigExport.filename(cfg)
+    fun saveToDownloads(
+        context: Context,
+        cfg: WarpConfig,
+        text: String,
+        fileName: String = ConfigExport.filename(cfg)
+    ): String {
+        val name = fileName
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, name)
@@ -72,13 +78,22 @@ object ConfigFiles {
         cm.setPrimaryClip(ClipData.newPlainText("WARP config", text))
     }
 
-    /** Текст для ручного переноса в AmneziaVPN (инструкция + сам конфиг одним блоком). */
-    fun amneziaHandoff(cfg: WarpConfig, text: String): String =
+    /** Текст для ручного переноса (инструкция под выбранный формат + сам конфиг одним блоком). */
+    fun amneziaHandoff(cfg: WarpConfig, text: String, target: ConfigTarget = ConfigTarget.DEFAULT): String =
         buildString {
-            appendLine(ConfigExport.handoffHint(cfg))
+            appendLine(ConfigExport.handoffHint(cfg, target))
             appendLine()
             appendLine(text)
         }
 
-    fun render(cfg: WarpConfig): String = WgConf.render(cfg)
+    /**
+     * Один вход для всех экспортов: формат выбирается в настройках.
+     * WireGuard/AmneziaWG — .conf, Clash — YAML.
+     */
+    fun render(cfg: WarpConfig, target: ConfigTarget = ConfigTarget.DEFAULT): String =
+        ConfigExport.configText(cfg, target)
+
+    /** Имя файла под формат: .conf для WireGuard/AmneziaWG, .yaml для Clash. */
+    fun fileName(cfg: WarpConfig, target: ConfigTarget = ConfigTarget.DEFAULT): String =
+        if (target.yaml) ConfigExport.filename(cfg).removeSuffix(".conf") + ".yaml" else ConfigExport.filename(cfg)
 }

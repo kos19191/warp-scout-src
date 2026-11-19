@@ -6,12 +6,18 @@ import android.os.Looper
 import dev.warpscout.core.keys.KeySource
 import dev.warpscout.core.keys.KeySourceConfig
 import dev.warpscout.core.model.WarpConfig
+import dev.warpscout.core.net.Cidr
+import dev.warpscout.core.net.DohClient
 import dev.warpscout.core.net.HttpClient
+import dev.warpscout.core.net.RuleData
 import dev.warpscout.core.net.ResourceProber
 import dev.warpscout.core.net.Socks5Endpoint
 import dev.warpscout.core.net.TlsProber
 import dev.warpscout.core.net.WgProber
 import dev.warpscout.core.report.Report
+import dev.warpscout.core.presets.RuleCatalog
+import dev.warpscout.core.presets.SplitMode
+import dev.warpscout.core.presets.SplitPlan
 import dev.warpscout.core.tune.AutoTuner
 import dev.warpscout.core.tune.ProgressSink
 import dev.warpscout.core.tune.TuningResult
@@ -48,6 +54,24 @@ class Engine(private val context: Context) {
         manual: WarpConfig?,
         sink: ProgressSink,
         onDone: (TuningResult?, String?) -> Unit
+    ) = startLazy({ spec }, manual, sink, onDone)
+
+    /**
+     * Как [start], но настройки собираются **на потоке подбора**: в режиме «только выбранные
+     * категории» сначала нужно дорезолвить домены через DoH, а делать это в UI-потоке нельзя.
+     */
+    fun start(
+        prefs: Prefs,
+        manual: WarpConfig?,
+        sink: ProgressSink,
+        onDone: (TuningResult?, String?) -> Unit
+    ) = startLazy({ buildSpec(prefs, sink) }, manual, sink, onDone)
+
+    private fun startLazy(
+        build: () -> TuningSpec,
+        manual: WarpConfig?,
+        sink: ProgressSink,
+        onDone: (TuningResult?, String?) -> Unit
     ) {
         if (running) {
             onDone(null, "Подбор уже выполняется")
@@ -57,7 +81,10 @@ class Engine(private val context: Context) {
         running = true
         cancelled.set(false)
         executor.execute {
-            val outcome = runCatching { runOnce(spec, manual, sink) }
+            val outcome = runCatching {
+                val spec = build()
+                runOnce(spec, manual, sink)
+            }
             main.post {
                 running = false
                 onDone(outcome.getOrNull(), outcome.exceptionOrNull()?.let { describe(it) })
@@ -66,10 +93,62 @@ class Engine(private val context: Context) {
     }
 
     /** Для WorkManager: тот же цикл, но синхронно. */
+    fun runBlocking(prefs: Prefs, manual: WarpConfig?, sink: ProgressSink, limitMs: Long): TuningResult? {
+        val latch = CountDownLatch(1)
+        var result: TuningResult? = null
+        start(prefs, manual, sink) { r, _ -> result = r; latch.countDown() }
+        latch.await(limitMs, TimeUnit.MILLISECONDS)
+        return result
+    }
+
+    /** План AllowedIPs последнего запуска — показываем в UI, чтобы было видно, что туннелируем. */
+    @Volatile
+    var lastPlan: SplitPlan? = null
+        private set
+
+    /**
+     * Собрать спецификацию: план маршрутов + проверки по отмеченным категориям.
+     * Домены категорий без подсетей (YouTube, OpenAI, Claude…) резолвятся через DoH здесь же.
+     */
+    private fun buildSpec(prefs: Prefs, sink: ProgressSink): TuningSpec {
+        val extra = resolveCategoryDomains(prefs, sink)
+        val plan = prefs.splitPlan(extra)
+        lastPlan = plan
+        sink.log("allowed-ips: ${plan.mode.title} → ${plan.summary}")
+        plan.notes.forEach { sink.log("  · $it") }
+        val checks = if (prefs.checkResources) prefs.resourceChecks() else emptyList()
+        if (checks.isNotEmpty()) {
+            sink.log("проверок доступности: ${checks.size} (категории: ${prefs.selectedCategories.size})")
+        }
+        return prefs.tuningSpec(plan, checks)
+    }
+
+    private fun resolveCategoryDomains(prefs: Prefs, sink: ProgressSink): List<Cidr> {
+        val mode = prefs.splitMode
+        if (mode != SplitMode.ONLY_SELECTED && mode != SplitMode.ONLY_BLOCKED_IN_RU) return emptyList()
+        val ids = prefs.selectedCategories.filter { RuleCatalog.BY_ID[it]?.hasSubnets == false }
+        if (ids.isEmpty()) return emptyList()
+        sink.log("DoH: резолвлю домены ${ids.size} категорий без подсетей…")
+        val doh = DohClient()
+        val out = LinkedHashSet<Cidr>()
+        for (id in ids) {
+            val category = RuleCatalog.BY_ID[id] ?: continue
+            for (domain in RuleData.domains(id).take(MAX_DOMAINS_PER_CATEGORY)) {
+                if (out.size >= MAX_RESOLVED_ADDRESSES) break
+                doh.resolveA(domain).orEmpty().forEach { ip ->
+                    Cidr.parse("$ip/32")?.let { out += it }
+                }
+            }
+            sink.log("  · ${category.title}: всего адресов ${out.size}")
+        }
+        return out.toList()
+    }
+
+    /** Для WorkManager: тот же цикл, но синхронно (со старым спеком — без DoH-резолва). */
     fun runBlocking(spec: TuningSpec, manual: WarpConfig?, sink: ProgressSink, limitMs: Long): TuningResult? {
         val latch = CountDownLatch(1)
         var result: TuningResult? = null
-        start(spec, manual, sink, { r, _ -> result = r; latch.countDown() })
+        start(spec, manual, sink) { r, _ -> result = r; latch.countDown() }
         latch.await(limitMs, TimeUnit.MILLISECONDS)
         return result
     }
@@ -124,7 +203,9 @@ class Engine(private val context: Context) {
             CleanNetwork.unbind(context)
         }
         last = result
-        runCatching { Report.writeAll(result.report, ConfigFiles.dir(context, "reports"), "warpscout") }
+        runCatching {
+            Report.writeAll(result.report, ConfigFiles.dir(context, "reports"), "warpscout", prefs.configTarget)
+        }
         result.best?.let { cfg ->
             runCatching { ConfigFiles.write(context, cfg, result.configText ?: ConfigFiles.render(cfg)) }
         }
@@ -148,16 +229,25 @@ class Engine(private val context: Context) {
         if (best != null && tunnel.supported) {
             val allowed = runCatching { android.net.VpnService.prepare(context) == null }.getOrDefault(false)
             when {
-                prefs.autoApply && !allowed ->
+                !allowed ->
                     sink.log("авто-применение пропущено: нет разрешения на VPN — открой приложение и нажми «Туннель»")
                 prefs.autoApply || wasUp -> if (tunnel.start(best)) {
-                    sink.log("туннель поднят на подобранном конфиге: ${best.endpoint.render()}")
+                    sink.log("туннель поднимается на подобранном конфиге: ${best.endpoint.render()}")
                 } else {
-                    sink.log("туннель не поднялся: ${tunnel.status}")
+                    val why = tunnel.lastError?.let { "$it · ${tunnel.status}" } ?: tunnel.status
+                    sink.log("туннель не поднялся: $why")
                 }
             }
         }
         return result
+    }
+
+    private companion object {
+        /** Сколько доменов категории резолвить через DoH: больше — длиннее AllowedIPs и дольше старт. */
+        const val MAX_DOMAINS_PER_CATEGORY = 8
+
+        /** Жёсткий предел на число /32-адресов из DoH. */
+        const val MAX_RESOLVED_ADDRESSES = 400
     }
 
     private fun describe(e: Throwable): String {

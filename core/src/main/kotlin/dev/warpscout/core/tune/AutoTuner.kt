@@ -22,6 +22,7 @@ import dev.warpscout.core.net.WgProber
 import dev.warpscout.core.presets.Presets
 import dev.warpscout.core.presets.ResourceChecks
 import dev.warpscout.core.config.ConfigTarget
+import dev.warpscout.core.report.ConfigExport
 import dev.warpscout.core.config.WgConf
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -303,7 +304,7 @@ class AutoTuner(
             notes = notes
         )
         val best = candidates.maxByOrNull { it.score }
-        val text = best?.let { WgConf.render(it.config, spec.target) }
+        val text = best?.let { ConfigExport.configText(it.config, spec.target) }
         progress.log(
             if (best == null) "Готово: ни один кандидат не набрал баллов."
             else "Лучший: ${best.config.endpoint.render()} · ${best.junk.name} · ${best.score} балла"

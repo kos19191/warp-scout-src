@@ -20,6 +20,23 @@ interface TunnelController {
     fun start(config: WarpConfig): Boolean
     fun stop()
 
+    /** Код последней ошибки поднятия (`E_TUN`, `E_HANDSHAKE`, …) или null. */
+    val lastError: String? get() = null
+
+    /** Строка для UI: состояние + трафик. */
+    val statusLine: String get() = status
+
+    val bytesUp: Long get() = 0L
+    val bytesDown: Long get() = 0L
+
+    /** Проверка «трафик реально идёт»: несколько проб через поднятый туннель. Блокирующая. */
+    fun selfTest(): String = "в этой сборке самопроверки туннеля нет"
+
+    /** Журнал этапов поднятия туннеля (для копирования в отчёт/issue). */
+    fun diagnostics(): String = ""
+
+    fun clearDiagnostics() {}
+
     /** Верификация доступности ресурсов из-под туннеля; null — если туннеля нет. */
     fun verifier(): TunnelVerifier? = null
 }
