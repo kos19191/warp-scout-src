@@ -17,11 +17,7 @@ import com.google.android.material.tabs.TabLayout
 import dev.warpscout.app.databinding.ActivityMainBinding
 import android.net.Uri
 import dev.warpscout.core.config.WgConf
-import dev.warpscout.core.dpi.DpiComparator
-import dev.warpscout.core.dpi.DpiComparison
-import dev.warpscout.core.dpi.DpiOutcome
 import dev.warpscout.core.model.ResourceCheck
-import dev.warpscout.core.net.Socks5Endpoint
 import dev.warpscout.core.junk.JunkLibrary
 import dev.warpscout.core.keys.KeySource
 import dev.warpscout.core.lists.AllowListPlanner
@@ -97,6 +93,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Первым делом: если приложение падало, это должно попасть в журнал, а не исчезнуть.
+        CrashLog.install(this)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
@@ -112,6 +110,12 @@ class MainActivity : AppCompatActivity() {
         updateEndpointNote()
         watchNetworkChanges()
         askNotificationPermission()
+        CrashLog.lastCrash(this)?.let { crash ->
+            banner(getString(R.string.banner_last_crash), error = true)
+            TunnelDebug.error("прошлый запуск завершился падением", crash.lineSequence().first().take(160))
+            sink().log("✗ прошлый запуск завершился падением: " + crash.lineSequence().first().take(160))
+            sink().log("   подробности: Journal → «Скопировать журнал» (раздел «Падения»)")
+        }
         binding.textStatus.setText(R.string.status_idle)
     }
 
@@ -181,9 +185,6 @@ class MainActivity : AppCompatActivity() {
         binding.appsGroup.check(appsButtonId(prefs.appsMode))
         binding.checkListChecks.isChecked = prefs.checkByLists
         binding.textTargetNote.text = prefs.confTargetEnum().note
-        binding.editSocks.setText(prefs.byedpiProxy)
-        binding.switchViaByedpi.isChecked = prefs.tuneViaByedpi
-        binding.textByedpiState.text = byedpiState()
         updatePoolSummary()
         showLastRun()
         binding.textNetwork.text = CleanNetwork.statusLine(this)
@@ -201,8 +202,6 @@ class MainActivity : AppCompatActivity() {
         prefs.verifyInTunnel = binding.switchTunnelVerify.isChecked
         if (binding.dnsSpinner.selectedItemPosition >= 0) prefs.dnsIndex = binding.dnsSpinner.selectedItemPosition
         prefs.poolMode = poolModeOf(binding.poolGroup.checkedButtonId)
-        prefs.byedpiProxy = binding.editSocks.text?.toString()?.trim().orEmpty()
-        prefs.tuneViaByedpi = binding.switchViaByedpi.isChecked
         prefs.autoApply = binding.checkAutoApply.isChecked
         prefs.confTarget = confTargetOf(binding.exportGroup.checkedButtonId)
         prefs.routesMode = binding.spinnerRoutes.selectedItemPosition.coerceIn(0, 3)
@@ -273,11 +272,11 @@ class MainActivity : AppCompatActivity() {
     private fun setupTabs(initial: Int) {
         pages = listOf(
             binding.pageStart, binding.pageScan, binding.pageConfig,
-            binding.pageApps, binding.pageDpi, binding.pageLog
+            binding.pageApps, binding.pageLog
         )
         val titles = listOf(
             R.string.tab_start, R.string.tab_scan, R.string.tab_config,
-            R.string.tab_apps, R.string.tab_dpi, R.string.tab_log
+            R.string.tab_apps, R.string.tab_log
         )
         binding.tabs.removeAllTabs()
         titles.forEach { binding.tabs.addTab(binding.tabs.newTab().setText(it)) }
@@ -613,7 +612,6 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnQuickConfig.setOnClickListener { quickGenerate() }
 
-        binding.btnDpiCompare.setOnClickListener { runDpiCompare() }
 
         binding.exportGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
             if (!isChecked || suppressExportListener) return@addOnButtonCheckedListener
@@ -689,7 +687,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnAppTraffic.setOnClickListener { showAppTraffic() }
 
         binding.btnTunnelCopy.setOnClickListener {
-            ConfigFiles.copyToClipboard(this, TunnelDebug.dump())
+            ConfigFiles.copyToClipboard(this, TunnelDebug.dump() + "\n\n" + CrashLog.describe(this))
             toast(getString(R.string.copied_ok))
         }
 
@@ -1102,85 +1100,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Есть ли на устройстве ByeDPI и в каком режиме он нам поможет. */
-    private fun byedpiState(): String {
-        val installed = runCatching {
-            packageManager.getPackageInfo(BYEDPI_PACKAGE, 0)
-            true
-        }.getOrDefault(false)
-        val proxy = Socks5Endpoint.parse(prefs.byedpiProxy.ifBlank { Socks5Endpoint.BYEDPI_DEFAULT.render() })
-        val alive = proxy != null && threadProxyAlive(proxy)
-        return when {
-            installed && alive -> "ByeDPI установлен, SOCKS5 на ${proxy?.render()} отвечает — можно сравнивать"
-            installed -> "ByeDPI установлен, но ${proxy?.render() ?: "SOCKS5"} не отвечает: включи режим прокси (не VPN)"
-            alive -> "ByeDPI не найден среди приложений, но SOCKS5 на ${proxy?.render()} отвечает — сравниваем"
-            else -> getString(R.string.byedpi_not_installed)
-        }
-    }
-
-    private fun threadProxyAlive(proxy: Socks5Endpoint): Boolean = runCatching {
-        java.net.Socket().apply {
-            connect(java.net.InetSocketAddress(proxy.host, proxy.port), 400)
-            close()
-        }
-        true
-    }.getOrDefault(false)
-
-    /**
-     * «Что режет: DPI или IP?» — одна и та же пачка ресурсов мерится напрямую и через SOCKS5 ByeDPI.
-     * Идём по своему же потоку: сравнение сетевое, по UI-потоку оно бы заблочило экран на десятки секунд.
-     */
-    private fun runDpiCompare() {
-        persistUi()
-        val proxy = Socks5Endpoint.parse(prefs.byedpiProxy)
-        if (proxy == null) {
-            toast(getString(R.string.hint_socks))
-            binding.textByedpiState.text = byedpiState()
-            return
-        }
-        binding.btnDpiCompare.isEnabled = false
-        binding.textByedpiState.setText(R.string.byedpi_compare_running)
-        val checks = Presets.RESOURCE_CHECKS
-        Thread {
-            val cmp = runCatching { DpiComparator().compare(checks, proxy) }
-            runOnUiThread {
-                binding.btnDpiCompare.isEnabled = true
-                val comparison = cmp.getOrNull()
-                if (comparison == null) {
-                    binding.textByedpiState.text =
-                        "Сравнение не вышло: ${cmp.exceptionOrNull()?.let { it.javaClass.simpleName }} " +
-                            "(${cmp.exceptionOrNull()?.message?.take(120)})"
-                    return@runOnUiThread
-                }
-                binding.textByedpiState.text = renderComparison(comparison)
-                val saved = runCatching {
-                    val file = File(ConfigFiles.dir(this, "reports"), "byedpi-compare.txt")
-                    file.writeText(comparison.renderText())
-                    file.absolutePath
-                }.getOrNull()
-                if (saved != null) toast(getString(R.string.byedpi_saved, saved))
-                sink().log("byedpi: ${comparison.headline()}")
-            }
-        }.apply { isDaemon = true }.start()
-    }
-
-    private fun renderComparison(cmp: DpiComparison): String = buildString {
-        append(cmp.headline())
-        if (!cmp.usable) return@buildString
-        appendLine()
-        cmp.rows.groupBy { it.outcome }.forEach { (outcome, rows) ->
-            appendLine("${getString(labelFor(outcome))} — ${rows.size}: ${rows.joinToString(", ") { it.name }}")
-        }
-    }
-
-    private fun labelFor(outcome: DpiOutcome): Int = when (outcome) {
-        DpiOutcome.OPEN_BOTH -> R.string.dpi_outcome_open_both
-        DpiOutcome.OPEN_ONLY_VIA_PROXY -> R.string.dpi_outcome_dpi
-        DpiOutcome.OPEN_ONLY_DIRECT -> R.string.dpi_outcome_proxy_bad
-        DpiOutcome.BLOCKED_BOTH -> R.string.dpi_outcome_ip
-        DpiOutcome.PROXY_UNREACHABLE -> R.string.dpi_outcome_no_proxy
-    }
-
     // ------------------------------------------------ экспорт/сервер/каналы
 
     private val BLOCK_IDS get() = dev.warpscout.core.lists.AllowLists.bySide(dev.warpscout.core.lists.ListSide.BLOCK).map { it.id }.toSet()
@@ -1248,7 +1167,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         binding.btnRefreshLists.isEnabled = false
-        binding.textRoutesState.setText(R.string.byedpi_compare_running)
+        binding.textRoutesState.setText(R.string.state_working)
         Thread {
             val res = lists.refresh(ids) { line -> runOnUiThread { sink().log(line) } }
             runOnUiThread {
@@ -1705,9 +1624,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private companion object {
-        /** Пакет ByeDPI for Android — нужен только чтобы подсказать «установлено/не установлено». */
-        const val BYEDPI_PACKAGE = "io.github.dovecoteescapee.byedpi"
-
         /** Индекс выбранной вкладки переживает поворот экрана. */
         /** Сколько приложений рисуем сразу: остальные — через поиск (иначе экран «залипает»). */
         const val APP_ROWS_LIMIT = 60

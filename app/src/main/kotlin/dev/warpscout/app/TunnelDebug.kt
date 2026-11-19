@@ -20,7 +20,15 @@ object TunnelDebug {
     private val lock = Any()
     private val lines = ArrayDeque<String>()
     private var lastStageAt = 0L
-    private val stamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    /**
+     * SimpleDateFormat не потокобезопасен, а журнал пишут минимум четыре потока (boot сервиса,
+     * диспетчер пакетов, проба региона, главный поток UI). Общий экземпляр на этом месте падал
+     * с ArrayIndexOutOfBoundsException — то есть «приложение вылетает, журнал ничего не пишет».
+     * Свой экземпляр на поток дешевле, чем блокировка вокруг форматирования.
+     */
+    private val stamp = object : ThreadLocal<SimpleDateFormat>() {
+        override fun initialValue() = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    }
 
     /** Признак того, что вообще была попытка поднять туннель (в `scout`-сборке — никогда). */
     @Volatile
@@ -63,9 +71,12 @@ object TunnelDebug {
 
     fun stage(message: String) {
         touched = true
-        val now = System.currentTimeMillis()
-        val took = if (lastStageAt == 0L) "" else " (+${now - lastStageAt} мс)"
-        lastStageAt = now
+        val took = synchronized(lock) {
+            val now = System.currentTimeMillis()
+            val diff = if (lastStageAt == 0L) "" else " (+${now - lastStageAt} мс)"
+            lastStageAt = now
+            diff
+        }
         add("→ $message$took")
     }
 
@@ -89,7 +100,7 @@ object TunnelDebug {
 
     private fun add(line: String) {
         lastStageMs = System.currentTimeMillis()
-        val full = "${stamp.format(Date())} $line"
+        val full = "${stamp.get()!!.format(Date())} $line"
         synchronized(lock) {
             lines.addLast(full)
             while (lines.size > MAX_LINES) lines.removeFirst()

@@ -15,6 +15,14 @@ class TuneWorker(appContext: Context, params: WorkerParameters) : Worker(appCont
     override fun doWork(): Result {
         val context = applicationContext
         val prefs = Prefs(context)
+        // Подбор поднимает и гасит настоящий VpnService (проверка ресурсов «из-под туннеля»).
+        // Если туннель сейчас работает, это означало бы «сам себя выключил»: именно так выглядело
+        // «нажал галочку каждый час — и соединение отвалилось». Не мешаем и заходим позже.
+        // `TunnelState` живёт во flavor'е `tunnel`, поэтому смотрим через общий мост сборки.
+        if (runCatching { TunnelFactory.create(context).isUp }.getOrDefault(false)) {
+            notify(context, "авто-подбор отложен: туннель работает, попробую позже")
+            return Result.retry()
+        }
         val manual = prefs.manualConf.takeIf { it.isNotBlank() }
             ?.let { runCatching { dev.warpscout.core.config.WgConf.toWarpConfig("импорт", it) }.getOrNull() }
         val sink = object : ProgressSink {

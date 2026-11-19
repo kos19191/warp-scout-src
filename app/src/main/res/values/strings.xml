@@ -226,4 +226,6 @@
     <string name="banner_network_changed">Сеть сменилась — переподключаю туннель</string>
     <string name="banner_scan_stops_tunnel">Остановил туннель для подбора: из-под туннеля замеры врут (идут через WARP)</string>
     <string name="tunnel_failed_hint">Ни одна точка не ответила на handshake. Это сетевая блокировка UDP к WARP: попробуйте другой профиль шума, порт, включить или выключить IPv6 и Wi-Fi/мобильные данные по очереди.</string>
+    <string name="state_working">Работаю…</string>
+    <string name="banner_last_crash">Прошлый запуск завершился падением — подробности в «Журнал» → «Скопировать журнал»</string>
 </resources>

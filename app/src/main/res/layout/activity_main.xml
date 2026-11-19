@@ -785,6 +785,33 @@
 
 
             </LinearLayout>
+                <!-- ── шум: маскировка handshake (осталось от вкладки «Обход DPI») ── -->
+                <!-- ── шум ───────────────────────────────────────────────── -->
+                <TextView
+                    style="@style/SectionHeader"
+                    android:text="@string/section_junk" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/junk_note"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <LinearLayout
+                    android:id="@+id/junkBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:orientation="vertical" />
+
+<com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnSaveDpi"
+                    style="@style/Widget.Material3.Button"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/btn_save_apply" />
+
         </ScrollView>
 
         <!-- ══════ вкладка «Туннель» ══════ -->
@@ -907,97 +934,6 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:text="@string/btn_save_apply" />
-            </LinearLayout>
-        </ScrollView>
-
-        <!-- ══════ вкладка «Обход DPI» ══════ -->
-        <ScrollView
-            android:id="@+id/pageDpi"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:fillViewport="true"
-            android:visibility="gone">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:paddingStart="16dp"
-                android:paddingEnd="16dp"
-                android:paddingBottom="24dp">
-
-                <!-- ── шум ───────────────────────────────────────────────── -->
-                <TextView
-                    style="@style/SectionHeader"
-                    android:text="@string/section_junk" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/junk_note"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <LinearLayout
-                    android:id="@+id/junkBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:orientation="vertical" />
-
-                <!-- ── обход DPI: ByeDPI / GoodbyDPI ──────────────────────── -->
-                <TextView
-                    style="@style/SectionHeader"
-                    android:text="@string/section_byedpi" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/byedpi_note"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <com.google.android.material.textfield.TextInputLayout
-                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:hint="@string/hint_socks">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editSocks"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:inputType="textUri" />
-                </com.google.android.material.textfield.TextInputLayout>
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchViaByedpi"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/switch_via_byedpi" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnDpiCompare"
-                    style="@style/Widget.Material3.Button.TonalButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="@string/btn_dpi_compare" />
-
-                <TextView
-                    android:id="@+id/textByedpiState"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-<com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnSaveDpi"
-                    style="@style/Widget.Material3.Button"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="@string/btn_save_apply" />
-
-
             </LinearLayout>
         </ScrollView>
 
