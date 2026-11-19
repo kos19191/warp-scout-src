@@ -65,6 +65,31 @@ class WarpVpnService : VpnService() {
     @Volatile
     private var starting = false
 
+    /** Текст конфига, которым поднят туннель: по нему же переподнимаем после смены сети. */
+    @Volatile
+    private var lastConfigText: String? = null
+    @Volatile
+    private var lastStartId: Int = 0
+
+    /**
+     * Слежение за «настоящей» сетью (без VPN). Раньше это жило в MainActivity — и в фоне, когда
+     * экран погашен или активити уничтожена, не работало вовсе: переключение Wi-Fi ↔ мобильные
+     * оставляло мёртвый UDP-сокет, туннель молчал, а замочек в шторке продолжал висеть.
+     * Теперь наблюдатель живёт в сервисе — он существует всё время работы туннеля.
+     */
+    private var netCallback: android.net.ConnectivityManager.NetworkCallback? = null
+
+    /** Сеть, через которую поднимали туннель: с ней сравниваем, чтобы не перезапускаться зря. */
+    @Volatile
+    private var baselineNetwork: android.net.Network? = null
+
+    /** Сеть менялась — значит, туннель нужно переподнять, даже если новой сети пока нет. */
+    @Volatile
+    private var networkChanged = false
+
+    @Volatile
+    private var lastNetRestartAt: Long = 0L
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             shutdown()
@@ -86,6 +111,8 @@ class WarpVpnService : VpnService() {
             stopSelf()
             return START_NOT_STICKY
         }
+        lastConfigText = text
+        lastStartId = startId
         // Раньше здесь был startVpn(text) напрямую, и onStartCommand блокировался на 12 с, ожидая
         // handshake. Главный поток сервиса — он же главный поток приложения: UI в это время висел,
         // и выглядело это ровно как «туннель запускается, потом без ошибок ничего не происходит».
@@ -123,6 +150,7 @@ class WarpVpnService : VpnService() {
         createChannel()
         postNotification("Поднимаю туннель…")
 
+        watchNetwork()
         TunnelDebug.stage("конфиг получен (${text.toByteArray().size} байт)")
         val cfg = runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull()
         if (cfg == null) {
@@ -224,6 +252,8 @@ class WarpVpnService : VpnService() {
             settings = NetSettings(
                 attempts = 5, timeoutMs = 1000, retryEveryMs = 400, junkPacketsBeforeHandshake = 1
             ),
+            // Сокет перестал отправлять — сеть ушла без уведомления от системы. Переподнимаем.
+            onFatal = { reason -> restartAfterNetworkChange(reason) },
             log = { line ->
                 TunnelState.status = line
                 when {
@@ -549,6 +579,13 @@ class WarpVpnService : VpnService() {
         starting = false
         TunnelState.up = false
         TunnelState.status = "туннель остановлен"
+        unwatchNetwork()
+        closeAll()
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+    }
+
+    /** Закрыть сокеты, tun и оба data plane — без решения «останавливаемся навсегда». */
+    private fun closeAll() {
         runCatching { dispatcher?.stop() }
         dispatcher = null
         runCatching { plane2?.stop() }
@@ -567,7 +604,129 @@ class WarpVpnService : VpnService() {
         udpSocket = null
         runCatching { tun?.close() }
         tun = null
-        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+    }
+
+    // ------------------------------------------------------------ смена сети
+
+    /**
+     * Следим за сетью, у которой нет флага VPN (то есть за настоящей: Wi-Fi или мобильной).
+     *
+     * `registerDefaultNetworkCallback` здесь не годится: при поднятом туннеле «сеть по умолчанию» —
+     * это сам туннель, и смена Wi-Fi ↔ LTE его не трогает. Поэтому просим сеть с
+     * `NET_CAPABILITY_NOT_VPN` и сравниваем с той, на которой поднимались.
+     */
+    private fun watchNetwork() {
+        if (netCallback != null) return
+        val cm = runCatching { getSystemService(android.net.ConnectivityManager::class.java) }.getOrNull()
+            ?: return
+        val request = runCatching {
+            android.net.NetworkRequest.Builder()
+                .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .build()
+        }.getOrNull() ?: return
+        val cb = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) {
+                val base = baselineNetwork
+                if (base == null) {
+                    baselineNetwork = network
+                    TunnelDebug.stage("сеть туннеля: ${describeNetwork(network)}")
+                    if (networkChanged) {
+                        // Сети не было (или сменилась, пока её не было) — поднимаем заново.
+                        restartAfterNetworkChange("сеть появилась: ${describeNetwork(network)}")
+                    }
+                    return
+                }
+                if (network == base) return
+                baselineNetwork = network
+                networkChanged = true
+                restartAfterNetworkChange("новая сеть: ${describeNetwork(network)}")
+            }
+
+            override fun onLost(network: android.net.Network) {
+                if (network != baselineNetwork) return
+                baselineNetwork = null
+                networkChanged = true
+                TunnelState.up = false
+                TunnelState.status = "сеть пропала — жду новую"
+                postNotification(TunnelState.status)
+                TunnelDebug.stage("сеть пропала (${describeNetwork(network)}): старый UDP-сокет мёртв")
+                // Если новая сеть не появится, tun нельзя оставлять: приложения будут отправлять
+                // трафик в туннель, из которого ничего не выходит (чёрная дыра, «интернета нет»).
+                Thread({
+                    runCatching { Thread.sleep(45_000) }
+                    if (stopped.get() || baselineNetwork != null) return@Thread
+                    TunnelDebug.stage("45 секунд без сети — снимаю туннель, чтобы трафик не уходил в пустоту")
+                    TunnelState.status = "нет сети — туннель снят"
+                    postNotification(TunnelState.status)
+                    epoch.incrementAndGet()
+                    stopped.set(true)
+                    starting = false
+                    TunnelState.up = false
+                    TunnelState.busy = false
+                    closeAll()
+                    stopped.set(false)
+                }, "warpscout-net-watchdog").apply { isDaemon = true }.start()
+            }
+        }
+        val ok = runCatching { cm.registerNetworkCallback(request, cb) }.isSuccess
+        if (ok) netCallback = cb else TunnelDebug.stage("не удалось следить за сетью: нет разрешения?")
+    }
+
+    private fun unwatchNetwork() {
+        val cb = netCallback ?: return
+        netCallback = null
+        runCatching {
+            getSystemService(android.net.ConnectivityManager::class.java)?.unregisterNetworkCallback(cb)
+        }
+    }
+
+    private fun describeNetwork(network: android.net.Network): String = runCatching {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java)
+        val caps = cm?.getNetworkCapabilities(network)
+        val kind = when {
+            caps == null -> "сеть"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "мобильная"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+            else -> "сеть"
+        }
+        "$kind ${network}"
+    }.getOrDefault("сеть")
+
+    /**
+     * Переподнять туннель на новой сети. Полный цикл закрытия/открытия здесь обязателен: старый
+     * UDP-сокет привязан к прежнему маршруту, и после смены сети каждый `sendto` падает с
+     * ENETUNREACH — «туннель есть, а трафика нет», при этом замочек в шторке висит активным.
+     */
+    private fun restartAfterNetworkChange(why: String) {
+        val now = System.currentTimeMillis()
+        synchronized(this) {
+            // Переключение сети приходит пачкой событий: перезапускаемся не чаще раза в 4 секунды.
+            if (now - lastNetRestartAt < 4_000L) return
+            lastNetRestartAt = now
+        }
+        Thread({
+            val text = lastConfigText ?: return@Thread
+            TunnelDebug.stage("$why — переподключаю туннель")
+            TunnelState.status = "переподключаюсь после смены сети"
+            postNotification(TunnelState.status)
+            val myEpoch = epoch.incrementAndGet()
+            stopped.set(true)
+            TunnelState.up = false
+            starting = false
+            TunnelState.busy = false
+            closeAll()
+            // Небольшая пауза: системе нужно поднять маршрут по новой сети, иначе сокет снова
+            // привяжется к несуществующему пути.
+            runCatching { Thread.sleep(400) }
+            // Пока спали, пользователь мог нажать «Отключить»: тогда переподнимать нечего.
+            if (epoch.get() != myEpoch) return@Thread
+            stopped.set(false)
+            networkChanged = false
+            baselineNetwork = null
+            startVpn(text, lastStartId)
+        }, "warpscout-net-restart").apply { isDaemon = true }.start()
     }
 
     companion object {

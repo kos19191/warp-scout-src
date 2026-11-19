@@ -77,17 +77,6 @@ class MainActivity : AppCompatActivity() {
     private var exitRegion = ""
     private var settingsReconnect: Runnable? = null
 
-    /** Слежение за сетью: при её смене старый UDP-сокет туннеля становится мёртвым. */
-    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
-    private var networkLost = false
-    private var lastNetReconnectAt = 0L
-
-    private fun isVpn(network: android.net.Network): Boolean = runCatching {
-        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return false
-        cm.getNetworkCapabilities(network)
-            ?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true
-    }.getOrDefault(false)
-
     /** Пока true — переподключение по настройкам не затевается (идёт заполнение экрана из Prefs). */
     private var suppressSettingsReconnect = false
 
@@ -108,7 +97,6 @@ class MainActivity : AppCompatActivity() {
         buildListsChecks()
         refreshRoutesState()
         updateEndpointNote()
-        watchNetworkChanges()
         askNotificationPermission()
         CrashLog.lastCrash(this)?.let { crash ->
             banner(getString(R.string.banner_last_crash), error = true)
@@ -120,12 +108,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        networkCallback?.let { cb ->
-            runCatching {
-                getSystemService(android.net.ConnectivityManager::class.java)?.unregisterNetworkCallback(cb)
-            }
-        }
-        networkCallback = null
+        stopTunnelPolling()
         super.onDestroy()
     }
 
@@ -142,7 +125,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (connecting) startTunnelPolling()
+        // Опрос нужен всегда, пока экран открыт: сервис сам переподнимает туннель после смены
+        // сети, и кнопка должна это показывать. В фоне опрос выключен (см. onPause).
+        startTunnelPolling()
         refreshInstalledApps()
         updateAppsState()
         updateTunnelButton()
@@ -1004,45 +989,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Из журнала пользователя: «sendto failed: ENETUNREACH» и туннель закрывается. Это не баг
-     * крипты — просто при смене сети (Wi-Fi → LTE, перезагрузка роутера) UDP-сокет теряет маршрут.
-     * Ловим смену сети и переподключаемся сами, вместо «туннель умер, делай что хочешь».
-     */
-    private fun watchNetworkChanges() {
-        if (networkCallback != null) return
-        val cm = runCatching { getSystemService(android.net.ConnectivityManager::class.java) }.getOrNull() ?: return
-        val callback = object : android.net.ConnectivityManager.NetworkCallback() {
-            override fun onLost(network: android.net.Network) {
-                // Наш собственный туннель — это тоже «сеть». Его исчезновение не повод
-                // переподключаться: так мы бы получили бесконечный цикл «стоп → реконнект».
-                if (isVpn(network)) return
-                networkLost = true
-            }
-
-            override fun onAvailable(network: android.net.Network) {
-                if (isVpn(network)) return
-                if (!networkLost) return
-                networkLost = false
-                if (!tunnel.supported || !tunnel.isUp) return
-                // Не чаще раза в 20 секунд: на границе сетей система кидает несколько событий.
-                val now = System.currentTimeMillis()
-                if (now - lastNetReconnectAt < 20_000L) return
-                lastNetReconnectAt = now
-                val cfg = currentConfig() ?: return
-                banner(getString(R.string.banner_network_changed))
-                TunnelDebug.stage("сеть сменилась — переподключаю туннель")
-                Thread {
-                    runCatching { tunnel.stop() }
-                    runCatching { tunnel.waitStopped(3000) }
-                    runOnUiThread { connectWithFallback(cfg) }
-                }.apply { isDaemon = true; name = "warpscout-netwatch" }.start()
-            }
-        }
-        runCatching { cm.registerDefaultNetworkCallback(callback) }
-        networkCallback = callback
-    }
-
     private fun periodLabel(hours: Int): String = when {
         hours <= 0 -> getString(R.string.schedule_period_off)
         hours == 1 -> getString(R.string.schedule_period_hour)
@@ -1588,7 +1534,9 @@ class MainActivity : AppCompatActivity() {
     private val tunnelPollerTask = object : Runnable {
         override fun run() {
             updateTunnelDiagnostics()
-            if (tunnel.supported && !tunnel.isUp) tunnelHandler.postDelayed(this, 700L)
+            if (!tunnel.supported) return
+            // Пока туннель не поднят — часто (видно этапы подъёма), когда работает — редко.
+            tunnelHandler.postDelayed(this, if (tunnel.isUp) 3000L else 700L)
         }
     }
 

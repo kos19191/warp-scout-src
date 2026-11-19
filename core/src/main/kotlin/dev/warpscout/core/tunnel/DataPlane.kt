@@ -75,7 +75,13 @@ class DataPlane(
     private val tunOutput: OutputStream,
     private val config: WarpConfig,
     private val settings: NetSettings = NetSettings(),
-    private val log: (String) -> Unit = {}
+    private val log: (String) -> Unit = {},
+    /**
+     * Зовётся, когда сокет перестал отправлять пакеты (ENETUNREACH/EPERM после смены сети или
+     * потери маршрута). Сверху это означает «туннель мёртв, надо переподнять»: без такого сигнала
+     * туннель висит «поднятым», а трафик молча не ходит.
+     */
+    private val onFatal: ((String) -> Unit)? = null
 ) {
 
     @Volatile
@@ -120,6 +126,9 @@ class DataPlane(
 
     @Volatile
     private var lastOutboundAt: Long = 0L
+
+    /** Сколько раз ПОДРЯД не удалось отправить пакет: несколько подряд = сеть ушла. */
+    private val sendFailures = java.util.concurrent.atomic.AtomicInteger(0)
 
     /** После двух минут тишины keepalive уходит реже (см. [keepaliveIntervalMs]). */
     private val IDLE_BEFORE_BACKOFF_MS = 120_000L
@@ -197,6 +206,33 @@ class DataPlane(
                 Wg.TYPE_TRANSPORT -> deliver(pkt)
                 else -> Unit // junk/чужое: молча игнорируем, иначе журнал забьётся мусором
             }
+        }
+    }
+
+    /**
+     * Отправка с распознаванием «сеть ушла». Одиночный сбой — норма (UDP теряется постоянно);
+     * пять подряд с ошибкой маршрута/доступа — это уже мёртвый сокет, о котором надо сказать наверх.
+     */
+    private fun sendTracked(pkt: ByteArray) {
+        val error = try {
+            udp.send(pkt)
+            null
+        } catch (e: Exception) {
+            e
+        }
+        if (error == null) {
+            sendFailures.set(0)
+            lastOutboundAt = System.currentTimeMillis()
+            return
+        }
+        val n = sendFailures.incrementAndGet()
+        val name = error.javaClass.simpleName
+        if (n == 1) log("отправка не удалась: $name: ${error.message}")
+        if (n >= 5) {
+            sendFailures.set(0)
+            val reason = "сокет не отправляет пакеты ($name) — похоже, сменилась сеть"
+            log(reason)
+            onFatal?.invoke(reason)
         }
     }
 
@@ -419,7 +455,9 @@ class DataPlane(
             session = next
             bytes
         }
-        runCatching { udp.send(pkt) }
+        sendTracked(pkt)
+        // Отметку времени ставим даже при ошибке: иначе таймер будет пытаться слать keepalive
+        // вплотную, пока сеть не вернётся.
         lastOutboundAt = System.currentTimeMillis()
     }
 
@@ -457,9 +495,8 @@ class DataPlane(
                 continue
             }
             try {
-                udp.send(packet)
+                sendTracked(packet)
                 bytesUp += n
-                lastOutboundAt = System.currentTimeMillis()
             } catch (e: Exception) {
                 if (!stopped) log("отправка: ${e.javaClass.simpleName}: ${e.message}")
                 break
