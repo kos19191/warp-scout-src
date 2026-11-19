@@ -135,7 +135,11 @@ class WarpVpnService : VpnService() {
             tunInput = FileInputStream(pfd.fileDescriptor),
             tunOutput = FileOutputStream(pfd.fileDescriptor),
             config = cfg,
-            settings = NetSettings(attempts = 3, timeoutMs = 1500, junkPacketsBeforeHandshake = 1),
+            // Пять инициаций с интервалом 400 мс: первая же обычно отвечает за доли секунды,
+            // а если датаграмм потерялся — следующая уходит не через 1.5 с, а почти сразу.
+            settings = NetSettings(
+                attempts = 5, timeoutMs = 1000, retryEveryMs = 400, junkPacketsBeforeHandshake = 1
+            ),
             log = { line ->
                 TunnelState.status = line
                 when {
@@ -264,7 +268,42 @@ class WarpVpnService : VpnService() {
             val bits = parts[1].trim().toIntOrNull() ?: return@forEach
             runCatching { builder.addRoute(parts[0].trim(), bits) }
         }
+        applyAppSplit(builder)
         return builder
+    }
+
+    /**
+     * Разделение по приложениям. Amnezia делает то же самое: в режиме «только выбранные»
+     * в туннель попадают лишь отмеченные пакеты, в режиме «всё, кроме выбранных» — наоборот.
+     *
+     * Пустой список не должен означать «ничего не туннелировать»: если пользователь выбрал
+     * «только выбранные», но ничего не отметил, честнее пустить всё и сказать об этом в журнале,
+     * чем оставить телефон без интернета и без объяснений.
+     */
+    private fun applyAppSplit(builder: Builder) {
+        val prefs = Prefs(this)
+        val selected = prefs.appsSelected.filter { it != packageName }
+        when (prefs.appsMode) {
+            Prefs.APPS_ONLY -> {
+                if (selected.isEmpty()) {
+                    TunnelDebug.stage("приложения: режим «только выбранные», но список пуст — идут все")
+                } else {
+                    selected.forEach { runCatching { builder.addAllowedApplication(it) } }
+                    TunnelDebug.stage("приложения: только выбранные (${selected.size})")
+                }
+            }
+
+            Prefs.APPS_EXCEPT -> {
+                if (selected.isEmpty()) {
+                    TunnelDebug.stage("приложения: все через туннель (исключений нет)")
+                } else {
+                    selected.forEach { runCatching { builder.addDisallowedApplication(it) } }
+                    TunnelDebug.stage("приложения: все, кроме выбранных (${selected.size})")
+                }
+            }
+
+            else -> TunnelDebug.stage("приложения: все через туннель")
+        }
     }
 
     private fun postNotification(text: String) {

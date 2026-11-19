@@ -11,6 +11,7 @@ import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.checkbox.MaterialCheckBox
 import com.google.android.material.tabs.TabLayout
 import dev.warpscout.app.databinding.ActivityMainBinding
@@ -59,6 +60,11 @@ class MainActivity : AppCompatActivity() {
 
     /** Панели вкладок в том же порядке, что и заголовки в [setupTabs]. */
     private lateinit var pages: List<View>
+    private val appChecks = LinkedHashMap<String, MaterialCheckBox>()
+    private var appEntries: List<AppEntry> = emptyList()
+
+    /** Одна строка списка приложений: только то, что нужно для показа и сохранения. */
+    private data class AppEntry(val pkg: String, val label: String, val system: Boolean)
     private var selectedTab = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -72,6 +78,7 @@ class MainActivity : AppCompatActivity() {
         buildJunkChecks()
         buildResourceList()
         setupButtons()
+        setupApps()
         buildListsChecks()
         refreshRoutesState()
         askNotificationPermission()
@@ -80,6 +87,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        updateAppsState()
         updateTunnelButton()
         updateTunnelDiagnostics()
         showKeys()
@@ -118,6 +126,7 @@ class MainActivity : AppCompatActivity() {
         suppressExportListener = false
         binding.editServer.setText(prefs.pinnedEndpoint)
         binding.editAllowedIps.setText(prefs.allowedIpsText)
+        binding.appsGroup.check(appsButtonId(prefs.appsMode))
         binding.checkListChecks.isChecked = prefs.checkByLists
         binding.textTargetNote.text = prefs.confTargetEnum().note
         binding.editSocks.setText(prefs.byedpiProxy)
@@ -209,11 +218,11 @@ class MainActivity : AppCompatActivity() {
     private fun setupTabs(initial: Int) {
         pages = listOf(
             binding.pageStart, binding.pageScan, binding.pageConfig,
-            binding.pageTunnel, binding.pageDpi, binding.pageLog
+            binding.pageTunnel, binding.pageApps, binding.pageDpi, binding.pageLog
         )
         val titles = listOf(
             R.string.tab_start, R.string.tab_scan, R.string.tab_config,
-            R.string.tab_tunnel, R.string.tab_dpi, R.string.tab_log
+            R.string.tab_tunnel, R.string.tab_apps, R.string.tab_dpi, R.string.tab_log
         )
         binding.tabs.removeAllTabs()
         titles.forEach { binding.tabs.addTab(binding.tabs.newTab().setText(it)) }
@@ -250,6 +259,142 @@ class MainActivity : AppCompatActivity() {
         prefs.lastConfigText = runCatching { WgConf.render(cfg) }.getOrDefault(prefs.lastConfigText)
         showPage(TAB_CONFIG)
         toast(getString(R.string.quick_config_ready))
+    }
+
+    // ------------------------------------------------------ приложения в туннеле
+
+    /**
+     * Вкладка «Приложения»: то же разделение, что в Amnezia — пустить через туннель только
+     * выбранные приложения или все, кроме выбранных. Правило применяется при следующем подключении:
+     * `VpnService.Builder.addAllowedApplication/addDisallowedApplication` — это настройка туннеля,
+     * а не что-то, что можно менять на лету.
+     */
+    private fun setupApps() {
+        loadApps()
+        binding.appsGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            prefs.appsMode = appsModeOf(checkedId)
+            updateAppsState()
+        }
+        binding.checkAppsSystem.setOnCheckedChangeListener { _, _ -> rebuildAppsList() }
+        binding.editAppSearch.doAfterTextChanged { rebuildAppsList() }
+        rebuildAppsList()
+    }
+
+    private fun appsModeOf(buttonId: Int): Int = when (buttonId) {
+        R.id.btnAppsOnly -> Prefs.APPS_ONLY
+        R.id.btnAppsExcept -> Prefs.APPS_EXCEPT
+        else -> Prefs.APPS_ALL
+    }
+
+    private fun appsButtonId(mode: Int): Int = when (mode) {
+        Prefs.APPS_ONLY -> R.id.btnAppsOnly
+        Prefs.APPS_EXCEPT -> R.id.btnAppsExcept
+        else -> R.id.btnAppsAll
+    }
+
+    /** Список только «запускаемых» приложений: библиотеки и сервисы без иконки пользователю не нужны. */
+    private fun loadApps() {
+        appEntries = runCatching {
+            val pm = packageManager
+            pm.getInstalledApplications(0).mapNotNull { info ->
+                if (info.packageName == packageName) return@mapNotNull null
+                if (pm.getLaunchIntentForPackage(info.packageName) == null) return@mapNotNull null
+                val system = (info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
+                AppEntry(info.packageName, pm.getApplicationLabel(info).toString(), system)
+            }.sortedBy { it.label.lowercase() }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun rebuildAppsList() {
+        binding.appsBox.removeAllViews()
+        appChecks.clear()
+        val query = binding.editAppSearch.text?.toString()?.trim()?.lowercase().orEmpty()
+        val showSystem = binding.checkAppsSystem.isChecked
+        val selected = prefs.appsSelected
+        val matched = appEntries.filter { app ->
+            (showSystem || !app.system) &&
+                (query.isEmpty() || app.label.lowercase().contains(query) || app.pkg.contains(query))
+        }
+        matched.take(APP_ROWS_LIMIT).forEach { app ->
+            val row = MaterialCheckBox(this).apply {
+                text = if (app.system) "${app.label}  ·  системное" else app.label
+                tag = app.pkg
+                isChecked = app.pkg in selected
+                setOnClickListener { saveAppsSelection() }
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            }
+            appChecks[app.pkg] = row
+            binding.appsBox.addView(row)
+        }
+        if (matched.isEmpty()) {
+            binding.appsBox.addView(
+                android.widget.TextView(this).apply {
+                    text = getString(R.string.apps_none)
+                    textSize = 12f
+                }
+            )
+        } else if (matched.size > APP_ROWS_LIMIT) {
+            binding.appsBox.addView(
+                android.widget.TextView(this).apply {
+                    text = getString(R.string.apps_more, matched.size - APP_ROWS_LIMIT)
+                    textSize = 12f
+                }
+            )
+        }
+        updateAppsState()
+    }
+
+    /** Отметки сохраняем поверх прежнего выбора: отфильтрованные строки не должны «слетать». */
+    private fun saveAppsSelection() {
+        val merged = prefs.appsSelected.toMutableSet()
+        appChecks.forEach { (pkg, cb) -> if (cb.isChecked) merged.add(pkg) else merged.remove(pkg) }
+        prefs.appsSelected = merged
+        updateAppsState()
+    }
+
+    private fun labelOfPackage(pkg: String): String =
+        appEntries.firstOrNull { it.pkg == pkg }?.label ?: pkg
+
+    private fun summaryOf(pkgs: Set<String>): String {
+        val names = pkgs.sortedBy { labelOfPackage(it) }
+        val head = names.take(8).joinToString(", ") { labelOfPackage(it) }
+        return if (names.size > 8) "$head и ещё ${names.size - 8}" else head
+    }
+
+    private fun updateAppsState() {
+        val selected = prefs.appsSelected
+        binding.textAppsState.text = when (prefs.appsMode) {
+            Prefs.APPS_ONLY ->
+                if (selected.isEmpty()) getString(R.string.apps_only_empty)
+                else getString(R.string.apps_only_state, selected.size, summaryOf(selected))
+
+            Prefs.APPS_EXCEPT ->
+                if (selected.isEmpty()) getString(R.string.apps_except_empty)
+                else getString(R.string.apps_except_state, selected.size, summaryOf(selected))
+
+            else -> getString(R.string.apps_all_state)
+        }
+        binding.textAppsTraffic.text = if (tunnel.supported && tunnel.isUp) {
+            getString(
+                R.string.apps_traffic,
+                getString(
+                    R.string.tunnel_bytes,
+                    humanBytes(TunnelDebug.bytesUp), humanBytes(TunnelDebug.bytesDown)
+                )
+            )
+        } else {
+            getString(R.string.apps_traffic_off)
+        }
+    }
+
+    private fun humanBytes(value: Long): String = when {
+        value < 1024 -> "$value Б"
+        value < 1024 * 1024 -> "${value / 1024} КБ"
+        else -> String.format(java.util.Locale.getDefault(), "%.1f МБ", value / 1048576.0)
     }
 
     private fun setupButtons() {
@@ -415,7 +560,9 @@ class MainActivity : AppCompatActivity() {
             toast(getString(R.string.tunnel_starting, cfg.endpoint.render()))
             startTunnelPolling()
             Thread {
-                val ok = runCatching { tunnel.startAndAwait(cfg, 25000) }.getOrDefault(false)
+                // 15 с, а не 25: сервис всё равно продолжает попытки, но пользователь не должен
+                // смотреть на «Поднимаю…» полминуты — при быстром рукопожатии ответ придёт за секунды.
+                val ok = runCatching { tunnel.startAndAwait(cfg, 15000) }.getOrDefault(false)
                 val why = tunnel.lastError()
                 runOnUiThread {
                     binding.btnTunnel.isEnabled = true
@@ -859,6 +1006,8 @@ class MainActivity : AppCompatActivity() {
         const val BYEDPI_PACKAGE = "io.github.dovecoteescapee.byedpi"
 
         /** Индекс выбранной вкладки переживает поворот экрана. */
+        /** Сколько приложений рисуем сразу: остальные — через поиск (иначе экран «залипает»). */
+        const val APP_ROWS_LIMIT = 60
         const val STATE_TAB = "warpscout.tab"
         const val TAB_START = 0
         const val TAB_CONFIG = 2

@@ -8,6 +8,11 @@
         <package android:name="io.github.dovecoteescapee.byedpi" />
     </queries>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Android 11+ скрывает список приложений. Он нужен вкладке «Приложения»: выбрать, что
+         пускать через туннель, а что мимо (как в Amnezia). Для сайдлоада это нормально;
+         в Google Play такое разрешение требует отдельного обоснования. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 

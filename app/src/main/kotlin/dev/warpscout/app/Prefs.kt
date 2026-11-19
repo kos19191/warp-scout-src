@@ -133,6 +133,19 @@ class Prefs(private val context: Context) {
         set(v) = sp.edit().putLong("routesGeneratedAt", v).apply()
 
     /** Категории allow-domains: что туннелируем и что сознательно оставляем снаружи. */
+    /**
+     * Разделение трафика ПО ПРИЛОЖЕНИЯМ (как в Amnezia): 0 — всё через туннель,
+     * 1 — только отмеченные, 2 — все, кроме отмеченных.
+     */
+    var appsMode: Int
+        get() = sp.getInt("appsMode", APPS_ALL)
+        set(v) = sp.edit().putInt("appsMode", v).apply()
+
+    /** Пакеты, выбранные в режимах «только» и «кроме» (один список на оба режима). */
+    var appsSelected: Set<String>
+        get() = sp.getStringSet("appsSelected", emptySet()).orEmpty()
+        set(v) = sp.edit().putStringSet("appsSelected", v).apply()
+
     var allowBlockIds: Set<String>
         get() = sp.getStringSet("allowBlock", null) ?: dev.warpscout.core.lists.AllowLists.DEFAULT_BLOCK_IDS.toSet()
         set(v) = sp.edit().putStringSet("allowBlock", v).apply()
@@ -311,6 +324,10 @@ class Prefs(private val context: Context) {
 
     companion object {
         const val POOL_DEFAULT = 0
+
+        const val APPS_ALL = 0
+        const val APPS_ONLY = 1
+        const val APPS_EXCEPT = 2
         const val POOL_MASQUE = 1
         const val POOL_FULL = 2
 

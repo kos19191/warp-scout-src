@@ -59,6 +59,15 @@ data class NetSettings(
     val rekeyAfterMs: Long = 120_000,
     /** Как часто повторять неудачный rekey: `REKEY_TIMEOUT` в ядре — 5 с. */
     val rekeyRetryMs: Long = 5_000,
+    /**
+     * Через сколько повторять инициацию, не дожидаясь конца окна `timeoutMs`.
+     *
+     * Раньше handshake шёл «строго по очереди»: 1500 мс ждём один пакет, потом второй, третий —
+     * и на мобильной сети первая инициация регулярно теряется. Теперь инициации уходят пачкой
+     * с интервалом в полсекунды, и принимается ответ на любую из них: подключение занимает
+     * доли секунды вместо «с пятой попытки и через полминуты».
+     */
+    val retryEveryMs: Long = 450,
     val udpFactory: UdpSocketFactory = DefaultFactories.udp,
     val tcpFactory: TcpSocketFactory = DefaultFactories.tcp,
     /**

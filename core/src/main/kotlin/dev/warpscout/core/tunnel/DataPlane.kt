@@ -10,6 +10,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
+import java.util.LinkedHashMap
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -228,52 +229,78 @@ class DataPlane(
         val peer = peerPub ?: return fail("нет ключа пира")
         val junk: JunkProfile? = config.junk.takeIf { !it.isEmpty }
         val attempts = maxOf(1, settings.attempts)
+        val spacing = settings.retryEveryMs.coerceIn(120L, 3_000L)
+        val startedAt = System.currentTimeMillis()
 
-        var attempt = 0
-        while (!stopped && attempt < attempts) {
-            attempt++
-            attemptCount = attempt
-            var initiation = Wg.buildInitiation(priv, pub, peer, Crypto.random.nextInt())
+        // Инициации уходят пачкой: ответ принимаем на любую. Это главное ускорение — на мобильной
+        // сети первый датаграмм регулярно теряется, и «ждать 1.5 с одну попытку» было дорого.
+        val outstanding = LinkedHashMap<Int, Wg.Initiation>()
+        var sent = 0
+        var nextSendAt = startedAt
+
+        fun sendOne(cookie: ByteArray? = null) {
+            val idx = Crypto.random.nextInt()
+            val init = Wg.buildInitiation(priv, pub, peer, idx, lastCookie = cookie)
+            outstanding[idx] = init
             if (junk != null) sendJunk(junk)
-            udp.send(initiation.packet)
+            runCatching { udp.send(init.packet) }
+            sent++
+            attemptCount = sent
+        }
 
-            val deadline = System.currentTimeMillis() + settings.timeoutMs
-            while (!stopped && System.currentTimeMillis() < deadline) {
-                val remaining = (deadline - System.currentTimeMillis()).coerceAtLeast(1)
-                val reply = handshakeInbox.poll(remaining, TimeUnit.MILLISECONDS) ?: continue
-                val res = Wg.consumeResponse(reply, initiation, peer)
-                when (res.kind) {
-                    Wg.ResponseKind.HANDSHAKE_RESPONSE -> {
-                        val s = res.session
-                        val idx = res.peerSenderIndex
-                        if (s == null || idx == null) continue
-                        install(s, idx, initiation.state.senderIndex, initial)
-                        return true
-                    }
-
-                    Wg.ResponseKind.COOKIE_REPLY -> {
-                        val cookie = res.cookie
-                        if (cookie == null) {
-                            log("cookie reply, но cookie не расшифровался")
-                            continue
-                        }
-                        log("сервер требует cookie — повторяю инициацию")
-                        initiation = Wg.buildInitiation(priv, pub, peer, Crypto.random.nextInt(), lastCookie = cookie)
-                        if (junk != null) sendJunk(junk)
-                        udp.send(initiation.packet)
-                    }
-
-                    // Ответ на другую (просроченную) инициацию — не наш, ждём дальше.
-                    Wg.ResponseKind.MISMATCH -> continue
-                    else -> continue
-                }
+        sendOne()
+        nextSendAt = startedAt + spacing
+        val deadline = startedAt + spacing * (attempts - 1) + settings.timeoutMs
+        while (!stopped && System.currentTimeMillis() < deadline) {
+            val now = System.currentTimeMillis()
+            if (sent < attempts && now >= nextSendAt) {
+                sendOne()
+                nextSendAt = now + spacing
+                log("повтор инициации №${sent} — ответа не было ${spacing} мс")
             }
-            if (!stopped) {
-                failureReason = "сервер молчит: $attempt ${if (attempt == 1) "попытка" else "попыток"} " +
-                    "по ${settings.timeoutMs} мс без ответа"
-                log("попытка $attempt: ответа нет (${settings.timeoutMs} мс)")
+            val waitMs = minOf(deadline - now, (nextSendAt - now).coerceAtLeast(20))
+            val reply = handshakeInbox.poll(waitMs.coerceAtLeast(1), TimeUnit.MILLISECONDS) ?: continue
+
+            // Чей это ответ? В response receiver_index на смещении 8, в cookie reply — на 4.
+            val type = if (reply.size >= 4) Crypto.readLe32(reply, 0) else -1
+            val ourIndex = when (type) {
+                Wg.TYPE_RESPONSE -> if (reply.size >= 12) Crypto.readLe32(reply, 8) else -1
+                Wg.TYPE_COOKIE -> if (reply.size >= 8) Crypto.readLe32(reply, 4) else -1
+                else -> -1
+            }
+            val initiation = outstanding[ourIndex] ?: continue
+
+            // Один разбор на пакет: внутри DH-умножение, второй вызов — впустую потраченное время.
+            val res = Wg.consumeResponse(reply, initiation, peer)
+            when (res.kind) {
+                Wg.ResponseKind.HANDSHAKE_RESPONSE -> {
+                    val s = res.session ?: continue
+                    val idx = res.peerSenderIndex ?: continue
+                    log("handshake за ${System.currentTimeMillis() - startedAt} мс, инициаций: $sent")
+                    install(s, idx, initiation.state.senderIndex, initial)
+                    return true
+                }
+
+                Wg.ResponseKind.COOKIE_REPLY -> {
+                    val cookie = res.cookie
+                    if (cookie == null) {
+                        log("cookie reply, но cookie не расшифровался — пробую ещё раз")
+                        continue
+                    }
+                    log("сервер требует cookie — повторяю инициацию с cookie")
+                    outstanding.clear()
+                    sendOne(cookie)
+                    nextSendAt = System.currentTimeMillis() + spacing
+                }
+
+                // Ответ на чужую/просроченную инициацию — просто ждём дальше.
+                else -> continue
             }
         }
+
+        failureReason = "сервер молчит: $sent ${if (sent == 1) "инициация" else "инициаций"} за " +
+            "${System.currentTimeMillis() - startedAt} мс без ответа"
+        log("ответа нет: $failureReason")
         return false
     }
 

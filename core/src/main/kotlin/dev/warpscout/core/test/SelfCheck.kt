@@ -62,6 +62,7 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             wgHandshakeLoopback()
             dataPlaneLoopback()
             dataPlaneRekey()
+            dataPlaneRetryAfterLoss()
         }
         section("junk-профили") {
             quicMaskRoundTrip()
@@ -559,107 +560,157 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
      * Туннельный data plane целиком: живой UDP-сокет, фейковый-peer отвечает по спецификации,
      * мы проверяем, что IP-пакет ушёл зашифрованным и вернулся обратно расшифрованным.
      */
-    private fun dataPlaneLoopback() {
-        val clientPriv = ByteArray(32) { (it * 3 + 7).toByte() }
-        val serverPriv = ByteArray(32) { (it * 5 + 11).toByte() }
-        val clientPub = Crypto.publicOf(clientPriv)
-        val serverPub = Crypto.publicOf(serverPriv)
+    /** Пакет-«пользовательские данные»: 48 байт с правдоподобным IPv4-заголовком. */
+    private fun testPacket(): ByteArray = ByteArray(48).also { b ->
+        b[0] = 0x45; b[12] = 108.toByte(); b[13] = 64.toByte()
+        b[16] = 1.toByte(); b[17] = 1; b[18] = 1; b[19] = 1
+        for (i in 20 until 48) b[i] = (i % 251).toByte()
+    }
 
-        val serverSock = java.net.DatagramSocket()
-        val port = serverSock.localPort
-        val opened = java.util.concurrent.CountDownLatch(1)
-        var transported: ByteArray? = null
-        var serverError: String? = null
-
-        val serverThread = Thread {
-            try {
-                serverSock.soTimeout = 6000
-                val p = java.net.DatagramPacket(ByteArray(2048), 2048)
-                serverSock.receive(p)
-                val init = p.data.copyOfRange(0, p.length)
-                if (init.size != Wg.INITIATION_LEN) error("ожидал инициацию 148 байт, получил ${init.size}")
-                val (resp, srvSession) = WgResponder.respondWithSession(init, serverPriv)
-                serverSock.send(java.net.DatagramPacket(resp, resp.size, p.socketAddress))
-                val ourIndex = Crypto.readLe32(init, 4)      // индекс клиента (ему и отвечаем)
-                val serverIndex = 0x5a5a5a5a                  // наш индекс, нас им и вызывают
-                // Клиент после установки сессии присылает пустой keepalive — это нормальный
-                // WireGuard-трафик, а не пользовательский пакет: пропускаем пустые и ждём данные.
-                var got: Pair<ByteArray, dev.warpscout.core.wg.Wg.Session>? = null
-                var packets = 0
-                while (got == null && packets < 5) {
-                    packets++
-                    val p2 = java.net.DatagramPacket(ByteArray(2048), 2048)
-                    serverSock.receive(p2)
-                    val pkt = p2.data.copyOfRange(0, p2.length)
-                    val opened = Wg.openTransport(pkt, serverIndex, srvSession) ?: error("транспорт не расшифровался")
-                    if (opened.first.isNotEmpty()) got = opened
-                }
-                val data = got ?: error("за 5 пакетов не пришло ни одного непустого transport")
-                transported = data.first
-                val (echo, _) = Wg.buildTransport(ourIndex, data.second, data.first)  // эхо клиенту
-                serverSock.send(java.net.DatagramPacket(echo, echo.size, p.socketAddress))
-                opened.countDown()
-            } catch (e: Exception) {
-                serverError = "${e.javaClass.simpleName}: ${e.message}"
-                opened.countDown()
-            } finally {
-                runCatching { serverSock.close() }
-            }
+    /** Обвязка для тестов data plane: туннель без настоящего tun-устройства. */
+    private class PlaneHarness(
+        val plane: dev.warpscout.core.tunnel.DataPlane,
+        val tunIn: QueueInputStream,
+        val tunOut: QueueOutputStream,
+        val log: StringBuilder,
+        val thread: Thread
+    ) {
+        fun awaitUp(timeoutMs: Long): Boolean {
+            val until = System.currentTimeMillis() + timeoutMs
+            while (!plane.handshakeOk && System.currentTimeMillis() < until) Thread.sleep(10)
+            return plane.handshakeOk
         }
-        serverThread.isDaemon = true
-        serverThread.start()
 
+        fun stop() {
+            plane.stop()
+            runCatching { thread.join(1500) }
+        }
+    }
+
+    private fun startPlane(
+        clientPriv: ByteArray,
+        serverPub: ByteArray,
+        port: Int,
+        settings: NetSettings
+    ): PlaneHarness {
         val tunIn = QueueInputStream()
         val tunOut = QueueOutputStream()
-        val clientSock = java.net.DatagramSocket().apply {
+        val sock = java.net.DatagramSocket().apply {
             connect(java.net.InetSocketAddress("127.0.0.1", port))
             soTimeout = 300
         }
         val config = dev.warpscout.core.model.WarpConfig(
-            name = "loopback",
+            name = "test",
             account = dev.warpscout.core.model.WarpAccount(Crypto.base64(clientPriv), Crypto.base64(serverPub)),
             endpoint = Endpoint("127.0.0.1", port),
             junk = dev.warpscout.core.junk.JunkLibrary.none(),
             persistentKeepalive = null
         )
-        val planeLog = StringBuilder()
+        val log = StringBuilder()
         val plane = dev.warpscout.core.tunnel.DataPlane(
-            dev.warpscout.core.tunnel.SocketUdpChannel(clientSock, Endpoint("127.0.0.1", port), 300),
-            tunIn, tunOut, config,
-            NetSettings(attempts = 2, timeoutMs = 1500)
-        ) { line -> planeLog.append(line).append("; ") }
-        val planeThread = Thread { plane.run() }
-        planeThread.isDaemon = true
-        planeThread.start()
+            dev.warpscout.core.tunnel.SocketUdpChannel(sock, Endpoint("127.0.0.1", port), 300),
+            tunIn, tunOut, config, settings
+        ) { line -> log.append(line).append("; ") }
+        val thread = Thread { plane.run() }.apply { isDaemon = true; start() }
+        return PlaneHarness(plane, tunIn, tunOut, log, thread)
+    }
 
-        val ipPacket = ByteArray(48).also { b ->
-            b[0] = 0x45; b[1] = 0
-            java.net.Inet4Address.getByName("172.16.0.2")
-            b[12] = 108.toByte(); b[13] = 64.toByte(); b[14] = 0; b[15] = 1
-            b[16] = 1.toByte(); b[17] = 1; b[18] = 1; b[19] = 1
-            for (i in 20 until 48) b[i] = (i % 251).toByte()
+    private fun dataPlaneLoopback() {
+        val clientPriv = ByteArray(32) { (it * 3 + 7).toByte() }
+        val serverPriv = ByteArray(32) { (it * 5 + 11).toByte() }
+        val server = LoopbackServer(serverPriv).start()
+        val h = startPlane(clientPriv, Crypto.publicOf(serverPriv), server.port,
+            NetSettings(attempts = 3, timeoutMs = 1200))
+        try {
+            val ipPacket = testPacket()
+            h.tunIn.offer(ipPacket)
+            val seen = server.firstPacket(8000)
+            check("data plane: handshake поднят", h.plane.handshakeOk, h.log.toString())
+            check("data plane: пакет дошёл до пира", seen?.contentEquals(ipPacket) == true,
+                server.error ?: "payload=${seen?.size}")
+            val back = h.tunOut.poll(3000L)
+            check("data plane: эхо вернулось в tun", back?.contentEquals(ipPacket) == true, "back=${back?.size}")
+            val counterDeadline = System.currentTimeMillis() + 1000
+            while (System.currentTimeMillis() < counterDeadline &&
+                (h.plane.bytesUp < ipPacket.size || h.plane.bytesDown == 0L)
+            ) Thread.sleep(25)
+            check(
+                "data plane: счётчики учтены",
+                h.plane.bytesUp == ipPacket.size.toLong() && h.plane.bytesDown == ipPacket.size.toLong(),
+                "up=${h.plane.bytesUp} down=${h.plane.bytesDown} ожидалось=${ipPacket.size}"
+            )
+        } finally {
+            h.stop()
+            server.stop()
         }
-        tunIn.offer(ipPacket)
-        val finished = opened.await(8, java.util.concurrent.TimeUnit.SECONDS)
-        check("data plane: handshake поднят", plane.handshakeOk)
-        check("data plane: пакет дошёл до пира", finished && transported?.contentEquals(ipPacket) == true,
-            serverError ?: "transport=${transported?.size}")
-        if (serverError != null || transported == null) println("    plane log: $planeLog")
-        val back = tunOut.poll(3000L)
-        check("data plane: эхо вернулось в tun", back?.contentEquals(ipPacket) == true, "back=${back?.size}")
-        // Инкременты живут в потоках пересылки: даём им доехать (иначе проверка флейкала бы).
-        val counterDeadline = System.currentTimeMillis() + 1000
-        while (System.currentTimeMillis() < counterDeadline &&
-            (plane.bytesUp < ipPacket.size || plane.bytesDown == 0L)
-        ) Thread.sleep(25)
-        check(
-            "data plane: счётчики учтены",
-            plane.bytesUp == ipPacket.size.toLong() && plane.bytesDown == ipPacket.size.toLong(),
-            "up=${plane.bytesUp} down=${plane.bytesDown} ожидалось=${ipPacket.size}"
-        )
-        plane.stop()
-        planeThread.join(2000)
-        serverThread.join(2000)
+    }
+
+    /**
+     * Пересогласование сессии (rekey) — регрессия на «работает 3–5 минут, потом Telegram пишет
+     * Соединение…». Таймеры ускорены, сервер локальный, поэтому проверка идёт офлайн.
+     */
+    private fun dataPlaneRekey() {
+        val clientPriv = ByteArray(32) { (it * 3 + 17).toByte() }
+        val serverPriv = ByteArray(32) { (it * 5 + 23).toByte() }
+        val server = LoopbackServer(serverPriv).start()
+        val h = startPlane(clientPriv, Crypto.publicOf(serverPriv), server.port,
+            NetSettings(attempts = 2, timeoutMs = 1000, rekeyAfterMs = 700, rekeyRetryMs = 150))
+        try {
+            check("rekey: сессия поднялась", h.awaitUp(4000), h.log.toString())
+
+            val rekeyUntil = System.currentTimeMillis() + 6000
+            while (h.plane.rekeyCount < 2 && System.currentTimeMillis() < rekeyUntil) Thread.sleep(50)
+            check(
+                "rekey: сессия пересогласована сама (2 раза)",
+                h.plane.rekeyCount >= 2,
+                "rekey=${h.plane.rekeyCount}, инициаций=${server.initiations.get()}, ${h.log}"
+            )
+
+            val ipPacket = testPacket()
+            h.tunIn.offer(ipPacket)
+            val back = h.tunOut.poll(4000L)
+            check("rekey: данные идут после пересогласования", back?.contentEquals(ipPacket) == true,
+                server.error ?: "back=${back?.size}; ${h.log}")
+            check("rekey: возраст сессии обнулился", h.plane.sessionAgeMs() < 4000,
+                "age=${h.plane.sessionAgeMs()}")
+        } finally {
+            h.stop()
+            server.stop()
+        }
+    }
+
+    /**
+     * «Поднимается только с пятой попытки» — регрессия ровно на эту жалобу.
+     *
+     * Сервер нарочно игнорирует первую инициацию (так ведёт себя сеть, теряющая первый датаграмм
+     * нового UDP-потока). Клиент обязан не ждать полное окно `timeoutMs`, а повторить инициацию
+     * через `retryEveryMs` и подняться быстро.
+     */
+    private fun dataPlaneRetryAfterLoss() {
+        val clientPriv = ByteArray(32) { (it * 7 + 3).toByte() }
+        val serverPriv = ByteArray(32) { (it * 11 + 5).toByte() }
+        val server = LoopbackServer(serverPriv, answerInitiation = { n -> n >= 2 }).start()
+        val h = startPlane(clientPriv, Crypto.publicOf(serverPriv), server.port,
+            NetSettings(attempts = 5, timeoutMs = 1000, retryEveryMs = 200))
+        val startedAt = System.currentTimeMillis()
+        try {
+            val up = h.awaitUp(4000)
+            val took = System.currentTimeMillis() - startedAt
+            check("сеть: handshake переживает потерю первой инициации", up, h.log.toString())
+            check("сеть: повтор ушёл раньше общего окна (быстро)", up && took < 1500,
+                "заняло ${took} мс; ${h.log}")
+            check("сеть: потребовалось больше одной инициации", h.plane.attemptCount >= 2,
+                "инициаций=${h.plane.attemptCount}")
+
+            val ipPacket = testPacket()
+            h.tunIn.offer(ipPacket)
+            val back = h.tunOut.poll(3000L)
+            check("сеть: данные идут после потери инициации", back?.contentEquals(ipPacket) == true,
+                "back=${back?.size}; ${h.log}")
+        } finally {
+            h.stop()
+            server.stop()
+        }
     }
 
     private fun liveIntegration(target: String) {
@@ -746,123 +797,6 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
                 runCatching { thread.join(1500) }
             }
         }.onFailure { reportFail("integration: data plane упал — ${it.javaClass.simpleName}: ${it.message}") }
-    }
-
-    /**
-     * Пересогласование сессии (rekey). Это регрессия на «работает 3–5 минут, потом Telegram пишет
-     * Соединение…»: WireGuard выбрасывает сессию через 180 с, а клиент обязан сам её обновить
-     * (REKEY_AFTER_TIME = 120 с). Тут таймеры ускорены до 700 мс, сервер — локальный и независимый
-     * (эхо через WgResponder), поэтому проверка идёт офлайн и без живого WARP.
-     */
-    private fun dataPlaneRekey() {
-        val clientPriv = ByteArray(32) { (it * 3 + 17).toByte() }
-        val serverPriv = ByteArray(32) { (it * 5 + 23).toByte() }
-        val serverPub = Crypto.publicOf(serverPriv)
-        val clientPub = Crypto.publicOf(clientPriv)
-
-        val serverSock = java.net.DatagramSocket()
-        val port = serverSock.localPort
-        val serverStop = java.util.concurrent.atomic.AtomicBoolean(false)
-        val handshakes = java.util.concurrent.atomic.AtomicInteger(0)
-        var serverError: String? = null
-
-        val serverThread = Thread {
-            var session: dev.warpscout.core.wg.Wg.Session? = null
-            var clientIndex = 0
-            try {
-                serverSock.soTimeout = 300
-                val buf = ByteArray(65536)
-                while (!serverStop.get()) {
-                    val p = java.net.DatagramPacket(buf, buf.size)
-                    try {
-                        serverSock.receive(p)
-                    } catch (e: java.net.SocketTimeoutException) {
-                        continue
-                    }
-                    val pkt = p.data.copyOfRange(0, p.length)
-                    val type = if (pkt.size >= 4) Crypto.readLe32(pkt, 0) else -1
-                    when (type) {
-                        Wg.TYPE_INITIATION -> {
-                            if (pkt.size != Wg.INITIATION_LEN) continue
-                            val (resp, srvSession) = WgResponder.respondWithSession(pkt, serverPriv)
-                            session = srvSession
-                            clientIndex = Crypto.readLe32(pkt, 4)
-                            handshakes.incrementAndGet()
-                            serverSock.send(java.net.DatagramPacket(resp, resp.size, p.socketAddress))
-                        }
-
-                        Wg.TYPE_TRANSPORT -> {
-                            val s = session ?: continue
-                            val got = Wg.openTransport(pkt, 0x5a5a5a5a, s) ?: continue
-                            session = got.second
-                            val (echo, next) = Wg.buildTransport(clientIndex, got.second, got.first)
-                            session = next
-                            serverSock.send(java.net.DatagramPacket(echo, echo.size, p.socketAddress))
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                serverError = "${e.javaClass.simpleName}: ${e.message}"
-            } finally {
-                runCatching { serverSock.close() }
-            }
-        }
-        serverThread.isDaemon = true
-        serverThread.start()
-
-        val tunIn = QueueInputStream()
-        val tunOut = QueueOutputStream()
-        val clientSock = java.net.DatagramSocket().apply {
-            connect(java.net.InetSocketAddress("127.0.0.1", port))
-            soTimeout = 300
-        }
-        val config = dev.warpscout.core.model.WarpConfig(
-            name = "rekey",
-            account = dev.warpscout.core.model.WarpAccount(Crypto.base64(clientPriv), Crypto.base64(serverPub)),
-            endpoint = Endpoint("127.0.0.1", port),
-            junk = dev.warpscout.core.junk.JunkLibrary.none(),
-            persistentKeepalive = null
-        )
-        val planeLog = StringBuilder()
-        val plane = dev.warpscout.core.tunnel.DataPlane(
-            dev.warpscout.core.tunnel.SocketUdpChannel(clientSock, Endpoint("127.0.0.1", port), 300),
-            tunIn, tunOut, config,
-            NetSettings(attempts = 2, timeoutMs = 1200, rekeyAfterMs = 700, rekeyRetryMs = 150)
-        ) { line -> planeLog.append(line).append("; ") }
-        val planeThread = Thread { plane.run() }.apply { isDaemon = true; start() }
-
-        try {
-            val startDeadline = System.currentTimeMillis() + 4000
-            while (!plane.handshakeOk && System.currentTimeMillis() < startDeadline) Thread.sleep(25)
-            check("rekey: сессия поднялась", plane.handshakeOk, planeLog.toString())
-
-            val rekeyDeadline = System.currentTimeMillis() + 6000
-            while (plane.rekeyCount < 2 && System.currentTimeMillis() < rekeyDeadline) Thread.sleep(50)
-            check(
-                "rekey: сессия пересогласована сама (2 раза)",
-                plane.rekeyCount >= 2,
-                "rekey=${plane.rekeyCount}, инициаций на сервере=${handshakes.get()}, ${planeLog}"
-            )
-
-            // Данные должны ходить и ПОСЛЕ пересогласования — иначе «rekey есть, а трафика нет».
-            val ipPacket = ByteArray(48).also { b ->
-                b[0] = 0x45; b[12] = 108.toByte(); b[13] = 64.toByte()
-                b[16] = 1.toByte(); b[17] = 1; b[18] = 1; b[19] = 1
-                for (i in 20 until 48) b[i] = (i % 251).toByte()
-            }
-            tunIn.offer(ipPacket)
-            val back = tunOut.poll(4000L)
-            check("rekey: данные идут после пересогласования", back?.contentEquals(ipPacket) == true,
-                serverError ?: "back=${back?.size}; ${planeLog}")
-            check("rekey: возраст сессии обнулился", plane.sessionAgeMs() < 4000,
-                "age=${plane.sessionAgeMs()}")
-        } finally {
-            plane.stop()
-            runCatching { planeThread.join(1500) }
-            serverStop.set(true)
-            runCatching { serverSock.close() }
-            runCatching { serverThread.join(1500) }
-        }
     }
 
     // --------------------------------------------------- SOCKS5 / сравнение с ByeDPI
@@ -1061,11 +995,18 @@ object WgResponder {
     fun respond(initiation: ByteArray, serverPrivate: ByteArray, receiverIndex: Int? = null): ByteArray =
         respondWithSession(initiation, serverPrivate, receiverIndex).first
 
-    /** Ответ + ключи сессии сервера (receiving = out1, sending = out2 — зеркально инициатору). */
+    /**
+     * Ответ + ключи сессии сервера (receiving = out1, sending = out2 — зеркально инициатору).
+     *
+     * [senderIndex] — наш адрес, на который клиент шлёт transport-пакеты. Настоящий WireGuard
+     * выдаёт новый индекс на каждое рукопожатие и держит несколько сессий одновременно; тестам
+     * это тоже нужно, иначе параллельные инициации (повтор через 400 мс) путают сессии.
+     */
     fun respondWithSession(
         initiation: ByteArray,
         serverPrivate: ByteArray,
-        receiverIndex: Int? = null
+        receiverIndex: Int? = null,
+        senderIndex: Int = 0x5a5a5a5a
     ): Pair<ByteArray, dev.warpscout.core.wg.Wg.Session> {
         val serverPublic = Crypto.publicOf(serverPrivate)
         var ck = Blake2s.hash("Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s".toByteArray())
@@ -1099,7 +1040,6 @@ object WgResponder {
         val respEphPub = Crypto.publicOf(respEphPriv)
         val out = ByteArray(Wg.RESPONSE_LEN)
         Crypto.le32(Wg.TYPE_RESPONSE).copyInto(out, 0)
-        val senderIndex = 0x5a5a5a5a
         Crypto.le32(senderIndex).copyInto(out, 4)
         Crypto.le32(receiverIndex ?: Crypto.readLe32(initiation, 4)).copyInto(out, 8)
         respEphPub.copyInto(out, 12)
@@ -1151,6 +1091,102 @@ object WgResponder {
     fun mac2Valid(initiation: ByteArray, cookie: ByteArray): Boolean {
         val expected = Blake2s.mac(cookie, initiation.copyOfRange(0, 132))
         return expected.contentEquals(initiation.copyOfRange(132, 148))
+    }
+}
+
+/**
+ * Локальный «сервер» WireGuard для тестов: отвечает на инициации и эхом возвращает transport.
+ *
+ * Держит несколько сессий одновременно — у каждого рукопожатия свой sender_index, ровно как
+ * в настоящем WireGuard. Это обязательно: клиент повторяет инициацию через 400 мс, и ответ на
+ * повтор может прийти позже ответа на первую — сервер не должен путать сессии.
+ */
+private class LoopbackServer(
+    private val serverPrivate: ByteArray,
+    /** false — инициацию «теряем» (имитация сети, которая съела первый датаграмм). */
+    private val answerInitiation: (Int) -> Boolean = { true }
+) {
+    private val socket = java.net.DatagramSocket()
+    private val sessions = HashMap<Int, dev.warpscout.core.wg.Wg.Session>()
+    private val clientIndex = HashMap<Int, Int>()
+    private var serverIndex = 0x5a5a0000
+    private val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val thread = Thread { loop() }
+
+    val port: Int get() = socket.localPort
+    val initiations = java.util.concurrent.atomic.AtomicInteger(0)
+
+    @Volatile
+    var lastPayload: ByteArray? = null
+
+    @Volatile
+    var error: String? = null
+
+    fun start(): LoopbackServer {
+        thread.isDaemon = true
+        thread.start()
+        return this
+    }
+
+    fun stop() {
+        stopped.set(true)
+        runCatching { socket.close() }
+        runCatching { thread.join(1500) }
+    }
+
+    /** Ждёт первый непустой пользовательский пакет (keepalive не считается). */
+    fun firstPacket(timeoutMs: Long): ByteArray? {
+        val until = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < until) {
+            lastPayload?.let { return it }
+            Thread.sleep(10)
+        }
+        return null
+    }
+
+    private fun loop() {
+        try {
+            socket.soTimeout = 300
+            val buf = ByteArray(65536)
+            while (!stopped.get()) {
+                val p = java.net.DatagramPacket(buf, buf.size)
+                try {
+                    socket.receive(p)
+                } catch (e: java.net.SocketTimeoutException) {
+                    continue
+                }
+                val pkt = p.data.copyOfRange(0, p.length)
+                when (if (pkt.size >= 4) Crypto.readLe32(pkt, 0) else -1) {
+                    dev.warpscout.core.wg.Wg.TYPE_INITIATION -> {
+                        if (pkt.size != dev.warpscout.core.wg.Wg.INITIATION_LEN) continue
+                        val n = initiations.incrementAndGet()
+                        if (!answerInitiation(n)) continue
+                        val idx = serverIndex++
+                        val (resp, srv) = WgResponder.respondWithSession(pkt, serverPrivate, senderIndex = idx)
+                        sessions[idx] = srv
+                        clientIndex[idx] = Crypto.readLe32(pkt, 4)
+                        socket.send(java.net.DatagramPacket(resp, resp.size, p.socketAddress))
+                    }
+
+                    dev.warpscout.core.wg.Wg.TYPE_TRANSPORT -> {
+                        val idx = if (pkt.size >= 8) Crypto.readLe32(pkt, 4) else -1
+                        val s = sessions[idx] ?: continue
+                        val got = dev.warpscout.core.wg.Wg.openTransport(pkt, idx, s) ?: continue
+                        sessions[idx] = got.second
+                        if (got.first.isEmpty()) continue   // keepalive: подтверждаем и молчим
+                        lastPayload = got.first
+                        val client = clientIndex[idx] ?: continue
+                        val (echo, next) = dev.warpscout.core.wg.Wg.buildTransport(client, got.second, got.first)
+                        sessions[idx] = next
+                        socket.send(java.net.DatagramPacket(echo, echo.size, p.socketAddress))
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            if (!stopped.get()) error = "${e.javaClass.simpleName}: ${e.message}"
+        } finally {
+            runCatching { socket.close() }
+        }
     }
 }
 
