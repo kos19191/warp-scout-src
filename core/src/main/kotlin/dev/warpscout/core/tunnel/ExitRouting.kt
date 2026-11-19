@@ -149,7 +149,7 @@ class PacketQueueIn(private val name: String) : InputStream() {
     override fun read(b: ByteArray, off: Int, len: Int): Int {
         while (true) {
             if (closed && queue.isEmpty()) return -1
-            val packet = queue.poll(100, TimeUnit.MILLISECONDS) ?: continue
+            val packet = queue.poll(250, TimeUnit.MILLISECONDS) ?: continue
             val n = minOf(len, packet.size)
             System.arraycopy(packet, 0, b, off, n)
             return n

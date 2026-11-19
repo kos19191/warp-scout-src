@@ -121,6 +121,9 @@ class DataPlane(
     @Volatile
     private var lastOutboundAt: Long = 0L
 
+    /** После двух минут тишины keepalive уходит реже (см. [keepaliveIntervalMs]). */
+    private val IDLE_BEFORE_BACKOFF_MS = 120_000L
+
     private val lock = Any()
     private var session: Wg.Session? = null
     private var peerIndex: Int = 0
@@ -342,11 +345,33 @@ class DataPlane(
         var lastAttemptAt = 0L
         var warnedExpiry = false
         while (!stopped) {
-            runCatching { Thread.sleep(200) }
-            if (stopped) return
+            // Раньше здесь было Thread.sleep(200): поток просыпался пять раз в секунду всё время,
+            // пока поднят туннель, — только чтобы посмотреть на часы. Теперь спим ровно до
+            // ближайшего события (keepalive или rekey), то есть просыпаемся раз в 25–60 секунд.
+            // Для батареи это разница между «процесс постоянно на процессоре» и «спит».
             val now = System.currentTimeMillis()
             val age = if (sessionStartedAt == 0L) 0 else now - sessionStartedAt
             val keepaliveSeconds = config.persistentKeepalive ?: 0
+            val nextKeepaliveAt = if (keepaliveSeconds > 0) {
+                lastOutboundAt + keepaliveIntervalMs(now) else Long.MAX_VALUE
+            }
+            val nextRekeyAt = if (age >= settings.rekeyAfterMs) now else {
+                val wait = settings.rekeyAfterMs - age
+                if (lastAttemptAt == 0L || now - lastAttemptAt >= settings.rekeyRetryMs) now + wait
+                else lastAttemptAt + settings.rekeyRetryMs
+            }
+            // Спим до ближайшего события. Верхняя граница — минута, чтобы смена настроек и
+            // остановка туннеля замечались быстро, нижняя — чтобы не крутиться вхолостую.
+            val nextEvent = minOf(nextKeepaliveAt, nextRekeyAt)
+            if (now < nextEvent) {
+                val sleep = (nextEvent - now).coerceIn(250L, 60_000L)
+                try {
+                    Thread.sleep(sleep)
+                } catch (e: InterruptedException) {
+                    return
+                }
+                continue
+            }
 
             if (age >= settings.rekeyAfterMs && now - lastAttemptAt >= settings.rekeyRetryMs) {
                 lastAttemptAt = now
@@ -364,10 +389,25 @@ class DataPlane(
             }
 
             // Keepalive по PersistentKeepalive: пустой transport-пакет держит NAT и сессию живой.
-            if (keepaliveSeconds > 0 && now - lastOutboundAt >= keepaliveSeconds * 1000L) {
+            if (keepaliveSeconds > 0 && now - lastOutboundAt >= keepaliveIntervalMs(now)) {
                 sendKeepalive()
             }
         }
+    }
+
+    /**
+     * Как часто слать keepalive. Пока трафик есть — базовый интервал из настроек (по умолчанию 25 с):
+     * на активном соединении лишний пакет дешевле, чем потеря первого входящего.
+     *
+     * Если трафик не шёл дольше двух минут, соединение и так держится пересогласованием (rekey
+     * каждые 120 с заново пробивает NAT), поэтому keepalive можно слать реже — вдвое. На мобильной
+     * сети это ровно то, что жрёт батарею: каждое пробуждение радио стоит около секунды.
+     */
+    private fun keepaliveIntervalMs(now: Long): Long {
+        val base = (config.persistentKeepalive ?: 0).toLong() * 1000L
+        if (base <= 0L) return Long.MAX_VALUE
+        val idleMs = if (lastOutboundAt == 0L) 0L else now - lastOutboundAt
+        return if (idleMs >= IDLE_BEFORE_BACKOFF_MS) minOf(base * 2, 90_000L) else base
     }
 
     private fun sendKeepalive() {

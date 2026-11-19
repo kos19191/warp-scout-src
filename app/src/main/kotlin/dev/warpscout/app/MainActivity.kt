@@ -129,8 +129,20 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    /**
+     * В фоне экран не нужен: останавливаем опрос состояния туннеля (он ходит каждые 700 мс, пока
+     * туннель не поднят) и отложенное скрытие панели. Иначе «свернул приложение во время
+     * подключения» = вечный таймер на процессоре.
+     */
+    override fun onPause() {
+        stopTunnelPolling()
+        tunnelHandler.removeCallbacks(bannerHide)
+        super.onPause()
+    }
+
     override fun onResume() {
         super.onResume()
+        if (connecting) startTunnelPolling()
         refreshInstalledApps()
         updateAppsState()
         updateTunnelButton()
