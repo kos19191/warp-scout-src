@@ -67,9 +67,9 @@
 
     <string name="btn_run">Сканировать и подобрать</string>
     <string name="btn_stop">Остановить</string>
-    <string name="btn_schedule">Авто-обновление каждые 6 часов</string>
+    <string name="btn_schedule">Включить фоновый подбор</string>
     <string name="btn_schedule_off">Выключить авто-обновление</string>
-    <string name="schedule_on">Авто-обновление включено: раз в 6 часов, при любой доступной сети</string>
+    <string name="schedule_on">Фоновый подбор включён: %1$s, при любой доступной сети</string>
     <string name="schedule_off">Авто-обновление выключено</string>
 
     <string name="status_idle">Готово. Нажмите «Сканировать и подобрать».</string>
@@ -176,4 +176,22 @@
     <string name="endpoint_switch_hint">WARP — anycast: страну выхода выбирает Cloudflare по вашей сети, назначить её нельзя. Зато можно сменить точку входа (адрес и порт) — если текущая блокируется, следующая обычно проходит.</string>
     <string name="tunnel_reconnect_settings">Настройки изменены — переподключаю туннель</string>
     <string name="tunnel_connecting_busy">Уже подключаюсь — дождись результата</string>
+    <string name="schedule_period_label">Фоновый подбор (авто-сканирование):</string>
+    <string name="schedule_period_off">выключен</string>
+    <string name="schedule_period_hour">каждый час</string>
+    <string name="schedule_period_hours">каждые %1$d ч</string>
+    <string name="schedule_period_day">раз в сутки</string>
+    <string name="schedule_period_hint">Фоновый подбор сам ищет лучшую точку входа по расписанию и присылает уведомление. Подключённый туннель он не трогает, если не включено «применять автоматически»: тогда после подбора туннель переподключится на найденную точку.</string>
+    <string name="tunnel_connecting_saved">Подключаюсь к сохранённой точке %1$s…</string>
+    <string name="btn_backup">Сохранить бекап</string>
+    <string name="btn_restore">Восстановить последний</string>
+    <string name="backup_hint">Бекап — это файл со всеми настройками и последним рабочим конфигом (ключ внутри конфига). Пишется автоматически после каждого подключения и подбора; здесь его можно сохранить вручную и отправить куда угодно.</string>
+    <string name="backup_saved">Бекап сохранён: %1$s</string>
+    <string name="backup_failed">Бекап не сохранился</string>
+    <string name="backup_restored">Восстановлено из %1$s: настроек — %2$d</string>
+    <string name="backup_none">Бекапов пока нет</string>
+    <string name="backup_restore_title">Восстановить настройки?</string>
+    <string name="backup_restore_message">Текущие настройки будут заменены содержимым %1$s. Туннель после этого лучше переподключить.</string>
+    <string name="backup_restore_ok">Восстановить</string>
+    <string name="backup_share_title">Бекап WarpScout</string>
 </resources>

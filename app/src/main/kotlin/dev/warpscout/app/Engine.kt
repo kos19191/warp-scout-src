@@ -3,6 +3,7 @@ package dev.warpscout.app
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.keys.KeySource
 import dev.warpscout.core.keys.KeySourceConfig
 import dev.warpscout.core.model.WarpConfig
@@ -173,6 +174,10 @@ class Engine(private val context: Context) {
                     val withRoutes = ConfigComposer.applyPrefs(best, prefs, prefs.junkPool)
                     val up = runCatching { tunnel.startAndAwait(withRoutes, 25000) }.getOrDefault(false)
                     if (up) {
+                        // «Подключить последнее» должно поднимать именно то, что работает сейчас.
+                        prefs.lastConfigText = runCatching { WgConf.render(withRoutes) }
+                            .getOrDefault(prefs.lastConfigText)
+                        prefs.lastEndpoint = withRoutes.endpoint.render()
                         sink.log("туннель поднят на подобранном конфиге: ${withRoutes.endpoint.render()}")
                     } else {
                         val why = tunnel.lastError() ?: tunnel.status

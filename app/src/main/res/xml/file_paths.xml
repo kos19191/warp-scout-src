@@ -2,5 +2,6 @@
 <paths>
     <files-path name="configs" path="configs/" />
     <files-path name="reports" path="reports/" />
+    <files-path name="backups" path="backups/" />
     <cache-path name="share" path="share/" />
 </paths>

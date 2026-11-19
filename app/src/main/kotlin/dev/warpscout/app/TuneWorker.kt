@@ -45,6 +45,8 @@ class TuneWorker(appContext: Context, params: WorkerParameters) : Worker(appCont
         val result = Engine(context).runBlocking(prefs.tuningSpec(), manual, sink, 15 * 60_000L)
             ?: return Result.retry()
         val best = result.best
+        // Бекап и после фонового подбора: настройки меняются и без участия человека.
+        runCatching { Backup.save(context, "фоновый подбор") }
         notify(context, best?.let { "Лучший endpoint: ${it.endpoint.render()} (${it.junk.name})" }
             ?: "Живых endpoint'ов не найдено — попробуйте позже")
         return Result.success()

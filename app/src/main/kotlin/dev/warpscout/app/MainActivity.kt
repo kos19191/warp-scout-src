@@ -126,6 +126,10 @@ class MainActivity : AppCompatActivity() {
         )
         binding.dnsSpinner.setSelection(prefs.dnsIndex.coerceIn(0, (Presets.DNS.size - 1).coerceAtLeast(0)))
         binding.btnSchedule.setText(if (prefs.scheduleOn) R.string.btn_schedule_off else R.string.btn_schedule)
+        binding.spinnerSchedule.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item, Schedule.PERIODS.map { periodLabel(it) }
+        )
+        binding.spinnerSchedule.setSelection(Schedule.PERIODS.indexOf(prefs.scheduleHours).coerceAtLeast(0))
         binding.btnTunnel.isEnabled = tunnel.supported
         if (!tunnel.supported) binding.btnTunnel.setText(R.string.tunnel_unavailable)
 
@@ -658,6 +662,20 @@ class MainActivity : AppCompatActivity() {
             updatePoolSummary()
         }
 
+        // Период фонового подбора: 0 — выключен, иначе часы из Schedule.PERIODS.
+        binding.spinnerSchedule.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val hours = Schedule.PERIODS.getOrElse(position) { 6 }
+                prefs.scheduleHours = hours
+                prefs.scheduleOn = hours > 0
+                if (hours > 0) Schedule.enable(this@MainActivity, hours) else Schedule.disable(this@MainActivity)
+                binding.btnSchedule.setText(if (hours > 0) R.string.btn_schedule_off else R.string.btn_schedule)
+                updateScheduleNote()
+            }
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+
         binding.btnSchedule.setOnClickListener {
             persistUi()
             if (prefs.scheduleOn) {
@@ -666,11 +684,63 @@ class MainActivity : AppCompatActivity() {
                 binding.btnSchedule.setText(R.string.btn_schedule)
                 toast(getString(R.string.schedule_off))
             } else {
-                Schedule.enable(this)
+                val hours = prefs.scheduleHours.takeIf { it > 0 } ?: 6
+                prefs.scheduleHours = hours
                 prefs.scheduleOn = true
+                Schedule.enable(this, hours)
+                binding.spinnerSchedule.setSelection(Schedule.PERIODS.indexOf(hours).coerceAtLeast(0))
                 binding.btnSchedule.setText(R.string.btn_schedule_off)
-                toast(getString(R.string.schedule_on))
+                toast(getString(R.string.schedule_on, periodLabel(hours)))
             }
+            updateScheduleNote()
+        }
+
+        binding.btnBackup.setOnClickListener {
+            persistUi()
+            val file = Backup.save(this, "вручную")
+            if (file == null) {
+                toast(getString(R.string.backup_failed))
+                return@setOnClickListener
+            }
+            toast(getString(R.string.backup_saved, file.name))
+            // Отдать файл наружу: «Сохранить в Drive», «Отправить в Telegram» — что угодно.
+            runCatching {
+                val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                startActivity(Intent.createChooser(send, getString(R.string.backup_share_title)))
+            }
+        }
+
+        binding.btnRestore.setOnClickListener {
+            val file = Backup.newest(this)
+            if (file == null) {
+                toast(getString(R.string.backup_none))
+                return@setOnClickListener
+            }
+            androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle(R.string.backup_restore_title)
+                .setMessage(getString(R.string.backup_restore_message, file.name))
+                .setPositiveButton(R.string.backup_restore_ok) { _, _ ->
+                    val applied = Backup.restore(this, file)
+                    if (applied > 0) {
+                        toast(getString(R.string.backup_restored, file.name, applied))
+                        suppressSettingsReconnect = true
+                        runCatching { fillFromPrefs() }
+                        suppressSettingsReconnect = false
+                        runCatching { buildListsChecks() }
+                        runCatching { rebuildAppsList() }
+                        runCatching { refreshRoutesState() }
+                        runCatching { updateEndpointNote() }
+                    } else {
+                        toast(getString(R.string.backup_failed))
+                    }
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
         }
 
         binding.btnExportAmnezia.setOnClickListener {
@@ -755,13 +825,25 @@ class MainActivity : AppCompatActivity() {
      * не отличались.
      */
     private fun currentConfig(): WarpConfig? =
-        (engine.last?.best ?: manualConfig())?.let { ConfigComposer.applyPrefs(it, prefs, prefs.junkPool) }
+        (engine.last?.best ?: savedConfig() ?: manualConfig())
+            ?.let { ConfigComposer.applyPrefs(it, prefs, prefs.junkPool) }
+
+    /**
+     * Конфиг, которым поднимали туннель в прошлый раз (тот самый текст, что работает у плитки).
+     * Нужен, чтобы «Отключить → Подключить» не требовало нового подбора: подключаемся ровно тем,
+     * что уже доказало работоспособность. Подбор — отдельная кнопка, и он не обязан быть частью
+     * подключения.
+     */
+    private fun savedConfig(): WarpConfig? = prefs.lastConfigText
+        .takeIf { it.isNotBlank() }
+        ?.let { runCatching { WgConf.toWarpConfig("сохранённый", it) }.getOrNull() }
 
     private fun currentConfigText(cfg: WarpConfig): String =
         runCatching { ConfigComposer.render(cfg, prefs) }.getOrElse { ConfigFiles.render(cfg) }
 
     private fun showResult(result: TuningResult) {
         showPage(TAB_START)
+        runCatching { Backup.save(this, "подбор ${result.best?.endpoint?.render().orEmpty()}") }
         binding.textStatus.setText(R.string.status_done)
         val took = humanDuration(System.currentTimeMillis() - runStartedAt)
         val hhmm = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
@@ -792,6 +874,18 @@ class MainActivity : AppCompatActivity() {
                 .getOrNull()?.takeIf { it.exists() }
         }
         showKeys()
+    }
+
+    private fun periodLabel(hours: Int): String = when {
+        hours <= 0 -> getString(R.string.schedule_period_off)
+        hours == 1 -> getString(R.string.schedule_period_hour)
+        hours >= 24 -> getString(R.string.schedule_period_day)
+        else -> getString(R.string.schedule_period_hours, hours)
+    }
+
+    private fun updateScheduleNote() {
+        // Подпись кнопки уже говорит «включить/выключить» — здесь только период для тоста и бекапа.
+        if (prefs.scheduleOn) prefs.scheduleHours = prefs.scheduleHours.coerceAtLeast(1)
     }
 
     private fun updateTunnelButton() {
@@ -1121,6 +1215,7 @@ class MainActivity : AppCompatActivity() {
         }
         val candidates = tunnelCandidates(base)
         if (candidates.isEmpty()) return noConfig()
+        val savedFirst = savedConfig()?.takeIf { it.endpoint == candidates.first().endpoint }
         connecting = true
         binding.btnTunnel.isEnabled = false
         startTunnelPolling()
@@ -1133,8 +1228,11 @@ class MainActivity : AppCompatActivity() {
                 if (winner != null) break
                 val n = i + 1
                 runOnUiThread {
-                    binding.btnTunnel.text =
+                    binding.btnTunnel.text = if (n == 1 && savedFirst != null && cfg.endpoint == savedFirst.endpoint) {
+                        getString(R.string.tunnel_connecting_saved, cfg.endpoint.render())
+                    } else {
                         getString(R.string.tunnel_trying, n, candidates.size, cfg.endpoint.render())
+                    }
                 }
                 TunnelDebug.stage("точка $n/${candidates.size}: ${cfg.endpoint.render()}, шум ${cfg.junk.name}")
                 val ok = runCatching { tunnel.startAndAwait(cfg, 5000) }.getOrDefault(false)
@@ -1164,6 +1262,8 @@ class MainActivity : AppCompatActivity() {
                     exitRegion = ""
                     updateEndpointNote()
                     toast(getString(R.string.tunnel_up, used.endpoint.render()))
+                    // Бекап «на всякий случай»: после каждого удачного подключения, молча.
+                    runCatching { Backup.save(this, "подключение ${used.endpoint.render()}") }
                     probeExitRegion()
                 } else {
                     TunnelDebug.error(
@@ -1216,6 +1316,8 @@ class MainActivity : AppCompatActivity() {
             if (cfg == null || out.size >= MAX_ENDPOINT_TRIES) return
             if (seen.add(cfg.endpoint.render())) out += cfg
         }
+        // Сначала ровно то, что работало в прошлый раз (включая шум и MTU), потом — собранное сейчас.
+        add(savedConfig())
         add(base)
         endpointOf(prefs.lastEndpoint)?.let { add(base.copy(endpoint = it)) }
         engine.last?.report?.candidates?.sortedByDescending { it.score }?.take(2)?.forEach { candidate ->

@@ -78,6 +78,34 @@ class Prefs(private val context: Context) {
         get() = sp.getBoolean("schedule", false)
         set(v) = sp.edit().putBoolean("schedule", v).apply()
 
+    /** Период фонового подбора в часах: 0 — выключено. */
+    var scheduleHours: Int
+        get() = sp.getInt("scheduleHours", 6).coerceIn(0, 24)
+        set(v) = sp.edit().putInt("scheduleHours", v.coerceIn(0, 24)).apply()
+
+    /**
+     * Все настройки разом — для бекапа. Приватный ключ из [KeyVault] сюда не входит (он в
+     * AndroidKeyStore), но текст рабочего конфига содержит свой ключ, поэтому поднять туннель
+     * из восстановленного бекапа можно и на другом устройстве.
+     */
+    fun snapshot(): Map<String, *> = sp.all
+
+    /** Восстановление из бекапа: пишем только известные типы, мусор игнорируем. */
+    fun restoreAll(values: Map<String, Any?>) {
+        val edit = sp.edit()
+        values.forEach { (key, value) ->
+            when (value) {
+                is String -> edit.putString(key, value)
+                is Int -> edit.putInt(key, value)
+                is Long -> edit.putLong(key, value)
+                is Boolean -> edit.putBoolean(key, value)
+                is Float -> edit.putFloat(key, value)
+                is Set<*> -> edit.putStringSet(key, value.map { it.toString() }.toSet())
+            }
+        }
+        edit.apply()
+    }
+
     /** .conf, импортированный вручную: используется, если генератор недоступен. */
     var manualConf: String
         get() = sp.getString("manual_conf", "") ?: ""
