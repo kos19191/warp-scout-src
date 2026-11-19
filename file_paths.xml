@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <files-path name="configs" path="configs/" />
+    <files-path name="reports" path="reports/" />
+    <cache-path name="share" path="share/" />
+</paths>
