@@ -90,6 +90,18 @@ class WarpVpnService : VpnService() {
     @Volatile
     private var lastNetRestartAt: Long = 0L
 
+    /** Сколько раз подряд не удалось переподнять туннель после смены сети (максимум 3). */
+    @Volatile
+    private var netRestartAttempts: Int = 0
+
+    /** Идёт переподъём после смены сети: в этом режиме сервис не снимает себя при неудаче. */
+    @Volatile
+    private var autoRebind: Boolean = false
+
+    /** Сеть поменялась повторно, пока шла пауза — перезапустимся сразу после неё. */
+    @Volatile
+    private var netRestartPending: Boolean = false
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             shutdown()
@@ -113,6 +125,10 @@ class WarpVpnService : VpnService() {
         }
         lastConfigText = text
         lastStartId = startId
+        // Подключение по кнопке/плитке — не автопереподъём: при неудаче сервис снимает себя, как
+        // и раньше, иначе следующее ручное нажатие упрётся в «уже поднимается».
+        autoRebind = false
+        netRestartAttempts = 0
         // Раньше здесь был startVpn(text) напрямую, и onStartCommand блокировался на 12 с, ожидая
         // handshake. Главный поток сервиса — он же главный поток приложения: UI в это время висел,
         // и выглядело это ровно как «туннель запускается, потом без ошибок ничего не происходит».
@@ -416,6 +432,18 @@ class WarpVpnService : VpnService() {
 
     /** Единственная точка «мы сдались»: статус + журнал + аккуратная остановка. */
     private fun fail(reason: String, startId: Int) {
+        if (autoRebind) {
+            // После смены сети сервис не снимаем: сеть может появиться снова, а пользователь —
+            // не нажать «Подключить». Просто честно говорим, что не вышло.
+            starting = false
+            TunnelState.busy = false
+            TunnelState.up = false
+            TunnelState.status = reason
+            TunnelState.error = reason
+            TunnelDebug.error(reason)
+            postNotification(reason)
+            return
+        }
         starting = false
         TunnelState.busy = false
         TunnelState.status = reason
@@ -577,6 +605,8 @@ class WarpVpnService : VpnService() {
         TunnelState.busy = false
         if (!stopped.compareAndSet(false, true)) return
         starting = false
+        autoRebind = false
+        netRestartAttempts = 0
         TunnelState.up = false
         TunnelState.status = "туннель остановлен"
         unwatchNetwork()
@@ -703,11 +733,23 @@ class WarpVpnService : VpnService() {
         val now = System.currentTimeMillis()
         synchronized(this) {
             // Переключение сети приходит пачкой событий: перезапускаемся не чаще раза в 4 секунды.
-            if (now - lastNetRestartAt < 4_000L) return
+            // ВАЖНО: событие внутри паузы нельзя просто терять — именно на нём и терялся туннель,
+            // поэтому откладываем один перезапуск, а не выбрасываем его.
+            if (now - lastNetRestartAt < 4_000L) {
+                if (netRestartPending) return
+                netRestartPending = true
+                Thread({
+                    runCatching { Thread.sleep(4_500) }
+                    netRestartPending = false
+                    if (!stopped.get()) restartAfterNetworkChange("$why (после паузы)")
+                }, "warpscout-net-defer").apply { isDaemon = true }.start()
+                return
+            }
             lastNetRestartAt = now
         }
         Thread({
             val text = lastConfigText ?: return@Thread
+            autoRebind = true
             TunnelDebug.stage("$why — переподключаю туннель")
             TunnelState.status = "переподключаюсь после смены сети"
             postNotification(TunnelState.status)
@@ -726,7 +768,48 @@ class WarpVpnService : VpnService() {
             networkChanged = false
             baselineNetwork = null
             startVpn(text, lastStartId)
+
+            // Проверяем, что переподъём действительно состоялся: «сервис запущен» и «туннель
+            // работает» — разные вещи. Если handshake не прошёл, пробуем ещё раз (до трёх),
+            // а не оставляем пользователя с молчащим туннелем.
+            if (awaitUp(15_000)) {
+                netRestartAttempts = 0
+                autoRebind = false
+                TunnelDebug.ok("туннель переподнят после смены сети")
+                return@Thread
+            }
+            netRestartAttempts += 1
+            if (netRestartAttempts < 3 && !stopped.get()) {
+                TunnelDebug.stage(
+                    "переподъём не удался (попытка $netRestartAttempts из 3) — повторю через 8 с"
+                )
+                runCatching { Thread.sleep(8_000) }
+                if (!stopped.get()) restartAfterNetworkChange("повтор после неудачи")
+            } else {
+                TunnelDebug.error(
+                    "не удалось поднять туннель после смены сети",
+                    "точка могла стать недоступной: нажми «Подключить» — сработает перебор точек"
+                )
+                TunnelState.status = "не удалось поднять после смены сети"
+                postNotification(TunnelState.status)
+                netRestartAttempts = 0
+                autoRebind = false
+            }
         }, "warpscout-net-restart").apply { isDaemon = true }.start()
+    }
+
+    /** Ждём фактического подъёма туннеля (handshake), а не просто «сервис запущен». */
+    private fun awaitUp(timeoutMs: Int): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (stopped.get()) return false
+            if (TunnelState.up) {
+                // Даём секунду на первый трафик: «поднят» без единого пакета — отдельный случай.
+                return true
+            }
+            runCatching { Thread.sleep(200) }
+        }
+        return TunnelState.up
     }
 
     companion object {

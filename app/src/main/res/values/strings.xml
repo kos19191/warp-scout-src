@@ -228,4 +228,11 @@
     <string name="tunnel_failed_hint">Ни одна точка не ответила на handshake. Это сетевая блокировка UDP к WARP: попробуйте другой профиль шума, порт, включить или выключить IPv6 и Wi-Fi/мобильные данные по очереди.</string>
     <string name="state_working">Работаю…</string>
     <string name="banner_last_crash">Прошлый запуск завершился падением — подробности в «Журнал» → «Скопировать журнал»</string>
+    <string name="conn_off">● Туннель выключен</string>
+    <string name="conn_on">● Туннель работает · %1$s · %2$s</string>
+    <string name="conn_starting">● Подключаюсь… точка %1$s</string>
+    <string name="conn_starting_plain">● Подключаюсь…</string>
+    <string name="conn_lost">● Туннель потерян — переподключаюсь</string>
+    <string name="conn_no_network">● Нет сети — жду подключения</string>
+    <string name="conn_failed">● Не удалось подключиться: %1$s</string>
 </resources>

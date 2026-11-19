@@ -6,6 +6,26 @@
     android:layout_height="match_parent"
     android:orientation="vertical">
 
+    <!-- Статус соединения всегда на виду: и на любой вкладке, и во время переподключения. -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/cardConnStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="6dp"
+        android:layout_marginEnd="16dp"
+        app:cardCornerRadius="10dp"
+        app:strokeWidth="1dp">
+
+        <TextView
+            android:id="@+id/textConnStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="10dp"
+            android:text="@string/conn_off"
+            android:textAppearance="?attr/textAppearanceTitleSmall" />
+    </com.google.android.material.card.MaterialCardView>
+
     <com.google.android.material.tabs.TabLayout
         android:id="@+id/tabs"
         android:layout_width="match_parent"

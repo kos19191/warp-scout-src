@@ -1002,6 +1002,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateTunnelButton() {
+        updateConnStatus()
         if (!tunnel.supported) {
             binding.btnTunnel.isEnabled = false
             binding.btnTunnel.setText(R.string.tunnel_unavailable)
@@ -1540,7 +1541,56 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Постоянный статус соединения: зелёный «работает», красный «потерян», серый «выключен».
+     * В отличие от [banner] он никогда не исчезает сам — по просьбе: состояние должно быть видно
+     * в любой момент, а не последние восемь секунд.
+     */
+    private fun updateConnStatus() {
+        if (!::binding.isInitialized) return
+        val up = tunnel.supported && tunnel.isUp
+        val statusRaw = tunnel.status
+        val starting = connecting || statusRaw.contains("Поднимаю", ignoreCase = true) ||
+            statusRaw.contains("переподключаюсь", ignoreCase = true)
+        val noNet = statusRaw.contains("нет сети", ignoreCase = true) ||
+            statusRaw.contains("жду новую", ignoreCase = true)
+        val failed = TunnelDebug.lastError
+        val text: String
+        val color: Int
+        when {
+            up -> {
+                val uptime = if (tunnelStartedAtLocal > 0L) {
+                    humanDuration(System.currentTimeMillis() - tunnelStartedAtLocal)
+                } else {
+                    getString(R.string.duration_sec, 0)
+                }
+                val endpoint = TunnelDebug.endpoint.ifBlank { prefs.lastEndpoint.ifBlank { "endpoint?" } }
+                text = getString(R.string.conn_on, uptime, endpoint)
+                color = 0xFF1B5E20.toInt()
+            }
+            noNet -> {
+                text = getString(R.string.conn_no_network)
+                color = 0xFF8D6E63.toInt()
+            }
+            starting -> {
+                text = getString(R.string.conn_starting_plain)
+                color = 0xFF8D6E63.toInt()
+            }
+            failed != null -> {
+                text = getString(R.string.conn_failed, failed.take(90))
+                color = 0xFFB3261E.toInt()
+            }
+            else -> {
+                text = getString(R.string.conn_off)
+                color = 0xFF5F6368.toInt()
+            }
+        }
+        binding.textConnStatus.text = text
+        binding.textConnStatus.setTextColor(color)
+    }
+
     private fun updateTunnelDiagnostics() {
+        updateConnStatus()
         binding.tunnelDiagBox.visibility = if (tunnel.supported) View.VISIBLE else View.GONE
         if (!tunnel.supported) return
         val dump = tunnel.debugDump()
