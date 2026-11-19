@@ -169,4 +169,9 @@
     <string name="tile_no_config">Сначала проверь сеть в приложении</string>
     <string name="notif_channel">Туннель (тихий)</string>
     <string name="notif_stop">Отключить</string>
+    <string name="tunnel_trying">Пробую точку %1$d из %2$d: %3$s…</string>
+    <string name="endpoint_now">Точка входа: %1$s\nРегион выхода: %2$s</string>
+    <string name="btn_next_endpoint">Другая точка входа</string>
+    <string name="region_unknown">не определён</string>
+    <string name="endpoint_switch_hint">WARP — anycast: страну выхода выбирает Cloudflare по вашей сети, назначить её нельзя. Зато можно сменить точку входа (адрес и порт) — если текущая блокируется, следующая обычно проходит.</string>
 </resources>

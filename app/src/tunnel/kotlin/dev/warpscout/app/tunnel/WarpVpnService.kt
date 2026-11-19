@@ -78,6 +78,10 @@ class WarpVpnService : VpnService() {
 
     private fun startVpn(text: String, startId: Int) {
         starting = true
+        // Экземпляр сервиса переиспользуется: без сброса флага «остановлен» второй подъём после
+        // «Отключить» жил бы с чужим состоянием (watchdog и статусы считали бы себя остановленными).
+        stopped.set(false)
+        TunnelState.up = false
         TunnelState.error = null
         TunnelState.gaveUp = false
         TunnelState.startedAt = System.currentTimeMillis()

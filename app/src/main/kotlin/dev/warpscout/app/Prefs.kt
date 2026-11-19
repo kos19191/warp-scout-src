@@ -189,6 +189,16 @@ class Prefs(private val context: Context) {
      * Последний конфиг, которым поднимали туннель (текст WireGuard/AmneziaWG). Нужен плитке
      * быстрых настроек: она подключает «то же, что в прошлый раз», не собирая конфиг заново.
      */
+    /** Последняя точка входа, которая реально поднялась: её пробуем раньше «сегодняшней». */
+    var lastEndpoint: String
+        get() = sp.getString("lastEndpoint", "").orEmpty()
+        set(v) = sp.edit().putString("lastEndpoint", v).apply()
+
+    /** Регион выхода, определённый последним подключением (colo · страна · адрес). */
+    var lastExitRegion: String
+        get() = sp.getString("lastExitRegion", "").orEmpty()
+        set(v) = sp.edit().putString("lastExitRegion", v).apply()
+
     var lastConfigText: String
         get() = sp.getString("lastConfigText", "").orEmpty()
         set(v) = sp.edit().putString("lastConfigText", v).apply()

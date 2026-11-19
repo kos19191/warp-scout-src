@@ -55,6 +55,9 @@ class MainActivity : AppCompatActivity() {
     private var suppressExportListener = false
     private val listChecks = LinkedHashMap<String, MaterialCheckBox>()
     private val tunnelHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** Сколько точек входа пробуем за одно подключение: 6 попыток по 6 с — это уже полминуты. */
+    private val MAX_ENDPOINT_TRIES = 6
     private val lists by lazy { AllowListsRepo(this) }
     private var lastConfigFile: File? = null
 
@@ -69,6 +72,9 @@ class MainActivity : AppCompatActivity() {
 
     /** Когда туннель поднялся (мс, локальные часы): от этой точки считаем расход по приложениям. */
     private var tunnelStartedAtLocal = 0L
+    private var connecting = false
+    private var endpointIndex = 0
+    private var exitRegion = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,6 +90,7 @@ class MainActivity : AppCompatActivity() {
         setupApps()
         buildListsChecks()
         refreshRoutesState()
+        updateEndpointNote()
         askNotificationPermission()
         binding.textStatus.setText(R.string.status_idle)
     }
@@ -658,43 +665,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        binding.btnTunnel.setOnClickListener {
-            if (!tunnel.supported) {
-                toast(getString(R.string.tunnel_unavailable))
-                return@setOnClickListener
-            }
-            if (tunnel.isUp) {
-                tunnel.stop()
-                tunnelStartedAtLocal = 0L
-                binding.btnTunnel.setText(R.string.btn_tunnel_on)
-                return@setOnClickListener
-            }
-            val cfg = currentConfig() ?: return@setOnClickListener noConfig()
-            // Запоминаем именно этот конфиг: плитка быстрых настроек потом поднимет «то же самое»
-            // одним нажатием, не собирая конфиг заново и не требуя открывать приложение.
-            prefs.lastConfigText = runCatching { WgConf.render(cfg) }.getOrDefault("")
-            if (!tunnel.ensurePermission(this)) return@setOnClickListener
-            binding.btnTunnel.isEnabled = false
-            toast(getString(R.string.tunnel_starting, cfg.endpoint.render()))
-            startTunnelPolling()
-            Thread {
-                // 15 с, а не 25: сервис всё равно продолжает попытки, но пользователь не должен
-                // смотреть на «Поднимаю…» полминуты — при быстром рукопожатии ответ придёт за секунды.
-                val ok = runCatching { tunnel.startAndAwait(cfg, 15000) }.getOrDefault(false)
-                if (ok) tunnelStartedAtLocal = System.currentTimeMillis()
-                val why = tunnel.lastError()
-                runOnUiThread {
-                    binding.btnTunnel.isEnabled = true
-                    stopTunnelPolling()
-                    updateTunnelButton()
-                    updateTunnelDiagnostics()
-                    toast(
-                        if (ok) getString(R.string.tunnel_up, cfg.endpoint.render())
-                        else getString(R.string.tunnel_failed, why ?: "см. журнал ниже")
-                    )
-                }
-            }.apply { isDaemon = true }.start()
-        }
+        binding.btnTunnel.setOnClickListener { toggleTunnel() }
+        binding.btnNextEndpoint.setOnClickListener { nextEndpoint() }
     }
 
     /** Приёмник прогресса: ядро зовёт его из своего потока, поэтому всё в runOnUiThread. */
@@ -1060,6 +1032,184 @@ class MainActivity : AppCompatActivity() {
             R.string.best_endpoint, cfg.endpoint.render(), cfg.junk.name,
             engine.last?.report?.best?.score ?: 0
         ) + "\n" + ConfigComposer.explain(cfg, prefs)
+    }
+
+    // ------------------------------------------- туннель: перебор и смена точки входа
+
+    /**
+     * Подключение с перебором точек входа.
+     *
+     * Один endpoint — одна точка отказа: если именно эта точка не отвечает (у Cloudflare их много,
+     * и часть адресов в конкретной сети режется), «туннель не поднимается» и объяснений нет.
+     * Поэтому пробуем по очереди: текущая точка → последняя доказанно рабочая → точки из последнего
+     * скана → запасные anycast-адреса Cloudflare на разных портах. Поднялась — она и запоминается.
+     */
+    private fun toggleTunnel() {
+        if (!tunnel.supported) {
+            toast(getString(R.string.tunnel_unavailable))
+            return
+        }
+        if (tunnel.isUp) {
+            tunnel.stop()
+            tunnelStartedAtLocal = 0L
+            binding.btnTunnel.setText(R.string.btn_tunnel_on)
+            return
+        }
+        val cfg = currentConfig() ?: return noConfig()
+        if (!tunnel.ensurePermission(this)) return
+        connectWithFallback(cfg)
+    }
+
+    private fun connectWithFallback(base: WarpConfig) {
+        if (connecting) return
+        val candidates = tunnelCandidates(base)
+        if (candidates.isEmpty()) return noConfig()
+        connecting = true
+        binding.btnTunnel.isEnabled = false
+        startTunnelPolling()
+        Thread {
+            var winner: WarpConfig? = null
+            val failures = StringBuilder()
+            for ((i, cfg) in candidates.withIndex()) {
+                if (winner != null || cancelled.get()) break
+                val n = i + 1
+                runOnUiThread {
+                    binding.btnTunnel.text =
+                        getString(R.string.tunnel_trying, n, candidates.size, cfg.endpoint.render())
+                }
+                TunnelDebug.stage("точка $n/${candidates.size}: ${cfg.endpoint.render()}, шум ${cfg.junk.name}")
+                val ok = runCatching { tunnel.startAndAwait(cfg, 6000) }.getOrDefault(false)
+                if (ok) {
+                    winner = cfg
+                    break
+                }
+                val why = tunnel.lastError() ?: "нет ответа"
+                if (failures.isNotEmpty()) failures.append("; ")
+                failures.append("${cfg.endpoint.render()} — $why")
+                // Без остановки следующий start() упрётся в «уже поднимается»: сервис асинхронный.
+                runCatching { tunnel.stop() }
+                Thread.sleep(400)
+            }
+            val used = winner
+            runOnUiThread {
+                connecting = false
+                binding.btnTunnel.isEnabled = true
+                stopTunnelPolling()
+                updateTunnelButton()
+                updateTunnelDiagnostics()
+                if (used != null) {
+                    prefs.lastConfigText = runCatching { WgConf.render(used) }.getOrDefault("")
+                    prefs.lastEndpoint = used.endpoint.render()
+                    tunnelStartedAtLocal = System.currentTimeMillis()
+                    exitRegion = ""
+                    updateEndpointNote()
+                    toast(getString(R.string.tunnel_up, used.endpoint.render()))
+                    probeExitRegion()
+                } else {
+                    TunnelDebug.error(
+                        "ни одна из ${candidates.size} точек не поднялась",
+                        "подробности по каждой — выше в журнале; нажми «Другая точка входа» или сгенерируй новый конфиг"
+                    )
+                    updateEndpointNote()
+                    toast(getString(R.string.tunnel_failed, failures.toString().take(180)))
+                }
+            }
+        }.apply { isDaemon = true; name = "warpscout-connect" }.start()
+    }
+
+    /** Очередь точек входа: своя, доказанно рабочая, из последнего скана, запасные anycast. */
+    private fun tunnelCandidates(base: WarpConfig): List<WarpConfig> {
+        val out = mutableListOf<WarpConfig>()
+        val seen = HashSet<String>()
+        fun add(cfg: WarpConfig?) {
+            if (cfg == null || out.size >= MAX_ENDPOINT_TRIES) return
+            if (seen.add(cfg.endpoint.render())) out += cfg
+        }
+        add(base)
+        endpointOf(prefs.lastEndpoint)?.let { add(base.copy(endpoint = it)) }
+        engine.last?.report?.candidates?.sortedByDescending { it.score }?.take(3)?.forEach { candidate ->
+            add(runCatching { ConfigComposer.applyPrefs(candidate.config, prefs, prefs.junkPool) }.getOrNull())
+        }
+        // Запасные точки: разные адреса и разные порты — переживают блокировку конкретной пары.
+        val hosts = listOf("162.159.192.1", "162.159.195.1", "188.114.97.1", "188.114.99.1", "162.159.192.7")
+        val ports = listOf(2408, 2408, 500, 1701, 4500)
+        hosts.forEachIndexed { i, host ->
+            add(runCatching { base.copy(endpoint = dev.warpscout.core.model.Endpoint(host, ports[i % ports.size])) }.getOrNull())
+        }
+        return out
+    }
+
+    /** «Другая точка входа»: следующая из очереди, сразу с переподключением. */
+    private fun nextEndpoint() {
+        if (!tunnel.supported) {
+            toast(getString(R.string.tunnel_unavailable))
+            return
+        }
+        val base = currentConfig() ?: return noConfig()
+        val list = tunnelCandidates(base)
+        if (list.isEmpty()) return noConfig()
+        endpointIndex = (endpointIndex + 1) % list.size
+        val chosen = list[endpointIndex]
+        prefs.lastEndpoint = chosen.endpoint.render()
+        updateEndpointNote()
+        if (tunnel.isUp) {
+            tunnel.stop()
+            tunnelStartedAtLocal = 0L
+            exitRegion = ""
+            binding.btnTunnel.setText(R.string.btn_tunnel_on)
+            Thread {
+                Thread.sleep(900)
+                runOnUiThread { connectWithFallback(chosen) }
+            }.apply { isDaemon = true }.start()
+        } else {
+            connectWithFallback(chosen)
+        }
+    }
+
+    private fun endpointOf(text: String): dev.warpscout.core.model.Endpoint? {
+        val t = text.trim()
+        if (t.isEmpty()) return null
+        val port = t.substringAfterLast(':', "").toIntOrNull() ?: return null
+        val host = t.substringBeforeLast(':').removePrefix("[").removeSuffix("]").trim()
+        if (host.isEmpty()) return null
+        return runCatching { dev.warpscout.core.model.Endpoint(host, port) }.getOrNull()
+    }
+
+    /**
+     * Какая точка входа и какой регион выхода. Регион — тот, что реально ответил через туннель
+     * (`cdn-cgi/trace`): WARP — anycast, страну выхода выбирает Cloudflare по сети, из приложения
+     * её не назначить. А точку входа (адрес:порт) — можно, она и переключается.
+     */
+    private fun updateEndpointNote() {
+        val now = prefs.lastEndpoint.ifBlank { runCatching { currentConfig()?.endpoint?.render() }.getOrNull().orEmpty() }
+        val region = exitRegion.ifBlank { prefs.lastExitRegion }.ifBlank { getString(R.string.region_unknown) }
+        binding.textEndpointNow.text = getString(
+            R.string.endpoint_now,
+            now.ifBlank { "—" },
+            region
+        )
+    }
+
+    private fun probeExitRegion() {
+        Thread {
+            val found = runCatching {
+                val conn = java.net.URL("https://www.cloudflare.com/cdn-cgi/trace").openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 5000
+                conn.readTimeout = 5000
+                val text = conn.inputStream.bufferedReader().use { it.readText() }
+                val map = text.lineSequence()
+                    .mapNotNull { line -> line.split('=', limit = 2).takeIf { it.size == 2 } }
+                    .associate { it[0].trim() to it[1].trim() }
+                val colo = map["colo"] ?: return@runCatching null
+                listOfNotNull(colo, map["loc"], map["ip"]).joinToString(" · ")
+            }.getOrNull()
+            runOnUiThread {
+                exitRegion = found ?: getString(R.string.region_unknown)
+                prefs.lastExitRegion = exitRegion
+                TunnelDebug.stage("регион выхода через WARP: $exitRegion")
+                updateEndpointNote()
+            }
+        }.apply { isDaemon = true; name = "warpscout-region" }.start()
     }
 
     // ------------------------------------------------ диагностика туннеля
