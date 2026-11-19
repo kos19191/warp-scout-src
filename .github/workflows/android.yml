@@ -1,0 +1,328 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Опубликовать оба APK в GitHub Release"
+        type: boolean
+        default: false
+      release_tag:
+        description: "Тег релиза (пусто → latest-preview)"
+        required: false
+        default: ""
+
+# Один прогон на ветку: новый пуш отменяет предыдущий, чтобы не жечь минуты.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  core:
+    name: "Ядро: самопроверка + интеграция с фейковым эндпоинтом"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: "Офлайн-векторы (BLAKE2s / X25519 / ChaChaPoly / WG / rekey / шум / списки / отчёты)"
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon :cli:selftest 2>&1 | tee /tmp/selftest.log
+
+      - name: "Векторы фейкового эндпоинта (независимая реализация на Python)"
+        run: |
+          set -o pipefail
+          python3 -m pip install --quiet cryptography
+          python3 tools/fake_warp_endpoint.py --selftest 2>&1 | tee /tmp/fake-selftest.log
+
+      - name: "Интеграция: наш клиент против Python-сервера"
+        run: |
+          set -euo pipefail
+          python3 tools/fake_warp_endpoint.py --test-key --port 34575 > /tmp/fake.log 2>&1 &
+          sleep 2
+          ss -lun | grep 34575 || echo "порт 34575 не слушается"
+          cat /tmp/fake.log
+          set -o pipefail
+          ./gradlew --no-daemon :cli:run --args="selftest --integration 127.0.0.1:34575" 2>&1 | tee /tmp/integration.log
+
+      # Гейт на rekey: зелёный прогон должен означать, что проверки пересогласования РЕАЛЬНО
+      # выполнялись, а не были случайно выключены или тихо пропущены. Причину падения пишем
+      # аннотациями (`::error`) — они читаются через API, в отличие от blob-логов прогона.
+      - name: "Гейт: rekey-проверки выполнялись"
+        if: always()
+        run: |
+          fail=0
+          err() { echo "::error title=rekey-gate::$1"; fail=1; }
+          say() { echo "::notice title=rekey-gate::$1"; }
+
+          if grep -q "✗" /tmp/selftest.log /tmp/integration.log 2>/dev/null; then
+            while IFS= read -r line; do err "провал: ${line:0:180}"; done < <(grep -h "✗" /tmp/selftest.log /tmp/integration.log | head -10)
+          fi
+
+          need() {
+            if grep -qF "$2" "$1"; then say "ok: $2"; else
+              err "нет строки «$2» в $1"
+              while IFS= read -r line; do say "контекст: ${line:0:180}"; done < <(grep -i "rekey" "$1" | tail -6)
+            fi
+          }
+          need /tmp/selftest.log "rekey: сессия поднялась"
+          need /tmp/selftest.log "rekey: сессия пересогласована сама"
+          need /tmp/selftest.log "rekey: данные идут после пересогласования"
+          need /tmp/selftest.log "rekey: возраст сессии обнулился"
+          need /tmp/integration.log "integration: сессия пересогласована автоматически"
+
+          say "галочек в selftest: $(grep -c '✓' /tmp/selftest.log || true)"
+          say "галочек в интеграции: $(grep -c '✓' /tmp/integration.log || true)"
+          say "строк про rekey: $(grep -ci 'rekey' /tmp/selftest.log || true)"
+
+          # Если прогон упал рано (не компилируется, упал плагин), в логах прогона причины не видно —
+          # поэтому хвост лога тоже уходит аннотациями. Так ошибка сборки читается через API.
+          if [ "$fail" != 0 ]; then
+            for f in /tmp/selftest.log /tmp/integration.log /tmp/fake.log; do
+              [ -f "$f" ] || { err "нет файла $f"; continue; }
+              # Kotlin печатает ошибки строками «e: file:line:col ...» — их и показываем первыми.
+              while IFS= read -r line; do
+                [ -n "$line" ] && err "$(basename "$f") ОШИБКА: ${line:0:190}"
+              done < <(grep -nE '^(e: |e:  )|^> Task .*FAILED|error:|Caused by|FAILURE:' "$f" | head -25)
+              while IFS= read -r line; do
+                [ -n "$line" ] && err "$(basename "$f"): ${line:0:190}"
+              done < <(tail -n 12 "$f")
+            done
+          fi
+          exit $fail
+
+      # Отчёт самопроверки целиком: в веб-логе видно только хвост шага, а тут — все строки,
+      # включая rekey-проверки, итоговый счётчик и причины падений.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selftest-logs
+          path: |
+            /tmp/selftest.log
+            /tmp/fake-selftest.log
+            /tmp/integration.log
+            /tmp/fake.log
+
+      # Логи GitHub Actions лежат в blob-хранилище, которое из некоторых окружений не
+      # открывается; поэтому при падении складываем хвосты логов в комментарий PR.
+      - name: "Диагностика упавшего шага"
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo "## Диагностика: job «${{ github.job }}» упал"
+            echo "Коммит: ${{ github.sha }}"
+            for f in /tmp/selftest.log /tmp/fake-selftest.log /tmp/fake.log /tmp/integration.log; do
+              if [ -f "$f" ]; then
+                echo "### \`$f\`"
+                echo '```'
+                tail -120 "$f"
+                echo '```'
+              fi
+            done
+          } > /tmp/diag.md
+          # Причину дублируем аннотациями: их видно через API, а blob-логи прогона — нет.
+          for f in /tmp/selftest.log /tmp/fake-selftest.log /tmp/fake.log /tmp/integration.log \
+                   /tmp/stubcheck.log /tmp/sdk-licenses.log /tmp/sdk-install.log /tmp/apk.log; do
+            [ -f "$f" ] || continue
+            while IFS= read -r line; do
+              echo "::error title=$(basename "$f")::${line:0:190}"
+            done < <(grep -nE '^(e: |e:  )|^> Task .*FAILED|error:|Error|Traceback|Caused by|FAILURE:|Exception' "$f" | head -20)
+            while IFS= read -r line; do
+              echo "::error title=$(basename "$f") tail::${line:0:190}"
+            done < <(tail -n 12 "$f")
+          done
+          if [ -n "$PR" ]; then
+            gh pr comment "$PR" --body-file /tmp/diag.md
+          else
+            cat /tmp/diag.md
+          fi
+
+  apk:
+    name: "APK (scout + tunnel)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # SDK 35 на образе раннера может отсутствовать — ставим явно и принимаем лицензии.
+      - name: "Android SDK 35"
+        run: |
+          set -x
+          command -v sdkmanager || echo "sdkmanager не найден в PATH"
+          sdkmanager --version || true
+          yes | sdkmanager --licenses > /tmp/sdk-licenses.log 2>&1 || echo "лицензии: rc=$?"
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" > /tmp/sdk-install.log 2>&1 || echo "install: rc=$?"
+          tail -5 /tmp/sdk-install.log
+          ls "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/platforms" || true
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # AGP создаёт debug-ключ в ~/.android, если его нет. На свежем раннере он каждый раз
+      # новый → APK не ставится «поверх» предыдущей версии. Кэш с постоянным ключом фиксирует
+      # подпись, и обновления на телефоне ставятся обычным «Установить».
+      - name: "Постоянный debug-ключ (чтобы APK ставился поверх прошлой версии)"
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: warpscout-debug-keystore-v1
+
+      - name: "Ресурсы и форматные строки (без SDK)"
+        run: |
+          set -o pipefail
+          python3 tools/android_stub_check.py 2>&1 | tee /tmp/stubcheck.log
+
+      - name: "Сборка отладочных APK"
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon :app:assembleScoutDebug :app:assembleTunnelDebug 2>&1 | tee /tmp/apk.log
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: warpscout-debug-apk
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+
+      # Логи GitHub Actions лежат в blob-хранилище, которое из некоторых окружений не
+      # открывается; поэтому при падении складываем хвосты логов в комментарий PR.
+      - name: "Диагностика упавшего шага"
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo "## Диагностика: job «${{ github.job }}» упал"
+            echo "Коммит: ${{ github.sha }}"
+            for f in /tmp/selftest.log /tmp/fake-selftest.log /tmp/fake.log /tmp/integration.log \
+                     /tmp/stubcheck.log /tmp/sdk-licenses.log /tmp/sdk-install.log /tmp/apk.log; do
+              if [ -f "$f" ]; then
+                echo "### \`$f\`"
+                echo '```'
+                tail -120 "$f"
+                echo '```'
+              fi
+            done
+          } > /tmp/diag.md
+          # Причину дублируем аннотациями: их видно через API, а blob-логи прогона — нет.
+          for f in /tmp/selftest.log /tmp/fake-selftest.log /tmp/fake.log /tmp/integration.log \
+                   /tmp/stubcheck.log /tmp/sdk-licenses.log /tmp/sdk-install.log /tmp/apk.log; do
+            [ -f "$f" ] || continue
+            while IFS= read -r line; do
+              echo "::error title=$(basename "$f")::${line:0:190}"
+            done < <(grep -nE '^(e: |e:  )|^> Task .*FAILED|error:|Error|Traceback|Caused by|FAILURE:|Exception' "$f" | head -20)
+            while IFS= read -r line; do
+              echo "::error title=$(basename "$f") tail::${line:0:190}"
+            done < <(tail -n 12 "$f")
+          done
+          if [ -n "$PR" ]; then
+            gh pr comment "$PR" --body-file /tmp/diag.md
+          else
+            cat /tmp/diag.md
+          fi
+
+  # APK, который можно скачать одной ссылкой, а не искать в артефактах прогона.
+  # Запускается только на тег v* и вручную (workflow_dispatch → publish_release=true):
+  # пуш в main релиз не создаёт, чтобы не плодить «latest-preview»-черновики.
+  release:
+    name: "APK → GitHub Release"
+    needs: apk
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: warpscout-debug-apk
+          path: apk
+
+      - name: "Имена, версия и контрольные суммы"
+        id: pack
+        run: |
+          set -euo pipefail
+          ls -la apk
+          VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          mkdir -p out
+          SCOUT=$(find apk -name '*scout*.apk' | head -1)
+          TUNNEL=$(find apk -name '*tunnel*.apk' | head -1)
+          [ -n "$SCOUT" ] && [ -n "$TUNNEL" ] || { echo "не нашёл один из APK"; find apk -name '*.apk'; exit 1; }
+          cp "$SCOUT" "out/WarpScout-$VERSION-scout.apk"
+          cp "$TUNNEL" "out/WarpScout-$VERSION-tunnel.apk"
+          ( cd out && sha256sum *.apk | tee SHA256SUMS.txt )
+          ls -l out
+
+      - name: "Публикация релиза"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+          VERSION: ${{ steps.pack.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-}"
+          if [ -z "$TAG" ]; then
+            if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then TAG="${GITHUB_REF_NAME}"; else TAG="latest-preview"; fi
+          fi
+          echo "тег: $TAG"
+
+          {
+            echo "WarpScout $VERSION — сборка из коммита \`${GITHUB_SHA:0:7}\` (\`${GITHUB_REF_NAME}\`)."
+            echo
+            echo "Собрано автоматически: \`./gradlew :app:assembleScoutDebug :app:assembleTunnelDebug\`."
+            echo
+            echo "| Файл | Что внутри | applicationId |"
+            echo "|---|---|---|"
+            echo "| \`WarpScout-$VERSION-scout.apk\` | скан, подбор, генерация конфига, передача в AmneziaVPN; своего туннеля нет | \`dev.warpscout.app\` |"
+            echo "| \`WarpScout-$VERSION-tunnel.apk\` | то же + собственный туннель (VpnService) и проверки из-под него | \`dev.warpscout.app.tunnel\` |"
+            echo
+            echo "**Как поставить:** разрешить установку из неизвестных источников → открыть APK."
+            echo "Сборка **debug-подписанная** — для тестов и сайдлоада, не для магазина."
+            echo "Оба flavor'а ставятся рядом: у них разные applicationId."
+            echo
+            echo "> Если на телефоне стояла сборка 1.1.0 или более ранняя — сначала удалите её:"
+            echo "> подпись другая, Android не даст обновиться поверх. Начиная с 1.2.1 ключ"
+            echo "> закреплён в CI, поэтому следующие версии ставятся обычным «Установить»."
+            echo
+            echo "Контрольные суммы — \`SHA256SUMS.txt\` в этом же релизе."
+            echo "Журнал прогона: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > notes.md
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            # Описание и заголовок тоже обновляем: иначе у перезалитого релиза остаются
+            # заметки и ссылка на прогон от предыдущей сборки.
+            gh release edit "$TAG" --title "WarpScout $VERSION" --notes-file notes.md
+            gh release upload "$TAG" out/*.apk out/SHA256SUMS.txt --clobber
+            echo "обновил существующий релиз $TAG"
+          else
+            if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+              gh release create "$TAG" out/*.apk out/SHA256SUMS.txt \
+                --title "WarpScout $VERSION" --notes-file notes.md --verify-tag
+            else
+              gh release create "$TAG" out/*.apk out/SHA256SUMS.txt \
+                --title "WarpScout $VERSION ($TAG)" --notes-file notes.md --target "$GITHUB_SHA"
+            fi
+            echo "создал релиз $TAG"
+          fi
+          gh release view "$TAG" --json url,assets --jq '{url, assets: [.assets[].name]}'
