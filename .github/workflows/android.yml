@@ -309,6 +309,18 @@ jobs:
             echo "Журнал прогона: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           } > notes.md
 
+          # «Что нового» — прямо из CHANGELOG, чтобы раздел версии был виден и на телефоне,
+          # без похода в репозиторий. Берём ровно секцию «## <версия>».
+          if [ -f CHANGELOG.md ]; then
+            awk -v v="$VERSION" 'BEGIN { p = 0 } /^## / { p = (index($0, "## " v) == 1) } p' CHANGELOG.md > /tmp/changes.md
+            if [ -s /tmp/changes.md ]; then
+              echo "" >> notes.md
+              cat /tmp/changes.md >> notes.md
+            fi
+          fi
+          echo "—" >> notes.md
+          echo "Предыдущие сборки не удалены: \`v1.2.1\` и более ранние остаются в релизах." >> notes.md
+
           if gh release view "$TAG" > /dev/null 2>&1; then
             # Описание и заголовок тоже обновляем: иначе у перезалитого релиза остаются
             # заметки и ссылка на прогон от предыдущей сборки.

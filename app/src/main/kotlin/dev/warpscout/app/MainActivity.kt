@@ -12,6 +12,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.google.android.material.checkbox.MaterialCheckBox
+import com.google.android.material.tabs.TabLayout
 import dev.warpscout.app.databinding.ActivityMainBinding
 import android.net.Uri
 import dev.warpscout.core.config.WgConf
@@ -33,7 +34,8 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Экран один, и он нарочно делает ровно одну вещь: «настроить пул → Подобрать → применить».
+ * Шесть вкладок: первая — быстрый путь («проверить → сгенерировать → подключить») с настройками по
+ * умолчанию, остальные пять — то же самое, но по частям, на случай когда быстрый путь не сработал.
  * Всё тяжёлое (подбор, скан, проверка ресурсов, запись файлов) делает [Engine] на своём потоке,
  * сюда прилетают только строки лога и готовый отчёт.
  */
@@ -55,12 +57,17 @@ class MainActivity : AppCompatActivity() {
     private val lists by lazy { AllowListsRepo(this) }
     private var lastConfigFile: File? = null
 
+    /** Панели вкладок в том же порядке, что и заголовки в [setupTabs]. */
+    private lateinit var pages: List<View>
+    private var selectedTab = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
         prefs = Prefs(this)
+        setupTabs(savedInstanceState?.getInt(STATE_TAB) ?: 0)
         fillFromPrefs()
         buildJunkChecks()
         buildResourceList()
@@ -194,6 +201,56 @@ class MainActivity : AppCompatActivity() {
 
     // ---------------------------------------------------------------- кнопки
 
+    /**
+     * Шесть вкладок вместо одной длинной страницы. Первая — «быстрый путь»: проверить,
+     * сгенерировать, подключить — с настройками по умолчанию. Остальные нужны только когда
+     * быстрый путь не сработал или нужен особый конфиг, поэтому ничего не удалено — всё разложено.
+     */
+    private fun setupTabs(initial: Int) {
+        pages = listOf(
+            binding.pageStart, binding.pageScan, binding.pageConfig,
+            binding.pageTunnel, binding.pageDpi, binding.pageLog
+        )
+        val titles = listOf(
+            R.string.tab_start, R.string.tab_scan, R.string.tab_config,
+            R.string.tab_tunnel, R.string.tab_dpi, R.string.tab_log
+        )
+        binding.tabs.removeAllTabs()
+        titles.forEach { binding.tabs.addTab(binding.tabs.newTab().setText(it)) }
+        // TabLayout сам подсветит выбранную вкладку сразу после addTab(0), поэтому панели
+        // показываем вручную и тем же вызовом, что и по клику.
+        showPage(initial.coerceIn(0, pages.size - 1))
+        binding.tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
+            override fun onTabSelected(tab: TabLayout.Tab) = showPage(tab.position)
+            override fun onTabUnselected(tab: TabLayout.Tab) = Unit
+            override fun onTabReselected(tab: TabLayout.Tab) = Unit
+        })
+    }
+
+    private fun showPage(index: Int) {
+        selectedTab = index
+        pages.forEachIndexed { i, page -> page.visibility = if (i == index) View.VISIBLE else View.GONE }
+        if (binding.tabs.selectedTabPosition != index) binding.tabs.getTabAt(index)?.select()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putInt(STATE_TAB, selectedTab)
+    }
+
+    /** «Сгенерировать конфиг» с первого экрана: тот же конфиг, что уйдёт в файл, только на виду. */
+    private fun quickGenerate() {
+        val cfg = currentConfig()
+        if (cfg == null) {
+            toast(getString(R.string.err_no_config))
+            showPage(TAB_CONFIG)
+            return
+        }
+        binding.textConfig.text = currentConfigText(cfg)
+        showPage(TAB_CONFIG)
+        toast(getString(R.string.quick_config_ready))
+    }
+
     private fun setupButtons() {
         binding.btnRun.setOnClickListener {
             persistUi()
@@ -214,6 +271,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+
+        binding.btnQuickConfig.setOnClickListener { quickGenerate() }
 
         binding.btnDpiCompare.setOnClickListener { runDpiCompare() }
 
@@ -407,6 +466,7 @@ class MainActivity : AppCompatActivity() {
         runCatching { ConfigComposer.render(cfg, prefs) }.getOrElse { ConfigFiles.render(cfg) }
 
     private fun showResult(result: TuningResult) {
+        showPage(TAB_START)
         binding.textStatus.setText(R.string.status_done)
         val took = humanDuration(System.currentTimeMillis() - runStartedAt)
         val hhmm = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
@@ -793,5 +853,10 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         /** Пакет ByeDPI for Android — нужен только чтобы подсказать «установлено/не установлено». */
         const val BYEDPI_PACKAGE = "io.github.dovecoteescapee.byedpi"
+
+        /** Индекс выбранной вкладки переживает поворот экрана. */
+        const val STATE_TAB = "warpscout.tab"
+        const val TAB_START = 0
+        const val TAB_CONFIG = 2
     }
 }
