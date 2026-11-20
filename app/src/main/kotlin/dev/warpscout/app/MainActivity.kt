@@ -1574,6 +1574,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopTunnelPolling() = tunnelHandler.removeCallbacks(tunnelPollerTask)
 
+    /** Журнал, для которого уже построены подсказки: чтобы не пересобирать их на каждом тике. */
+    private var lastDiagDump: String? = null
+
     private val tunnelPollerTask = object : Runnable {
         override fun run() {
             updateTunnelDiagnostics()
@@ -1643,7 +1646,12 @@ class MainActivity : AppCompatActivity() {
             TunnelDebug.lastError != null -> getString(R.string.tunnel_state_failed, TunnelDebug.lastError)
             else -> getString(R.string.tunnel_state_idle)
         }
-        binding.textTunnelState.text = "$status\n$dump"
+        // Экран открыт и обновляется несколько раз в секунду: переписываем только изменившееся,
+        // иначе каждые 700 мс заново строится список подсказок и переверстывается текст.
+        val full = "$status\n$dump"
+        if (binding.textTunnelState.text.toString() != full) binding.textTunnelState.text = full
+        if (dump == lastDiagDump) return
+        lastDiagDump = dump
         binding.tunnelAdviceBox.removeAllViews()
         TunnelTrouble.advise(dump).forEach { advice ->
             binding.tunnelAdviceBox.addView(

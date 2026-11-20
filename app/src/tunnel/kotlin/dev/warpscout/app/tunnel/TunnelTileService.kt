@@ -11,6 +11,7 @@ import dev.warpscout.app.MainActivity
 import dev.warpscout.app.Prefs
 import dev.warpscout.app.R
 import dev.warpscout.app.TunnelDebug
+import dev.warpscout.app.status.ServiceSettingsStore
 import dev.warpscout.app.status.TunnelStatusBus
 
 /**
@@ -39,6 +40,10 @@ class TunnelTileService : TileService() {
         runCatching {
             CrashLog.install(this)
             TunnelDebug.attach(this)
+            // Плитку могут нажать при закрытом приложении — тогда это единственный шанс
+            // переписать снимок настроек для сервиса (после обновления приложения его может
+            // ещё не быть, и туннель поднялся бы по значениям по умолчанию).
+            ServiceSettingsStore.syncFromPrefs(this)
             TunnelStatusBus.install(this)
             TunnelStatusBus.addListener { status -> TunnelState.applySnapshot(status) }
         }

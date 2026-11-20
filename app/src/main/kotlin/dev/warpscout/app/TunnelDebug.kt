@@ -161,8 +161,21 @@ object TunnelDebug {
     /** Содержимое общего журнала (хвост ограниченной длины), без обращения к памяти процесса. */
     private fun readJournal(): String {
         val file = journal ?: return ""
-        val text = runCatching { file.readText() }.getOrNull().orEmpty()
-        if (text.isBlank()) return ""
+        // Читаем только хвост файла: журнал открыт на экране и перечитывается часто, а целиком
+        // он может занимать четверть мегабайта — это лишние чтения с флеша на ровном месте.
+        val text = runCatching {
+            if (!file.exists()) return ""
+            val length = file.length()
+            if (length <= 0L) return ""
+            val from = (length - DUMP_LIMIT_BYTES).coerceAtLeast(0L)
+            java.io.RandomAccessFile(file, "r").use { raf ->
+                raf.seek(from)
+                val buffer = ByteArray((length - from).toInt())
+                raf.readFully(buffer)
+                String(buffer, Charsets.UTF_8)
+            }
+        }.getOrNull().orEmpty()
+        if (text.isBlank()) return "
         val tail = if (text.length > DUMP_LIMIT_BYTES) {
             val cut = text.substring(text.length - DUMP_LIMIT_BYTES)
             cut.substringAfter('\n', cut)   // не показываем половину первой строки
