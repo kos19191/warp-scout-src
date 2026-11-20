@@ -198,6 +198,16 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         val ct = Crypto.chacha20Poly1305Seal(key, nonce, pt, aad)
         check("chachapoly: длина = plaintext+16", ct.size == pt.size + 16)
 
+        // Повторное шифрование тем же nonce не должно бросать: экземпляр AEAD при шифровании
+        // создаётся заново. На общем экземпляре BouncyCastle запрещает повтор nonce, а после
+        // пересогласования счётчик начинается с нуля — это был бы случайный обрыв туннеля.
+        val ctAgain = runCatching { Crypto.chacha20Poly1305Seal(key, nonce, pt, aad) }
+        check(
+            "chachapoly: шифрование с тем же nonce не падает",
+            ctAgain.isSuccess && ctAgain.getOrNull()!!.contentEquals(ct),
+            ctAgain.exceptionOrNull()?.message ?: "разные результаты"
+        )
+
         // Шифрование «первые N байт буфера» — путь отправки из tun без копии пакета. Результат
         // обязан совпадать с шифрованием точной копии, иначе на проводе окажется мусор.
         val full = ByteArray(64) { (it * 7).toByte() }

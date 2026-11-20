@@ -127,15 +127,15 @@ object Crypto {
     val EMPTY_AAD = ByteArray(0)
 
     /**
-     * Один экземпляр AEAD на поток.
+     * Переиспользуемый экземпляр AEAD — **только для расшифровки**, свой на поток.
      *
-     * Раньше `ChaCha20Poly1305()` создавался на **каждый пакет**: при сотне пакетов в секунду это
-     * сотня объектов в секунду только на шифр, не считая параметров. На телефоне такой мусор
-     * превращается в работу сборщика мусора, а он будит процессор — то есть в расход батареи.
-     * Открытый текст и ключ в объекте не кэшируются: `init` обязателен для каждого nonce, так что
-     * совместное использование безопасно, если экземпляр свой у каждого потока.
+     * Для шифрования так делать нельзя: BouncyCastle помнит последний nonce и запрещает повторное
+     * использование на одном экземпляре. После пересогласования счётчик начинается заново, поэтому
+     * nonce первого пакета новой сессии совпадает с каким-то из прошлой — и вместо пакета
+     * получалось исключение, то есть случайный обрыв туннеля после rekey. Экземпляр на каждый
+     * пакет при шифровании остаётся; экономию даёт приём, а он и есть основной путь загрузки.
      */
-    private val aeadPerThread = ThreadLocal.withInitial { org.bouncycastle.crypto.modes.ChaCha20Poly1305() }
+    private val openCipherPerThread = ThreadLocal.withInitial { org.bouncycastle.crypto.modes.ChaCha20Poly1305() }
 
     fun chacha20Poly1305Seal(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray): ByteArray =
         chachaPoly(true, key, nonce, plaintext, aad, plaintext.size)
@@ -172,7 +172,11 @@ object Crypto {
     ): ByteArray {
         require(nonce.size == 12) { "ChaCha20-Poly1305 nonce = 12 байт" }
         require(length in 0..input.size) { "длина $length вне 0..${input.size}" }
-        val c = aeadPerThread.get() ?: org.bouncycastle.crypto.modes.ChaCha20Poly1305()
+        val c = if (encrypt) {
+            org.bouncycastle.crypto.modes.ChaCha20Poly1305()
+        } else {
+            openCipherPerThread.get() ?: org.bouncycastle.crypto.modes.ChaCha20Poly1305()
+        }
         val params = org.bouncycastle.crypto.params.AEADParameters(
             org.bouncycastle.crypto.params.KeyParameter(key), 128, nonce, aad
         )
