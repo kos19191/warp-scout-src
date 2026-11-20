@@ -1099,7 +1099,7 @@
                 <ScrollView
                     android:id="@+id/logBox"
                     android:layout_width="match_parent"
-                    android:layout_height="300dp"
+                    android:layout_height="260dp"
                     android:layout_marginTop="8dp"
                     android:background="?attr/colorSurfaceContainerLow"
                     android:fillViewport="true"
@@ -1127,20 +1127,42 @@
                         style="@style/SectionHeader"
                         android:text="@string/section_tunnel_diag" />
 
-                    <TextView
-                        android:id="@+id/textTunnelState"
+                    <!--
+                      Диагностика — тоже в своём окне: раньше она шла простынёй вниз страницы,
+                      и «Скопировать журнал» уезжала за несколько экранов.
+                    -->
+                    <ScrollView
+                        android:id="@+id/diagBox"
                         android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:fontFamily="monospace"
-                        android:textAppearance="?attr/textAppearanceBodySmall"
-                        android:textIsSelectable="true" />
-
-                    <LinearLayout
-                        android:id="@+id/tunnelAdviceBox"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
+                        android:layout_height="220dp"
                         android:layout_marginTop="4dp"
-                        android:orientation="vertical" />
+                        android:background="?attr/colorSurfaceContainerLow"
+                        android:fillViewport="true"
+                        android:fadeScrollbars="false"
+                        android:padding="8dp"
+                        android:scrollbars="vertical">
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:id="@+id/textTunnelState"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:fontFamily="monospace"
+                                android:textAppearance="?attr/textAppearanceBodySmall"
+                                android:textIsSelectable="true" />
+
+                            <LinearLayout
+                                android:id="@+id/tunnelAdviceBox"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="4dp"
+                                android:orientation="vertical" />
+                        </LinearLayout>
+                    </ScrollView>
 
                     <LinearLayout
                         android:layout_width="match_parent"

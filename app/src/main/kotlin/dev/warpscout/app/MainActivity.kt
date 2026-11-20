@@ -206,6 +206,7 @@ class MainActivity : AppCompatActivity() {
             updateAppsState()
             updateTunnelButton()
             updateTunnelDiagnostics()
+            refreshLogBox()
             renderShortlist()
             showKeys()
         }.onFailure { t ->
@@ -739,6 +740,7 @@ class MainActivity : AppCompatActivity() {
         log.setLength(0)
         binding.textLog.text = ""
         cancelled.set(false)
+        refreshLogBox()
         binding.progress.visibility = View.VISIBLE
         binding.progress.isIndeterminate = true
         binding.textStatus.setText(R.string.status_running)
@@ -1039,6 +1041,16 @@ class MainActivity : AppCompatActivity() {
         binding.btnNextEndpoint.setOnClickListener { nextEndpoint() }
     }
 
+    /**
+     * Пустое окно журнала не показываем: рамка на пол-экрана без единой строки выглядела как
+     * «сломанный журнал» (и ровно так и попала на скриншот). Появилась первая строка — окно есть.
+     */
+    private fun refreshLogBox() {
+        if (!::binding.isInitialized) return
+        binding.logBox.visibility = if (log.isBlank()) View.GONE else View.VISIBLE
+        binding.textLogHint.visibility = if (log.isBlank()) View.VISIBLE else View.GONE
+    }
+
     /** Приёмник прогресса: ядро зовёт его из своего потока, поэтому всё в runOnUiThread. */
     private fun sink(): ProgressSink = object : ProgressSink {
         override fun isCancelled(): Boolean = cancelled.get()
@@ -1054,6 +1066,7 @@ class MainActivity : AppCompatActivity() {
             val content = box.getChildAt(0)?.height ?: 0
             val atBottom = box.scrollY + box.height >= content - 24
             binding.textLog.text = log.toString()
+            refreshLogBox()
             if (atBottom) box.post { box.fullScroll(View.FOCUS_DOWN) }
         }
 
@@ -1290,20 +1303,44 @@ class MainActivity : AppCompatActivity() {
     private fun renderShortlistUnsafe() {
         val entries = runCatching { ConfigShortlist.load(this) }.getOrDefault(emptyList())
         shortlistEntries = entries
-        if (entries.isEmpty()) {
+        val liveEndpointEarly = runCatching { TunnelDebug.endpoint }.getOrDefault("").trim()
+        if (entries.isEmpty() && liveEndpointEarly.isBlank()) {
             binding.cardTop3.visibility = View.GONE
             binding.groupTop3.removeAllViews()
             return
         }
         binding.cardTop3.visibility = View.VISIBLE
+        binding.groupTop3.removeAllViews()
         val network = runCatching { TuningCache.transportOf(this) }.getOrDefault("")
         val up = runCatching { tunnel.isUp }.getOrDefault(false)
         // Отмечаем ту точку, через которую реально идёт (или шёл последний) трафик. Раньше метка
         // появлялась только при поднятом туннеле и только если переключились из этого списка —
         // то есть после обычного «Включить туннель» не было видно ничего. Теперь сверяемся с
         // последней точкой входа: она ставится при любом подключении.
-        val lastEndpoint = prefs.lastEndpoint.trim()
-        binding.groupTop3.removeAllViews()
+        // Реальная точка, через которую идёт туннель, а не «последняя из подбора»: сервис знает
+        // точный host:port, и он может отличаться от того, что записан в настройках.
+        val liveEndpoint = liveEndpointEarly
+        val lastEndpoint = liveEndpoint.ifBlank { prefs.lastEndpoint.trim() }
+        if (lastEndpoint.isNotEmpty() && entries.none { it.endpoint.trim() == lastEndpoint }) {
+            // Подключены к точке, которой нет в списке трёх (например, поднимали сохранённый
+            // конфиг). Молчать нельзя: иначе в списке «ничего не выбрано» при живом туннеле.
+            binding.groupTop3.addView(
+                MaterialRadioButton(this).apply {
+                    id = View.generateViewId()
+                    text = getString(R.string.top3_now, lastEndpoint) + "\n" +
+                        getString(if (up) R.string.top3_row_active else R.string.top3_row_chosen)
+                    textSize = 14f
+                    setPadding(0, 8, 0, 8)
+                    isChecked = true
+                    setTypeface(typeface, android.graphics.Typeface.BOLD)
+                    isEnabled = false
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
         val lp = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
@@ -1944,6 +1981,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopTunnelPolling() = tunnelHandler.removeCallbacks(tunnelPollerTask)
 
+    /** Каким был признак «туннель работает» на прошлом тике — чтобы не перерисовывать список зря. */
+    private var lastShortlistUp = false
+
     /** Журнал, для которого уже построены подсказки: чтобы не пересобирать их на каждом тике. */
     private var lastDiagDump: String? = null
 
@@ -1951,6 +1991,13 @@ class MainActivity : AppCompatActivity() {
         override fun run() {
             updateTunnelDiagnostics()
             if (!tunnel.supported) return
+            // Отметка «сейчас подключён» в списке трёх должна появляться сразу после подъёма
+            // (и сниматься после падения), а не при следующем случайном обновлении экрана.
+            val upNow = runCatching { tunnel.isUp }.getOrDefault(false)
+            if (upNow != lastShortlistUp) {
+                lastShortlistUp = upNow
+                renderShortlist()
+            }
             // Пока туннель не поднят — часто (видно этапы подъёма), когда работает — редко.
             tunnelHandler.postDelayed(this, if (tunnel.isUp) 3000L else 700L)
         }
@@ -2020,7 +2067,15 @@ class MainActivity : AppCompatActivity() {
         // Экран открыт и обновляется несколько раз в секунду: переписываем только изменившееся,
         // иначе каждые 700 мс заново строится список подсказок и переверстывается текст.
         val full = "$status\n$dump"
-        if (binding.textTunnelState.text.toString() != full) binding.textTunnelState.text = full
+        if (binding.textTunnelState.text.toString() != full) {
+            // Новые шаги дописываются в конец: если человек не отлистал выше, держимся за хвост,
+            // иначе свежие строки уезжали бы вниз за пределы окна.
+            val box = binding.diagBox
+            val content = box.getChildAt(0)?.height ?: 0
+            val atBottom = box.scrollY + box.height >= content - 24
+            binding.textTunnelState.text = full
+            if (atBottom) box.post { box.fullScroll(View.FOCUS_DOWN) }
+        }
         if (dump == lastDiagDump) return
         lastDiagDump = dump
         binding.tunnelAdviceBox.removeAllViews()

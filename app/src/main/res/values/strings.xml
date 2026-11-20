@@ -220,6 +220,7 @@
     <string name="top3_row_detail">%1$s · проверен %2$s назад</string>
     <string name="top3_row_unknown">изнутри не проверялся</string>
     <string name="top3_row_active">сейчас подключён</string>
+    <string name="top3_now">Сейчас подключён: %1$s</string>
     <string name="top3_row_chosen">последний подключённый</string>
     <string name="top3_row_other_network">другая сеть</string>
     <string name="top3_switching">Переключаюсь на %1$s</string>
