@@ -1048,7 +1048,13 @@ class MainActivity : AppCompatActivity() {
             log.append(message)
             binding.textLogHint.visibility = android.view.View.GONE
             if (log.length > 30000) log.delete(0, log.length - 30000)
+            val box = binding.logBox
+            // Держимся за хвост журнала, но только если человек не отлистал вверх почитать:
+            // иначе каждая новая строка выдёргивала бы текст из-под пальца.
+            val content = box.getChildAt(0)?.height ?: 0
+            val atBottom = box.scrollY + box.height >= content - 24
             binding.textLog.text = log.toString()
+            if (atBottom) box.post { box.fullScroll(View.FOCUS_DOWN) }
         }
 
         override fun progress(done: Int, total: Int, current: String) = runOnUiThread {
@@ -1291,21 +1297,30 @@ class MainActivity : AppCompatActivity() {
         }
         binding.cardTop3.visibility = View.VISIBLE
         val network = runCatching { TuningCache.transportOf(this) }.getOrDefault("")
-        // Отметка «активен» имеет смысл только при поднятом туннеле: иначе строка врёт.
         val up = runCatching { tunnel.isUp }.getOrDefault(false)
+        // Отмечаем ту точку, через которую реально идёт (или шёл последний) трафик. Раньше метка
+        // появлялась только при поднятом туннеле и только если переключились из этого списка —
+        // то есть после обычного «Включить туннель» не было видно ничего. Теперь сверяемся с
+        // последней точкой входа: она ставится при любом подключении.
+        val lastEndpoint = prefs.lastEndpoint.trim()
         binding.groupTop3.removeAllViews()
         val lp = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         )
         for ((i, entry) in entries.withIndex()) {
-            val active = up && ConfigShortlist.isActive(entry, prefs)
+            val active = if (lastEndpoint.isNotEmpty()) {
+                entry.endpoint.trim() == lastEndpoint
+            } else {
+                ConfigShortlist.isActive(entry, prefs)
+            }
             val row = MaterialRadioButton(this)
             row.id = View.generateViewId()
-            row.text = shortlistRowText(i, entry, network, active)
+            row.text = shortlistRowText(i, entry, network, active, up)
             row.textSize = 14f
             row.setPadding(0, 8, 0, 8)
             row.isChecked = active
+            if (active) row.setTypeface(row.typeface, android.graphics.Typeface.BOLD)
             // Нажатие на уже выбранную строку тоже обрабатываем: «переподключиться к ней» — законное
             // желание, если туннель отвалился, а RadioGroup сам по себе повторный выбор не заметит.
             row.setOnClickListener { switchToShortlist(entry) }
@@ -1318,7 +1333,8 @@ class MainActivity : AppCompatActivity() {
         index: Int,
         entry: ConfigShortlist.Entry,
         network: String,
-        active: Boolean
+        active: Boolean,
+        up: Boolean
     ): String {
         val header = getString(R.string.top3_row, index + 1, entry.endpoint, entry.junk)
         val result = if (entry.resourcesOk >= 0 && entry.resourcesTotal > 0) {
@@ -1328,7 +1344,11 @@ class MainActivity : AppCompatActivity() {
         }
         val age = humanDuration((System.currentTimeMillis() - entry.savedAt).coerceAtLeast(0L))
         val detail = StringBuilder(getString(R.string.top3_row_detail, result, age))
-        if (active) detail.append(" · ").append(getString(R.string.top3_row_active))
+        if (active) {
+            detail.append(" · ").append(
+                getString(if (up) R.string.top3_row_active else R.string.top3_row_chosen)
+            )
+        }
         if (entry.network.isNotBlank() && network.isNotBlank() && entry.network != network) {
             detail.append(" · ").append(getString(R.string.top3_row_other_network))
         }
