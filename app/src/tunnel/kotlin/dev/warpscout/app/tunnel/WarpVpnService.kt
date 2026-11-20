@@ -77,6 +77,10 @@ class WarpVpnService : VpnService() {
     @Volatile
     private var cpuMarkMs: Long = android.os.Process.getElapsedCpuTime()
 
+    /** Заряд на прошлую строку статистики: по нему видно расход за интервал. */
+    @Volatile
+    private var batteryMark = -1
+
     /** Число переподключений на прошлую строку статистики. */
     @Volatile
     private var reconnectMark = 0
@@ -102,7 +106,8 @@ class WarpVpnService : VpnService() {
         // Какая сеть была в эти минуты и горел ли экран: на мобильной сети каждое пробуждение
         // модема стоит несравнимо дороже, чем на Wi-Fi, и без этих двух слов журнал не объясняет,
         // почему один и тот же час стоит по-разному.
-        val env = "сеть ${netKind()}, экран ${if (isScreenOn()) "вкл" else "выкл"}"
+        val env = "сеть ${netKind()}, экран ${if (isScreenOn()) "вкл" else "выкл"}" +
+            batteryText().let { if (it.isEmpty()) "" else ", $it" }
         val threads = threadCpuLine()
         val tail = if (threads.isBlank()) "" else ", $threads"
         return "$base, $env$tail"
@@ -121,6 +126,31 @@ class WarpVpnService : VpnService() {
             else -> "другая"
         }
     }.getOrDefault("неизвестно")
+
+    /**
+     * Заряд и его изменение за интервал.
+     *
+     * Это связывает журнал с той самой кривой расхода, на которую смотрит человек: видно не «cpu 12 с»,
+     * а «заряд 74% (−2% за 5 мин)» — и сразу понятно, потратились эти два процента на туннель или
+     * на что-то ещё. Значение берём из системного «липкого» сообщения о батарее: оно всегда есть,
+     * отдельный приёмник регистрировать не нужно, расход нулевой.
+     */
+    private fun batteryText(): String = runCatching {
+        val sticky = registerReceiver(
+            null,
+            android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED)
+        )
+        val level = sticky?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = sticky?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100) ?: 100
+        if (level < 0 || scale <= 0) return@runCatching ""
+        val pct = level * 100 / scale
+        val prev = batteryMark
+        batteryMark = pct
+        if (prev < 0) "заряд $pct%" else {
+            val diff = pct - prev
+            "заряд $pct% (${if (diff > 0) "+" else ""}$diff% за интервал)"
+        }
+    }.getOrDefault("")
 
     /** Экран включён? Читается из того же места, что и для keepalive. */
     private fun isScreenOn(): Boolean = runCatching {
