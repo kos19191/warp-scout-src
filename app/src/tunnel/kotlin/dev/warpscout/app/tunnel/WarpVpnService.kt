@@ -71,6 +71,23 @@ class WarpVpnService : VpnService() {
     private var plane: DataPlane? = null
     /** Второй выход (другой сервер): свой data plane и сокет, если включён. */
     private var plane2: DataPlane? = null
+    /** Сколько раз туннель переподнимался сам: переподключения — главный подозреваемый в расходе. */
+    private val reconnects = java.util.concurrent.atomic.AtomicInteger(0)
+    /** Отметка процессорного времени: по разнице видно, сколько стоила работа туннеля. */
+    @Volatile
+    private var cpuMarkMs: Long = android.os.Process.getElapsedCpuTime()
+
+    /**
+     * Цифры для строки статистики: процессорное время за интервал и число переподключений.
+     * Без них «батарея садится» — это разговор о догадках; с ними видно, виноват горячий путь
+     * (много cpu при малом трафике) или переподключения (много попыток за час).
+     */
+    private fun vitalsLine(): String {
+        val now = android.os.Process.getElapsedCpuTime()
+        val delta = (now - cpuMarkMs).coerceAtLeast(0L)
+        cpuMarkMs = now
+        return "cpu ${delta / 1000} с за интервал, переподключений ${reconnects.get()}"
+    }
     private var worker2: Thread? = null
     private var secondSocket: DatagramSocket? = null
     /** Разделитель пакетов между выходами: tun читает только он. */
@@ -328,6 +345,8 @@ class WarpVpnService : VpnService() {
                     (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
                 }.getOrDefault(true)
             },
+            // Цифры расхода — в строку статистики журнала.
+            vitals = { vitalsLine() },
             // Сокет перестал отправлять — сеть ушла без уведомления от системы. Переподнимаем.
             onFatal = { reason ->
                 // Сессия умерла (нет ответов/rekey не проходит) — говорим об этом прямо, а не
@@ -861,6 +880,7 @@ class WarpVpnService : VpnService() {
             }
             autoRestartTimes.addLast(now)
         }
+        reconnects.incrementAndGet()
         Thread({
             val text = lastConfigText ?: return@Thread
             autoRebind = true

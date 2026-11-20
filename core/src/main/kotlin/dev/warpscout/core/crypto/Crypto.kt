@@ -123,6 +123,20 @@ object Crypto {
 
     // ---------------------------------------------------------------- aead
 
+    /** Общий пустой AAD: в транспортных пакетах WireGuard он всегда пустой, а аллокация — на каждый пакет. */
+    val EMPTY_AAD = ByteArray(0)
+
+    /**
+     * Один экземпляр AEAD на поток.
+     *
+     * Раньше `ChaCha20Poly1305()` создавался на **каждый пакет**: при сотне пакетов в секунду это
+     * сотня объектов в секунду только на шифр, не считая параметров. На телефоне такой мусор
+     * превращается в работу сборщика мусора, а он будит процессор — то есть в расход батареи.
+     * Открытый текст и ключ в объекте не кэшируются: `init` обязателен для каждого nonce, так что
+     * совместное использование безопасно, если экземпляр свой у каждого потока.
+     */
+    private val aeadPerThread = ThreadLocal.withInitial { org.bouncycastle.crypto.modes.ChaCha20Poly1305() }
+
     fun chacha20Poly1305Seal(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray): ByteArray =
         chachaPoly(true, key, nonce, plaintext, aad)
 
@@ -141,7 +155,7 @@ object Crypto {
         aad: ByteArray
     ): ByteArray {
         require(nonce.size == 12) { "ChaCha20-Poly1305 nonce = 12 байт" }
-        val c = org.bouncycastle.crypto.modes.ChaCha20Poly1305()
+        val c = aeadPerThread.get() ?: org.bouncycastle.crypto.modes.ChaCha20Poly1305()
         val params = org.bouncycastle.crypto.params.AEADParameters(
             org.bouncycastle.crypto.params.KeyParameter(key), 128, nonce, aad
         )
@@ -150,7 +164,9 @@ object Crypto {
         val out = ByteArray(c.getOutputSize(input.size))
         var n = c.processBytes(input, 0, input.size, out, 0)
         n += c.doFinal(out, n)
-        return out.copyOf(n)
+        // Копируем только если размер не совпал: при шифровании он совпадает всегда, и лишняя
+        // копия каждого пакета — это ещё один объект в кучу на ровном месте.
+        return if (n == out.size) out else out.copyOf(n)
     }
 
 // ------------------------------------------------ xchacha20poly1305 (cookie WG)

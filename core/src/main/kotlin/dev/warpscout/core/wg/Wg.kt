@@ -243,7 +243,7 @@ object Wg {
         Crypto.le32(receiverIndex).copyInto(out, 4)
         putLe64(out, 8, session.sendCounter)
         val nonce = ByteArray(12).also { putLe64(it, 4, session.sendCounter) }
-        Crypto.chacha20Poly1305Seal(session.sendKey, nonce, data, ByteArray(0)).copyInto(out, 16)
+        Crypto.chacha20Poly1305Seal(session.sendKey, nonce, data, Crypto.EMPTY_AAD).copyInto(out, 16)
         return out to session.copy(sendCounter = session.sendCounter + 1)
     }
 
@@ -262,7 +262,7 @@ object Wg {
         if (counter <= session.receiveCounter) return null
         val nonce = ByteArray(12).also { putLe64(it, 4, counter) }
         val data = packet.copyOfRange(16, packet.size)
-        val plain = Crypto.chacha20Poly1305Open(session.receiveKey, nonce, data, ByteArray(0)) ?: return null
+        val plain = Crypto.chacha20Poly1305Open(session.receiveKey, nonce, data, Crypto.EMPTY_AAD) ?: return null
         return plain to session.copy(receiveCounter = counter)
     }
 

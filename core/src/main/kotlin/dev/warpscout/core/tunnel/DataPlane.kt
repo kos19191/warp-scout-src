@@ -93,6 +93,12 @@ class DataPlane(
      * состояние приходит снаружи.
      */
     private val screenOn: () -> Boolean = { true },
+    /**
+     * Дополнительные цифры для строки статистики (расход процессора, число переподключений).
+     * Считает вызывающий: ядро не знает ни Android, ни сервиса, а гадать о расходе батареи без
+     * цифр — ровно то, чем мы занимались до сих пор.
+     */
+    private val vitals: (() -> String)? = null,
     private val log: (String) -> Unit = {},
     /**
      * Зовётся, когда сокет перестал отправлять пакеты (ENETUNREACH/EPERM после смены сети или
@@ -509,10 +515,12 @@ class DataPlane(
             if (now >= nextStatsAt) {
                 nextStatsAt = now + STATS_EVERY_MS
                 val idle = if (lastUserTrafficAt == 0L) now - startedAt else now - lastUserTrafficAt
+                val extra = vitals?.invoke().orEmpty()
                 log(
                     "$STATS_PREFIX keepalive $keepalivesSent, рукопожатий $handshakesDone, " +
                         "трафика нет ${idle / 1000} с, " +
-                        Keepalive.describe(keepaliveIntervalMs(now), screenOn(), idle)
+                        Keepalive.describe(keepaliveIntervalMs(now), screenOn(), idle) +
+                        (if (extra.isNotBlank()) ", $extra" else "")
                 )
             }
         }
