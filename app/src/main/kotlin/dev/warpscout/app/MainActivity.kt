@@ -1310,8 +1310,14 @@ class MainActivity : AppCompatActivity() {
                     updateEndpointNote()
                     // «Не получилось» — на первой вкладке, а не всплывающей плашкой поверх любой вкладки.
                     prefs.endpointCursor = prefs.endpointCursor + 1
+                    // В панель — только последняя причина: полный список из пяти точек в неё не
+                    // влезает и обрезается на полуслове. Всё остальное уже в журнале.
                     banner(
-                        getString(R.string.banner_connect_failed, candidates.size, failures.toString().take(200)),
+                        getString(
+                            R.string.banner_connect_failed,
+                            candidates.size,
+                            failures.toString().substringAfterLast("; ").take(160)
+                        ),
                         error = true
                     )
                     showPage(TAB_START)

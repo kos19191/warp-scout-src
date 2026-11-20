@@ -127,6 +127,9 @@ class DataPlane(
     @Volatile
     private var lastOutboundAt: Long = 0L
 
+    /** Сколько раз подряд не удалось пересогласовать сессию (rekey). */
+    private var rekeyFailures = 0
+
     /** Сколько раз ПОДРЯД не удалось отправить пакет: несколько подряд = сеть ушла. */
     private val sendFailures = java.util.concurrent.atomic.AtomicInteger(0)
 
@@ -419,9 +422,19 @@ class DataPlane(
                 }
                 if (!negotiate(initial = false)) {
                     lastRekeyFailure = failureReason ?: "rekey не удался"
+                    rekeyFailures += 1
                     log("rekey не удался: ${lastRekeyFailure}")
+                    // Два провала пересогласования подряд — сессия мертва, хотя туннель числится
+                    // поднятым. Именно так выглядит «подключено, но ничего не открывается».
+                    if (rekeyFailures >= 2) {
+                        rekeyFailures = 0
+                        val reason = "сессия не пересогласовывается: $lastRekeyFailure"
+                        log(reason)
+                        onFatal?.invoke(reason)
+                    }
                 } else {
                     warnedExpiry = false
+                    rekeyFailures = 0
                 }
                 continue
             }

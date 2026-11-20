@@ -23,7 +23,7 @@
     <string name="apps_only_state">Через туннель: %1$d (%2$s)</string>
     <string name="apps_except_empty">Режим «всё, кроме выбранных», но ничего не отмечено — через туннель идут все.</string>
     <string name="apps_except_state">Напрямую, мимо туннеля: %1$d (%2$s)</string>
-    <string name="apps_traffic">Туннель сейчас: %1$s. Счётчики трафика — во вкладке «Туннель».</string>
+    <string name="apps_traffic">Туннель сейчас: %1$s. Счётчики трафика — на вкладке «Старт».</string>
     <string name="apps_traffic_off">Туннель выключен.</string>
     <string name="apps_more">…и ещё %1$d — уточните поиск</string>
     <string name="apps_traffic_button">Показать расход по приложениям</string>
@@ -38,7 +38,7 @@
     <string name="tab_log">Журнал</string>
     <string name="tab_report">Отчёт</string>
     <string name="btn_quick_config">Конфиг</string>
-    <string name="quick_hint">По умолчанию: WireGuard, сервер из последнего подбора, шум из пула, весь трафик в туннеле. Если не заработало — смотри вкладки: «Скан» (что проверять), «Конфиг» (куда экспортировать), «Туннель» (маршруты и диагностика), «Обход DPI» (шум и ByeDPI).</string>
+    <string name="quick_hint">По умолчанию: WireGuard, сервер из последнего подбора, шум из пула, весь трафик в туннеле. Если не заработало — смотри вкладки: «Скан» (что проверять), «Конфиг» (маршруты, шум, экспорт), «Журнал» (что именно не получилось).</string>
     <string name="quick_config_ready">Конфиг готов — открыл вкладку «Конфиг»</string>
 
     <string name="section_endpoints">Эндпоинты</string>

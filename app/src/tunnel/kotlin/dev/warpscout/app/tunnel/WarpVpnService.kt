@@ -102,6 +102,17 @@ class WarpVpnService : VpnService() {
     @Volatile
     private var netRestartPending: Boolean = false
 
+    /**
+     * Времена автоматических переподъёмов. Ограничение нужно, чтобы «мёртвая» сеть не превратилась
+     * в бесконечный цикл handshake'ов: за ночь такой цикл и радио, и процессор держит занятыми
+     * (в статистике батареи это потом выглядит как «приложения нет, а батарея села»).
+     */
+    private val autoRestartTimes = ArrayDeque<Long>()
+
+    /** Не больше стольких автоперезапусков за окно [AUTO_RESTART_WINDOW_MS]. */
+    private val AUTO_RESTART_LIMIT = 6
+    private val AUTO_RESTART_WINDOW_MS = 10 * 60_000L
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             shutdown()
@@ -125,6 +136,13 @@ class WarpVpnService : VpnService() {
         }
         lastConfigText = text
         lastStartId = startId
+        // Главное правило Android: после startForegroundService() сервис обязан вызвать
+        // startForeground() в течение ~5 секунд, иначе процесс убивают с
+        // ForegroundServiceDidNotStartInTimeException — без записи в журнал (и туннель падает
+        // вместе с процессом). Раньше это происходило уже в потоке подъёма, после создания
+        // сокета; если поток запаздывал или ждал остановки прошлой сессии — 5 секунд истекали.
+        // Поэтому объявляем себя foreground сразу, ещё до тяжёлой работы.
+        runCatching { postNotificationNow("Поднимаю туннель…") }
         // Подключение по кнопке/плитке — не автопереподъём: при неудаче сервис снимает себя, как
         // и раньше, иначе следующее ручное нажатие упрётся в «уже поднимается».
         autoRebind = false
@@ -746,6 +764,24 @@ class WarpVpnService : VpnService() {
                 return
             }
             lastNetRestartAt = now
+            // Бюджет: слишком частые автоматические переподъёмы означают, что сеть not WARP-friendly.
+            val cut = now - AUTO_RESTART_WINDOW_MS
+            while (autoRestartTimes.isNotEmpty() && autoRestartTimes.first() < cut) {
+                autoRestartTimes.removeFirst()
+            }
+            if (autoRestartTimes.size >= AUTO_RESTART_LIMIT) {
+                TunnelDebug.error(
+                    "автопереподключение приостановлено: $AUTO_RESTART_LIMIT попыток за 10 минут",
+                    "сеть стабильно не пропускает WARP: нажми «Подключить» вручную или смени профиль шума"
+                )
+                TunnelState.status = "автопереподключение приостановлено"
+                TunnelState.up = false
+                postNotification(TunnelState.status)
+                netRestartAttempts = 0
+                autoRebind = false
+                return
+            }
+            autoRestartTimes.addLast(now)
         }
         Thread({
             val text = lastConfigText ?: return@Thread
