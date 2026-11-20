@@ -90,6 +90,8 @@
     <string name="shield_desc">Знак WarpScout: щит с лисой</string>
     <string name="banner_no_config_scanning">Туннеля ещё нет — подбираю точку и подключусь сам</string>
     <string name="scan_found_connecting">Точка найдена — подключаюсь</string>
+    <string name="scan_found_connecting_to">Лучшая точка: %1$s — подключаюсь к ней</string>
+    <string name="pin_reset_to_best">Сервер %1$s выбирался вручную, но в тройке лучших его больше нет — подключаюсь к %2$s</string>
     <string name="scan_no_point">Живых точек не нашлось — подключение не начато</string>
     <string name="tunnel_unavailable">В этой сборке собственного туннеля нет: используйте «Передать в AmneziaVPN».</string>
 

@@ -765,7 +765,8 @@ class MainActivity : AppCompatActivity() {
                 if (result.best == null) {
                     banner(getString(R.string.scan_no_point))
                 } else {
-                    banner(getString(R.string.scan_found_connecting))
+                    val target = result.best?.endpoint?.render().orEmpty()
+                    banner(getString(R.string.scan_found_connecting_to, target))
                     toggleTunnel()
                 }
             }
@@ -1125,6 +1126,7 @@ class MainActivity : AppCompatActivity() {
         }
         binding.textNetwork.text = CleanNetwork.statusLine(this)
         val best = result.best
+        resetStalePin(result, best)
         binding.textBest.text = best?.let {
             getString(R.string.best_endpoint, it.endpoint.render(), it.junk.name, result.report.best?.score ?: 0)
         } ?: getString(R.string.report_no_alive)
@@ -1142,6 +1144,33 @@ class MainActivity : AppCompatActivity() {
                 .getOrNull()?.takeIf { it.exists() }
         }
         showKeys()
+    }
+
+    /**
+     * Ручной сервер в настройках сильнее подбора — и это ровно то, из-за чего «после скана
+     * подключился не к лучшему»: поле было заполнено когда-то раньше (или после переключения
+     * на точку из списка), и любое подключение шло туда, хотя подбор уже нашёл точку лучше.
+     *
+     * Правило: если вручную выбранная точка всё ещё в тройке лучших — уважаем выбор; если она
+     * оттуда выпала (умерла или стала хуже) — снимаем её и подключаемся к лучшей, сказав об этом.
+     */
+    private fun resetStalePin(result: dev.warpscout.core.tune.TuningResult, best: dev.warpscout.core.model.WarpConfig?) {
+        val pinnedLine = prefs.pinnedEndpoint
+        if (pinnedLine.isBlank()) return
+        val pinned = runCatching {
+            dev.warpscout.core.config.WgConf.parseEndpoint(
+                if (pinnedLine.contains(':')) pinnedLine else "$pinnedLine:2408"
+            )
+        }.getOrNull()?.render() ?: return
+        val top = result.report.candidates.sortedByDescending { it.score }
+            .take(3)
+            .map { it.config.endpoint.render() }
+        if (pinned in top) return
+        prefs.pinnedEndpoint = ""
+        runCatching { binding.editServer.setText("") }
+        val target = best?.endpoint?.render()
+        TunnelDebug.stage("снял ручной сервер $pinnedLine: в тройке лучших его нет")
+        if (target != null) banner(getString(R.string.pin_reset_to_best, pinnedLine, target))
     }
 
     // ---------------------------------------------------------- второй выход
