@@ -175,7 +175,7 @@ object TunnelDebug {
                 String(buffer, Charsets.UTF_8)
             }
         }.getOrNull().orEmpty()
-        if (text.isBlank()) return "
+        if (text.isBlank()) return ""
         val tail = if (text.length > DUMP_LIMIT_BYTES) {
             val cut = text.substring(text.length - DUMP_LIMIT_BYTES)
             cut.substringAfter('\n', cut)   // не показываем половину первой строки
