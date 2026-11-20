@@ -264,6 +264,20 @@ class WarpVpnService : VpnService() {
     private val AUTO_RESTART_LIMIT = 6
     private val AUTO_RESTART_WINDOW_MS = 10 * 60_000L
 
+    /**
+     * Медленный режим после серии неудач: попытка раз в 5 минут, всего до часа.
+     *
+     * Компромисс между «сдались навсегда» (человек не знает, что остался без туннеля) и
+     * «долбим сеть бесконечно» (батарея). 12 попыток по три пакета — это меньше, чем одно
+     * обновление ленты, а шанс подняться самому после смены соты или возврата сети есть.
+     */
+    private val SLOW_RETRY_EVERY_MS = 5 * 60_000L
+    private val SLOW_RETRY_LIMIT = 12
+
+    /** Сколько медленных попыток уже сделано (сбрасывается при успехе). */
+    @Volatile
+    private var slowRetries = 0
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // ГЛАВНОЕ ПРАВИЛО ANDROID: после startForegroundService() сервис обязан вызвать
         // startForeground() примерно за 5 секунд, иначе процесс убивают с
@@ -1010,16 +1024,45 @@ class WarpVpnService : VpnService() {
                 autoRestartTimes.removeFirst()
             }
             if (autoRestartTimes.size >= AUTO_RESTART_LIMIT) {
-                TunnelDebug.error(
-                    "автопереподключение приостановлено: $AUTO_RESTART_LIMIT попыток за 10 минут",
-                    "сеть стабильно не пропускает WARP: нажми «Подключить» вручную или смени профиль шума"
-                )
-                TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_FAILED
-                TunnelState.status = "автопереподключение приостановлено"
-                TunnelState.up = false
-                postNotification(TunnelState.status)
-                netRestartAttempts = 0
-                autoRebind = false
+                // Быстрые попытки кончились — но это не повод остаться выключенным навсегда.
+                // Раньше сервис просто сдавался: «сама отключила и обратно не включила», и человек
+                // узнавал об этом, только заметив, что интернет идёт напрямую. Теперь переходим в
+                // медленный режим: одна попытка раз в 5 минут, до часа. Одна попытка — это три
+                // пакета, для батареи это ничто, а шанс вернуться самому — есть.
+                slowRetries += 1
+                if (slowRetries <= SLOW_RETRY_LIMIT) {
+                    TunnelDebug.error(
+                        "автопереподключение приостановлено: $AUTO_RESTART_LIMIT попыток за 10 минут",
+                        "медленный режим: повторю через ${SLOW_RETRY_EVERY_MS / 60_000} мин " +
+                            "(попытка $slowRetries из $SLOW_RETRY_LIMIT)"
+                    )
+                    TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_FAILED
+                    TunnelState.status = "нет связи с WARP — повторю через ${SLOW_RETRY_EVERY_MS / 60_000} мин"
+                    TunnelState.up = false
+                    postNotification(TunnelState.status)
+                    netRestartAttempts = 0
+                    autoRebind = false
+                    val attempt = slowRetries
+                    Thread({
+                        runCatching { Thread.sleep(SLOW_RETRY_EVERY_MS) }
+                        if (stopped.get()) return@Thread
+                        TunnelDebug.stage("медленный повтор $attempt из $SLOW_RETRY_LIMIT")
+                        // Окно быстрых попыток к этому времени уже очистилось — проходим заново.
+                        restartAfterNetworkChange("медленный повтор", R.string.status_reconnect_net)
+                    }, "warpscout-slow-retry").apply { isDaemon = true }.start()
+                } else {
+                    TunnelDebug.error(
+                        "переподключение прекращено: $SLOW_RETRY_LIMIT медленных попыток за " +
+                            "${SLOW_RETRY_EVERY_MS * SLOW_RETRY_LIMIT / 60_000} мин",
+                        "сеть не пропускает WARP: нажми «Подключить» вручную или смени профиль шума"
+                    )
+                    TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_FAILED
+                    TunnelState.status = "не удалось подключиться — нажми «Подключить»"
+                    TunnelState.up = false
+                    postNotification(TunnelState.status)
+                    netRestartAttempts = 0
+                    autoRebind = false
+                }
                 return
             }
             autoRestartTimes.addLast(now)
@@ -1054,6 +1097,7 @@ class WarpVpnService : VpnService() {
             if (awaitUp(15_000)) {
                 netRestartAttempts = 0
                 autoRebind = false
+                slowRetries = 0
                 TunnelDebug.ok("туннель переподнят после смены сети")
                 return@Thread
             }
