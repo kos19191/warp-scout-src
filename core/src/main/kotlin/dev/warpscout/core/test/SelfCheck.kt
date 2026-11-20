@@ -1071,6 +1071,14 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             // Тишина: ждём дольше, чем rekeyAfterMs, и убеждаемся, что рукопожатий не прибавилось.
             // Это и есть «не будить радио зря»: расход батареи в простое давали именно эти
             // пересогласования каждые 150 секунд.
+            //
+            // Сначала даём плоскости доработать накопленные пакеты и трафику стихнуть: пока хоть
+            // один пакет идёт, «живой трафик» — это правда, и плановый rekey в это время законен.
+            // Заодно вычерпываем эхо, иначе очередь в tun переполнится и задержит доставку.
+            val settleUntil = System.currentTimeMillis() + 1200
+            while (System.currentTimeMillis() < settleUntil) {
+                h.tunOut.poll(50L)
+            }
             val before = h.plane.rekeyCount
             Thread.sleep(1400)
             check(
