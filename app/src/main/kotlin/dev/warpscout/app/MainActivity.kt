@@ -16,6 +16,7 @@ import com.google.android.material.checkbox.MaterialCheckBox
 import com.google.android.material.tabs.TabLayout
 import dev.warpscout.app.databinding.ActivityMainBinding
 import dev.warpscout.app.status.ServiceSettingsStore
+import dev.warpscout.core.state.TunnelStatus
 import dev.warpscout.app.status.TunnelStatusBus
 import android.net.Uri
 import dev.warpscout.core.config.WgConf
@@ -265,10 +266,10 @@ class MainActivity : AppCompatActivity() {
         val raw = runCatching { KeyVault(this).accountStore().load() }.getOrNull()
         val account = raw?.let { KeySource.parseAccount(it, "кеш") }
         binding.textKeys.text = if (account == null) {
-            getString(R.string.keys_source, "ключей ещё нет — появятся после первого подбора")
+            getString(R.string.keys_source, getString(R.string.keys_none))
         } else {
             val kind = if (KeySource.looksLikeCurve25519(account.privateB64)) "Curve25519" else "EC (MASQUE)"
-            getString(R.string.keys_source, "кеш: $kind, peer ${account.peerPublicB64.take(10)}…")
+            getString(R.string.keys_source, getString(R.string.keys_cached, kind, account.peerPublicB64.take(10)))
         }
     }
 
@@ -339,7 +340,7 @@ class MainActivity : AppCompatActivity() {
             if (!isChecked) return@addOnButtonCheckedListener
             prefs.appsMode = appsModeOf(checkedId)
             updateAppsState()
-            markSettingsDirty("режим туннелирования приложений")
+            markSettingsDirty(getString(R.string.dirty_apps_mode))
         }
         binding.checkAppsSystem.setOnCheckedChangeListener { _, _ -> rebuildAppsList() }
         binding.editAppSearch.doAfterTextChanged { rebuildAppsList() }
@@ -403,7 +404,7 @@ class MainActivity : AppCompatActivity() {
         }
         matched.take(APP_ROWS_LIMIT).forEach { app ->
             val row = MaterialCheckBox(this).apply {
-                text = if (app.system) "${app.label}  ·  системное" else app.label
+                text = if (app.system) getString(R.string.app_row_system, app.label) else app.label
                 tag = app.pkg
                 isChecked = app.pkg in selected
                 setOnClickListener { saveAppsSelection() }
@@ -441,7 +442,7 @@ class MainActivity : AppCompatActivity() {
         updateAppsState()
         // Список приложений в туннеле — часть конфигурации VpnService: применяется только при
         // установлении туннеля. Поэтому при поднятом туннеле ставим переподключение в очередь.
-        markSettingsDirty("приложения в туннеле")
+        markSettingsDirty(getString(R.string.dirty_apps_list))
     }
 
     private fun labelOfPackage(pkg: String): String =
@@ -450,7 +451,7 @@ class MainActivity : AppCompatActivity() {
     private fun summaryOf(pkgs: Set<String>): String {
         val names = pkgs.sortedBy { labelOfPackage(it) }
         val head = names.take(8).joinToString(", ") { labelOfPackage(it) }
-        return if (names.size > 8) "$head и ещё ${names.size - 8}" else head
+        return if (names.size > 8) getString(R.string.apps_more_summary, head, names.size - 8) else head
     }
 
     private fun updateAppsState() {
@@ -480,9 +481,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun humanBytes(value: Long): String = when {
-        value < 1024 -> "$value Б"
-        value < 1024 * 1024 -> "${value / 1024} КБ"
-        else -> String.format(java.util.Locale.getDefault(), "%.1f МБ", value / 1048576.0)
+        value < 1024 -> getString(R.string.bytes_b, value)
+        value < 1024 * 1024 -> getString(R.string.bytes_kb, value / 1024)
+        else -> getString(R.string.bytes_mb, value / 1048576.0)
     }
 
     // ------------------------------------------------ проверки ресурсов (Журнал)
@@ -504,8 +505,8 @@ class MainActivity : AppCompatActivity() {
                 ""
             }
             val tail = when {
-                !r.ok -> ", " + (r.errorClass ?: "нет ответа") + (r.status?.let { " ($it)" } ?: "")
-                r.status != null && r.elapsedMs > 0 -> ", ${r.status}, ${r.elapsedMs} мс"
+                !r.ok -> ", " + (r.errorClass ?: getString(R.string.no_answer)) + (r.status?.let { " ($it)" } ?: "")
+                r.status != null && r.elapsedMs > 0 -> getString(R.string.check_result_ms, r.status, r.elapsedMs)
                 r.status != null -> ", ${r.status}"
                 else -> ""
             }
@@ -627,7 +628,7 @@ class MainActivity : AppCompatActivity() {
             engine.start(prefs.tuningSpec(), manualConfig(), sink()) { result, error ->
                 binding.progress.visibility = View.GONE
                 when {
-                    error != null -> binding.textStatus.text = "Ошибка: $error"
+                    error != null -> binding.textStatus.text = getString(R.string.status_error, error)
                     result == null -> binding.textStatus.setText(R.string.status_cancelled)
                     else -> showResult(result)
                 }
@@ -648,7 +649,7 @@ class MainActivity : AppCompatActivity() {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
                 prefs.routesMode = position.coerceIn(0, 3)
                 refreshRoutesState()
-                markSettingsDirty("режим маршрутов")
+                markSettingsDirty(getString(R.string.dirty_routes_mode))
             }
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
@@ -683,22 +684,22 @@ class MainActivity : AppCompatActivity() {
         binding.checkListChecks.setOnCheckedChangeListener { _, isChecked ->
             prefs.checkByLists = isChecked
             refreshRoutesState()
-            markSettingsDirty("списки маршрутов")
+            markSettingsDirty(getString(R.string.dirty_lists))
         }
 
         // «Сохранить» на каждой вкладке, где что-то меняется: применяем и только потом переподключаем.
         binding.switchSecondExit.setOnCheckedChangeListener { _, isChecked ->
             prefs.secondExitOn = isChecked
             updateSecondState()
-            markSettingsDirty("второй выход")
+            markSettingsDirty(getString(R.string.dirty_second_exit))
         }
         binding.btnSecondResolve.setOnClickListener { resolveSecondDomains() }
 
-        binding.btnSaveAndApply.setOnClickListener { saveAndApply("конфиг") }
+        binding.btnSaveAndApply.setOnClickListener { saveAndApply(getString(R.string.dirty_config)) }
         binding.btnSaveAndSend.setOnClickListener { saveAndSend() }
-        binding.btnSaveScan.setOnClickListener { saveAndApply("скан") }
-        binding.btnSaveApps.setOnClickListener { saveAndApply("приложения") }
-        binding.btnSaveDpi.setOnClickListener { saveAndApply("профили шума") }
+        binding.btnSaveScan.setOnClickListener { saveAndApply(getString(R.string.dirty_scan)) }
+        binding.btnSaveApps.setOnClickListener { saveAndApply(getString(R.string.dirty_apps)) }
+        binding.btnSaveDpi.setOnClickListener { saveAndApply(getString(R.string.dirty_junk)) }
         binding.cardBanner.setOnClickListener { hideBanner() }
 
         binding.btnPickServer.setOnClickListener { pickServerFromReport() }
@@ -729,19 +730,19 @@ class MainActivity : AppCompatActivity() {
                     binding.editHosts.setText(WarpDefaults.MASQUE_SUBNETS.joinToString(", ") { "$it*" })
                     binding.editPorts.setText(WarpDefaults.MASQUE_PORTS.joinToString(", "))
                     binding.editCount.setText("60")
-                    toast("MASQUE слушает на 443/8443/… — их проверяем TLS'ом, а не UDP-хэндшейком")
+                    toast(getString(R.string.pool_note_masque))
                 }
                 Prefs.POOL_FULL -> {
                     binding.editHosts.setText("")
                     binding.editPorts.setText("")
                     binding.editCount.setText("1500")
-                    toast("Полный перебор: подсеть × октет × порт. Долго, но видно всю картину")
+                    toast(getString(R.string.pool_note_full))
                 }
                 else -> {
                     binding.editHosts.setText("")
                     binding.editPorts.setText("")
                     binding.editCount.setText("120")
-                    toast("Берём пул самого генератора: подсети Cloudflare × 52 порта")
+                    toast(getString(R.string.pool_note_default))
                 }
             }
             prefs.poolMode = mode
@@ -783,7 +784,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnBackup.setOnClickListener {
             persistUi()
-            val file = Backup.save(this, "вручную")
+            val file = Backup.save(this, getString(R.string.backup_note_manual))
             if (file == null) {
                 toast(getString(R.string.backup_failed))
                 return@setOnClickListener
@@ -930,7 +931,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showResult(result: TuningResult) {
         showPage(TAB_START)
-        runCatching { Backup.save(this, "подбор ${result.best?.endpoint?.render().orEmpty()}") }
+        runCatching { Backup.save(this, getString(R.string.backup_note_tuned, result.best?.endpoint?.render().orEmpty())) }
         binding.textStatus.setText(R.string.status_done)
         val took = humanDuration(System.currentTimeMillis() - runStartedAt)
         val hhmm = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
@@ -947,7 +948,7 @@ class MainActivity : AppCompatActivity() {
         val best = result.best
         binding.textBest.text = best?.let {
             getString(R.string.best_endpoint, it.endpoint.render(), it.junk.name, result.report.best?.score ?: 0)
-        } ?: "Живых endpoint'ов не нашлось. Увеличьте число точек, включите MASQUE и попробуйте ещё раз."
+        } ?: getString(R.string.report_no_alive)
         binding.textKeys.text = getString(R.string.keys_source, result.accountSource)
         binding.textConfig.text = currentConfig()?.let { runCatching { ConfigComposer.render(it, prefs) }.getOrNull() }
             ?: result.configText
@@ -955,7 +956,7 @@ class MainActivity : AppCompatActivity() {
         updateServerNote()
         renderResources(result.report.resources)
         binding.textReport.text = runCatching { Report.toMarkdown(result.report) }
-            .getOrElse { "Отчёт сломался: ${it.message}" }
+            .getOrElse { getString(R.string.report_broken, it.message.orEmpty()) }
         lastConfigFile = engine.storedConfigFile ?: best?.let { cfg ->
             runCatching { File(ConfigFiles.dir(this, "configs"), ConfigExport.filename(cfg)) }
                 .getOrNull()?.takeIf { it.exists() }
@@ -997,7 +998,7 @@ class MainActivity : AppCompatActivity() {
                     banner(getString(R.string.second_no_domains), error = true)
                 } else {
                     banner(getString(R.string.second_resolved, cidrs.size, hosts.size))
-                    markSettingsDirty("второй выход: подсети")
+                    markSettingsDirty(getString(R.string.dirty_second_cidrs))
                 }
             }
         }.apply { isDaemon = true; name = "warpscout-resolve-second" }.start()
@@ -1139,13 +1140,13 @@ class MainActivity : AppCompatActivity() {
     private fun refreshRoutesState() {
         val cached = lists.cached()
         val state = buildString {
-            append(getString(R.string.routes_state_off, prefs.routesModeName(), "списков в кеше: ${cached.size}"))
+            append(getString(R.string.routes_state_off, prefs.routesModeName(), getString(R.string.lists_cached, cached.size)))
             val age = cached.values.map { it.fetchedAt }.maxOrNull() ?: 0L
             if (age > 0L) append(" · ").append(dev.warpscout.core.lists.AllowLists.freshnessOf(age))
             if (prefs.routesMode == 2 && prefs.allowedIpsText.isBlank()) {
-                append("\nмаршрутов ещё нет: «Собрать маршруты» (нужен интернет для DoH)")
+                append("\n").append(getString(R.string.routes_none_yet))
             }
-            if (cached.isEmpty()) append("\nскачай списки — они актуализируются в репозитории, а не в приложении")
+            if (cached.isEmpty()) append("\n").append(getString(R.string.routes_download_hint))
         }
         binding.textRoutesState.text = state
     }
@@ -1178,7 +1179,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         binding.btnBuildRoutes.isEnabled = false
-        binding.textRoutesState.text = "разворачиваю домены в маршруты через DoH…"
+        binding.textRoutesState.text = getString(R.string.routes_expanding)
         Thread {
             val result = runCatching { lists.buildPlan(prefs) { line -> runOnUiThread { sink().log(line) } } }
             runOnUiThread {
@@ -1208,7 +1209,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val top = cands.take(12)
-        val labels = (listOf("Авто: лучший по баллу") + top.map {
+        val labels = (listOf(getString(R.string.server_auto_choice)) + top.map {
             getString(R.string.server_picked, it.config.endpoint.render(), it.junk.name, it.score)
         }).toTypedArray()
         android.app.AlertDialog.Builder(this)
@@ -1228,7 +1229,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 updateServerNote()
             }
-            .setNegativeButton("Закрыть", null)
+            .setNegativeButton(R.string.close_label, null)
             .show()
     }
 
@@ -1306,7 +1307,7 @@ class MainActivity : AppCompatActivity() {
                     winner = cfg
                     break
                 }
-                val why = tunnel.lastError() ?: "нет ответа"
+                val why = tunnel.lastError() ?: getString(R.string.no_answer)
                 if (failures.isNotEmpty()) failures.append("; ")
                 failures.append("${cfg.endpoint.render()} — $why")
                 // Гасим неудачную попытку и ДОЖИДАЕМСЯ фактической остановки: сервис
@@ -1330,11 +1331,11 @@ class MainActivity : AppCompatActivity() {
                     updateEndpointNote()
                     banner(getString(R.string.banner_connect_ok, used.endpoint.render()))
                     // Бекап «на всякий случай»: после каждого удачного подключения, молча.
-                    runCatching { Backup.save(this, "подключение ${used.endpoint.render()}") }
+                    runCatching { Backup.save(this, getString(R.string.backup_note_connected, used.endpoint.render())) }
                     probeExitRegion()
                 } else {
                     TunnelDebug.error(
-                        "ни одна из ${candidates.size} точек не поднялась",
+                        getString(R.string.no_candidates_up, candidates.size),
                         failures.toString().take(300) +
                             " · " + getString(R.string.tunnel_failed_hint)
                     )
@@ -1594,11 +1595,12 @@ class MainActivity : AppCompatActivity() {
     private fun updateConnStatus() {
         if (!::binding.isInitialized) return
         val up = tunnel.supported && tunnel.isUp
-        val statusRaw = tunnel.status
-        val starting = connecting || statusRaw.contains("Поднимаю", ignoreCase = true) ||
-            statusRaw.contains("переподключаюсь", ignoreCase = true)
-        val noNet = statusRaw.contains("нет сети", ignoreCase = true) ||
-            statusRaw.contains("жду новую", ignoreCase = true)
+        // Раньше здесь искали подстроки в русском статусе («Поднимаю», «переподключаюсь»,
+        // «нет сети»). Любая правка формулировки в сервисе молча ломала оформление, поэтому
+        // состояние приходит машинным кодом.
+        val phase = runCatching { TunnelStatusBus.snapshot(this).phase }.getOrDefault(TunnelStatus.PHASE_IDLE)
+        val starting = connecting || phase == TunnelStatus.PHASE_STARTING || phase == TunnelStatus.PHASE_RECONNECTING
+        val noNet = phase == TunnelStatus.PHASE_NO_NETWORK
         val failed = TunnelDebug.lastError
         val text: String
         val color: Int
@@ -1656,7 +1658,7 @@ class MainActivity : AppCompatActivity() {
         TunnelTrouble.advise(dump).forEach { advice ->
             binding.tunnelAdviceBox.addView(
                 android.widget.TextView(this).apply {
-                    text = "• ${advice.title}: ${advice.whatToDo}"
+                    text = "• ${getString(advice.titleRes)}: ${getString(advice.whatToDoRes)}"
                     textSize = 12f
                     setPadding(0, 6, 0, 6)
                     layoutParams = LinearLayout.LayoutParams(

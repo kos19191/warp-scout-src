@@ -20,10 +20,10 @@ class ImportActivity : Activity() {
         val message = when {
             text == null -> getString(R.string.import_failed)
             else -> {
-                val parsed = runCatching { WgConf.toWarpConfig("импорт", text) }.getOrNull()
+                val parsed = runCatching { WgConf.toWarpConfig("import", text) }.getOrNull()
                 prefs.manualConf = text
                 when {
-                    parsed != null -> "Импортировано: ${parsed.endpoint.render()} · ${parsed.junk.name}"
+                    parsed != null -> getString(R.string.import_ok, parsed.endpoint.render(), parsed.junk.name)
                     else -> getString(R.string.import_partial)
                 }
             }

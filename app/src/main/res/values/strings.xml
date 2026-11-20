@@ -223,4 +223,78 @@
     <string name="variant_tunnel">полная сборка с туннелем</string>
     <string name="variant_scout">сборка-сканер (без туннеля)</string>
     <string name="section_report">Отчёт</string>
+
+    <!-- Советы в диагностике: подбираются по журналу, текст — из ресурсов -->
+    <string name="advice_1_title">Туннель поднялся, но трафик не идёт</string>
+    <string name="advice_1_what">Чаще всего дело в IPv6: приложение выбирает IPv6-адрес сайта, а туннель его не уносит. Выключи «Отдавать IPv6-адрес» на вкладке «Настройки», нажми «Сохранить и применить» и проверь снова. Второй подозреваемый — MTU: поставь 1280 и сравни.</string>
+    <string name="advice_2_title">Сервер не ответил на инициацию</string>
+    <string name="advice_2_what">Это не «нет интернета», а «нет ответа от WARP-эндпоинта». Попробуй другой профиль шума (AmneziaWG без мусора часто режется) или другой порт; затем запусти подбор заново — возможно, выбранная точка уже умерла.</string>
+    <string name="advice_3_title">Система не дала tun-интерфейс</string>
+    <string name="advice_3_what">Обычно это значит, что уже работает другой VPN. Android поднимает только один туннель: выключи его и повтори.</string>
+    <string name="advice_4_title">Не удалось вывести сокет из-под туннеля</string>
+    <string name="advice_4_what">Без этого пакеты туннеля попали бы внутрь туннеля (петля). Так бывает при включённом Always-on VPN у другого приложения или при жёстком ограничении фоновой работы для WarpScout.</string>
+    <string name="advice_5_title">Конфиг не дошёл до сервиса</string>
+    <string name="advice_5_what">Нужен подобранный или импортированный конфиг: нажми «Включить туннель» на главной либо «Импортировать .conf» и повтори запуск.</string>
+    <string name="advice_6_title">Не удалось создать UDP-сокет</string>
+    <string name="advice_6_what">Проверь, что у приложения есть сеть (Wi-Fi или мобильные данные) и что в системе не включён режим «только разрешённые приложения» для VPN.</string>
+    <string name="advice_7_title">Сервис не смог остаться живым</string>
+    <string name="advice_7_what">На Android 14+ нужны разрешение на уведомления и нормальный режим батареи для WarpScout: выключи агрессивную экономию для приложения.</string>
+    <string name="advice_8_title">Туннель поднят, но трафик через него не идёт</string>
+    <string name="advice_8_what">Смотри AllowedIPs: при раздельном туннеле в него попадают только перечисленные сети. Если проверял сайт, которого в списке нет, — он и не должен идти через WARP. Для «всё через туннель» выбери режим «весь трафик».</string>
+
+    <!-- Фоновый подбор по расписанию -->
+    <string name="tune_channel">WarpScout: подбор конфигурации</string>
+    <string name="tune_delayed">Авто-подбор отложен: туннель работает, попробую позже</string>
+    <string name="tune_best">Лучшая точка: %1$s (%2$s)</string>
+    <string name="tune_none">Живых точек не найдено — попробуйте позже</string>
+    <!-- Уведомление туннеля -->
+    <string name="notif_starting">Поднимаю туннель…</string>
+    <string name="notif_active">Туннель активен: %1$s</string>
+    <string name="notif_no_traffic">Туннель поднят, но трафик не идёт</string>
+    <!-- Мелочи интерфейса, которые раньше были вписаны в код -->
+    <string name="keys_none">ключей ещё нет — появятся после первого подбора</string>
+    <string name="keys_cached">из кеша: %1$s, peer %2$s…</string>
+    <string name="app_row_system">%1$s  ·  системное</string>
+    <string name="apps_more_summary">%1$s и ещё %2$d</string>
+    <string name="bytes_b">%1$d Б</string>
+    <string name="bytes_kb">%1$d КБ</string>
+    <string name="bytes_mb">%1$.1f МБ</string>
+    <!-- Тексты, которые раньше были вписаны в код -->
+    <string name="status_error">Ошибка: %1$s</string>
+    <string name="pool_note_masque">MASQUE слушает на 443/8443/… — такие точки проверяем TLS, а не UDP-обменом</string>
+    <string name="pool_note_full">Полный перебор: подсеть × октет × порт. Долго, но видно всю картину</string>
+    <string name="pool_note_default">Пул генератора: подсети Cloudflare × 52 порта</string>
+    <string name="report_no_alive">Живых точек не нашлось. Увеличьте число точек, включите MASQUE и попробуйте ещё раз.</string>
+    <string name="report_broken">Отчёт не построился: %1$s</string>
+    <string name="lists_cached">списков в кеше: %1$d</string>
+    <string name="routes_none_yet">маршрутов ещё нет: нажми «Собрать маршруты» (нужен интернет для DoH)</string>
+    <string name="routes_download_hint">скачай списки — они обновляются в репозитории, а не в приложении</string>
+    <string name="routes_expanding">разворачиваю домены в маршруты через DoH…</string>
+    <string name="server_auto_choice">Авто: лучший по баллу</string>
+    <string name="close_label">Закрыть</string>
+    <string name="no_answer">нет ответа</string>
+    <string name="no_candidates_up">ни одна из %1$d точек не поднялась</string>
+    <string name="backup_note_manual">вручную</string>
+    <string name="backup_note_connected">подключение %1$s</string>
+    <string name="backup_note_tuned">подбор %1$s</string>
+    <string name="dirty_apps_mode">режим туннелирования приложений</string>
+    <string name="dirty_apps_list">приложения в туннеле</string>
+    <string name="dirty_routes_mode">режим маршрутов</string>
+    <string name="dirty_lists">списки маршрутов</string>
+    <string name="dirty_second_exit">второй выход</string>
+    <string name="dirty_second_cidrs">второй выход: подсети</string>
+    <string name="dirty_config">конфиг</string>
+    <string name="dirty_scan">скан</string>
+    <string name="dirty_apps">приложения</string>
+    <string name="dirty_junk">профили шума</string>
+    <string name="import_ok">Импортировано: %1$s · %2$s</string>
+    <string name="routes_mode_preset">пресет обхода белых списков</string>
+    <string name="routes_mode_lists">по спискам allow-domains</string>
+    <string name="routes_mode_manual">вручную</string>
+    <string name="routes_mode_all">весь трафик</string>
+    <string name="pool_mode_masque">Только MASQUE</string>
+    <string name="pool_mode_full">Полный перебор</string>
+    <string name="pool_mode_default">Пул генератора</string>
+    <string name="check_result_ms">, %1$s, %2$d мс</string>
+    <string name="share_file">Отправить %1$s</string>
 </resources>

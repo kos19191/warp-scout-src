@@ -183,7 +183,7 @@ class Engine(private val context: Context) {
                         val why = tunnel.lastError() ?: tunnel.status
                         sink.log("туннель не поднялся: $why")
                         TunnelTrouble.advise(tunnel.debugDump()).forEach {
-                            sink.log("  почему: ${it.title} — ${it.whatToDo}")
+                            sink.log("  почему: ${context.getString(it.titleRes)} — ${context.getString(it.whatToDoRes)}")
                         }
                     }
                 }

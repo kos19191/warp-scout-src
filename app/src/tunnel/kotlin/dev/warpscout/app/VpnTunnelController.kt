@@ -36,7 +36,7 @@ class VpnTunnelController(private val context: Context) : TunnelController {
         if (runCatching { VpnService.prepare(context) != null }.getOrDefault(true)) {
             TunnelDebug.error(
                 "нет разрешения на VPN",
-                "открой приложение и нажми «Туннель» ещё раз — система спросит разрешение один раз"
+                "открой приложение и нажми «Включить туннель» ещё раз — система спросит разрешение один раз"
             )
             return false
         }

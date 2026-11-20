@@ -337,12 +337,14 @@ class Prefs(private val context: Context) {
     fun confTargetEnum(): dev.warpscout.core.config.ConfTarget =
         dev.warpscout.core.config.ConfTarget.values()[confTarget.coerceIn(0, 3)]
 
-    fun routesModeName(): String = when (routesMode) {
-        1 -> "whitelist-пресет"
-        2 -> "по спискам allow-domains"
-        3 -> "вручную"
-        else -> "весь трафик"
-    }
+    fun routesModeName(): String = context.getString(
+        when (routesMode) {
+            1 -> R.string.routes_mode_preset
+            2 -> R.string.routes_mode_lists
+            3 -> R.string.routes_mode_manual
+            else -> R.string.routes_mode_all
+        }
+    )
 
     /**
      * Что реально попадёт в `AllowedIPs`.
@@ -405,11 +407,13 @@ class Prefs(private val context: Context) {
         dev.warpscout.core.lists.FileListStore(java.io.File(context.filesDir, "allowlists"))
 
     /** Как объяснить пользователю, что он сейчас выбрал. */
-    fun poolModeName(): String = when (poolMode) {
-        POOL_MASQUE -> "Только MASQUE"
-        POOL_FULL -> "Полный перебор"
-        else -> "Пул генератора"
-    }
+    fun poolModeName(): String = context.getString(
+        when (poolMode) {
+            POOL_MASQUE -> R.string.pool_mode_masque
+            POOL_FULL -> R.string.pool_mode_full
+            else -> R.string.pool_mode_default
+        }
+    )
 
     fun tuningSpec(): TuningSpec = TuningSpec(
         endpointSpec = endpointSpec(),

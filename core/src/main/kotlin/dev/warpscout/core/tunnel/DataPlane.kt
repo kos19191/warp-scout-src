@@ -81,7 +81,16 @@ class DataPlane(
      * потери маршрута). Сверху это означает «туннель мёртв, надо переподнять»: без такого сигнала
      * туннель висит «поднятым», а трафик молча не ходит.
      */
-    private val onFatal: ((String) -> Unit)? = null
+    private val onFatal: ((String) -> Unit)? = null,
+    /**
+     * Зовётся, когда handshake действительно прошёл и туннель поднят.
+     *
+     * Зачем отдельный сигнал, если в журнал пишется «туннель поднят»: сервис раньше определял
+     * подъём поиском этой подстроки в строке журнала. Одна правка формулировки в ядре — и
+     * состояние «работает» перестало бы устанавливаться вовсе, молча и без ошибки. Логика должна
+     * опираться на событие, а текст журнала остаётся текстом для человека.
+     */
+    private val onTunnelUp: (() -> Unit)? = null
 ) {
 
     @Volatile
@@ -180,6 +189,7 @@ class DataPlane(
         }
         handshakeOk = true
         log("handshake OK, туннель поднят")
+        runCatching { onTunnelUp?.invoke() }
 
         val timers = Thread({ timerLoop() }, "warpscout-tunnel-timers").apply { isDaemon = true; start() }
         val sender = Thread({ tunToUdp() }, "warpscout-tunnel-out").apply { isDaemon = true; start() }

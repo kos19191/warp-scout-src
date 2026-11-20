@@ -126,7 +126,7 @@ class WarpVpnService : VpnService() {
         // вместе с процессом. Поэтому объявляем себя foreground САМЫМ ПЕРВЫМ действием, до любых
         // проверок и ветвлений: раньше это происходило в потоке подъёма (после создания сокета)
         // или только в одной из ветвей — и на переподключениях пяти секунд не хватало.
-        val foregroundOk = runCatching { postNotificationNow("Поднимаю туннель…") }.isSuccess
+        val foregroundOk = runCatching { postNotificationNow(getString(R.string.notif_starting)) }.isSuccess
         if (!foregroundOk) {
             val why = TunnelState.status
             TunnelDebug.error("startForeground не удался: $why")
@@ -136,12 +136,14 @@ class WarpVpnService : VpnService() {
         if (starting || plane != null) {
             // Повторное нажатие «Подключить» (кнопка, плитка быстрых настроек) не должно
             // поднимать второй туннель поверх первого — только напомнить, что уже работаем.
+            TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_STARTING
             TunnelState.status = "туннель уже поднимается или работает"
             postNotification(TunnelState.status)
             return START_REDELIVER_INTENT
         }
         val text = intent?.getStringExtra(EXTRA_CONF)
         if (text.isNullOrBlank()) {
+            TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_FAILED
             TunnelState.status = "нет конфигурации — запуск пропущен"
             stopSelf()
             return START_NOT_STICKY
@@ -184,10 +186,11 @@ class WarpVpnService : VpnService() {
         TunnelState.up = false
         TunnelState.error = null
         TunnelState.gaveUp = false
+        TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_STARTING
         TunnelState.startedAt = System.currentTimeMillis()
         TunnelDebug.reset()
         createChannel()
-        postNotification("Поднимаю туннель…")
+        postNotification(getString(R.string.notif_starting))
 
         watchNetwork()
         TunnelDebug.stage("конфиг получен (${text.toByteArray().size} байт)")
@@ -293,15 +296,18 @@ class WarpVpnService : VpnService() {
             ),
             // Сокет перестал отправлять — сеть ушла без уведомления от системы. Переподнимаем.
             onFatal = { reason -> restartAfterNetworkChange(reason) },
+            // Подъём — по событию, а не по тексту журнала: правка формулировки в ядре раньше
+            // молча лишала сервис сигнала «туннель работает».
+            onTunnelUp = {
+                TunnelState.up = true
+                TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_UP
+                handshake.countDown()
+                TunnelDebug.ok("туннель поднят: ${cfg.endpoint.render()}")
+                postNotification(getString(R.string.notif_active, cfg.endpoint.render()))
+            },
             log = { line ->
                 TunnelState.status = line
                 when {
-                    line.contains("туннель поднят") -> {
-                        TunnelState.up = true
-                        handshake.countDown()
-                        TunnelDebug.ok(line)
-                        postNotification("Туннель активен: ${cfg.endpoint.render()}")
-                    }
                     // Пересогласование сессии — штатное событие раз в две минуты, но именно его
                     // отсутствие раньше выглядело как «туннель есть, интернета нет».
                     line.startsWith("rekey") || line.contains("cookie") -> {
@@ -322,6 +328,7 @@ class WarpVpnService : VpnService() {
             TunnelDebug.bytesUp = plane.bytesUp
             TunnelDebug.bytesDown = plane.bytesDown
             TunnelState.up = false
+            TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_IDLE
             when {
                 stopped.get() -> TunnelState.status = "туннель остановлен"
                 !ok -> {
@@ -413,7 +420,7 @@ class WarpVpnService : VpnService() {
                     "туннель поднят, но ноль пакетов за 8 с",
                     "проверь AllowedIPs: в split-tunnel через WARP идут только перечисленные сети"
                 )
-                postNotification("Туннель поднят, трафик не идёт")
+                postNotification(getString(R.string.notif_no_traffic))
             }
         }
     }
@@ -470,6 +477,7 @@ class WarpVpnService : VpnService() {
             starting = false
             TunnelState.busy = false
             TunnelState.up = false
+            TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_FAILED
             TunnelState.status = reason
             TunnelState.error = reason
             TunnelDebug.error(reason)
@@ -478,6 +486,7 @@ class WarpVpnService : VpnService() {
         }
         starting = false
         TunnelState.busy = false
+        TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_FAILED
         TunnelState.status = reason
         TunnelState.error = reason
         TunnelState.gaveUp = true
@@ -648,6 +657,7 @@ class WarpVpnService : VpnService() {
         autoRebind = false
         netRestartAttempts = 0
         TunnelState.up = false
+        TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_IDLE
         TunnelState.status = "туннель остановлен"
         unwatchNetwork()
         closeAll()
@@ -720,6 +730,7 @@ class WarpVpnService : VpnService() {
                 baselineNetwork = null
                 networkChanged = true
                 TunnelState.up = false
+                TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_NO_NETWORK
                 TunnelState.status = "сеть пропала — жду новую"
                 postNotification(TunnelState.status)
                 TunnelDebug.stage("сеть пропала (${describeNetwork(network)}): старый UDP-сокет мёртв")
@@ -729,6 +740,7 @@ class WarpVpnService : VpnService() {
                     runCatching { Thread.sleep(45_000) }
                     if (stopped.get() || baselineNetwork != null) return@Thread
                     TunnelDebug.stage("45 секунд без сети — снимаю туннель, чтобы трафик не уходил в пустоту")
+                    TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_NO_NETWORK
                     TunnelState.status = "нет сети — туннель снят"
                     postNotification(TunnelState.status)
                     epoch.incrementAndGet()
@@ -798,6 +810,7 @@ class WarpVpnService : VpnService() {
                     "автопереподключение приостановлено: $AUTO_RESTART_LIMIT попыток за 10 минут",
                     "сеть стабильно не пропускает WARP: нажми «Подключить» вручную или смени профиль шума"
                 )
+                TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_FAILED
                 TunnelState.status = "автопереподключение приостановлено"
                 TunnelState.up = false
                 postNotification(TunnelState.status)
@@ -811,6 +824,7 @@ class WarpVpnService : VpnService() {
             val text = lastConfigText ?: return@Thread
             autoRebind = true
             TunnelDebug.stage("$why — переподключаю туннель")
+            TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_RECONNECTING
             TunnelState.status = "переподключаюсь после смены сети"
             postNotification(TunnelState.status)
             val myEpoch = epoch.incrementAndGet()
@@ -850,6 +864,7 @@ class WarpVpnService : VpnService() {
                     "не удалось поднять туннель после смены сети",
                     "точка могла стать недоступной: нажми «Подключить» — сработает перебор точек"
                 )
+                TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_FAILED
                 TunnelState.status = "не удалось поднять после смены сети"
                 postNotification(TunnelState.status)
                 netRestartAttempts = 0

@@ -564,6 +564,35 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         )
         expect("настройки сервиса: мусор → null", ServiceSettings.fromJson("<xml/>"), null)
 
+        // Фаза: машинный код вместо поиска подстрок в русском статусе.
+        expect("фаза: по умолчанию простаивает", TunnelStatus().phase, TunnelStatus.PHASE_IDLE)
+        expect(
+            "фаза: переживает сериализацию",
+            TunnelStatus.fromJson(TunnelStatus(phase = TunnelStatus.PHASE_RECONNECTING).toJson())?.phase,
+            TunnelStatus.PHASE_RECONNECTING
+        )
+        expect(
+            "фаза: «идёт подключение» у подъёма",
+            TunnelStatus(phase = TunnelStatus.PHASE_STARTING).isStarting,
+            true
+        )
+        expect(
+            "фаза: «идёт подключение» у переподключения",
+            TunnelStatus(phase = TunnelStatus.PHASE_RECONNECTING).isStarting,
+            true
+        )
+        expect("фаза: работа — это не «идёт подключение»", TunnelStatus(phase = TunnelStatus.PHASE_UP).isStarting, false)
+        expect(
+            "фаза: «нет сети» — отдельный признак",
+            TunnelStatus(phase = TunnelStatus.PHASE_NO_NETWORK).hasNoNetwork,
+            true
+        )
+        expect(
+            "фаза: старый снимок без фазы читается как простой",
+            TunnelStatus.fromJson("{\"up\": false}")?.phase,
+            TunnelStatus.PHASE_IDLE
+        )
+
         // Совместимость: снимок без новых полей (он же — снимок старой версии приложения).
         val legacy = TunnelStatus.fromJson("{\"up\": true, \"status\": \"старый снимок\"}")
         expect("снимок: читается без новых полей", legacy?.status, "старый снимок")

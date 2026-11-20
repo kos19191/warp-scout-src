@@ -41,7 +41,18 @@ data class TunnelStatus(
     val lastStageMs: Long = 0L,
     /** Журнал вообще трогали: иначе «туннель ещё не запускался» вместо пустого экрана. */
     val touched: Boolean = false,
+    /**
+     * Что происходит на самом деле, машинным кодом (см. константы `PHASE_*`).
+     *
+     * Зачем код, а не текст: интерфейс раньше решал «идёт подключение или нет», ища подстроки в
+     * русском статусе («Поднимаю», «переподключаюсь», «нет сети»). Любая правка формулировки в
+     * сервисе молча ломала оформление кнопки, а перевод на другой язык сломал бы его целиком.
+     */
+    val phase: Int = PHASE_IDLE,
 ) {
+
+    val isStarting: Boolean get() = phase == PHASE_STARTING || phase == PHASE_RECONNECTING
+    val hasNoNetwork: Boolean get() = phase == PHASE_NO_NETWORK
 
     fun toJson(): String = JsonVal.obj(
         "ver" to JsonVal.num(VERSION),
@@ -59,10 +70,29 @@ data class TunnelStatus(
         "lastError" to (lastError?.let { JsonVal.str(it) } ?: JsonVal.Null),
         "lastStageMs" to JsonVal.num(lastStageMs),
         "touched" to JsonVal.bool(touched),
+        "phase" to JsonVal.num(phase),
     ).render()
 
     companion object {
         const val VERSION = 1
+
+        /** Туннель не поднимался или остановлен. */
+        const val PHASE_IDLE = 0
+
+        /** Идёт установка соединения (handshake). */
+        const val PHASE_STARTING = 1
+
+        /** Работает: handshake прошёл и трафик идёт. */
+        const val PHASE_UP = 2
+
+        /** Переподнимаем после смены сети. */
+        const val PHASE_RECONNECTING = 3
+
+        /** Сети нет, ждём появления: туннель снимается, чтобы трафик не уходил в пустоту. */
+        const val PHASE_NO_NETWORK = 4
+
+        /** Не вышло: причина в `error`, ждать больше нечего. */
+        const val PHASE_FAILED = 5
 
         fun fromJson(text: String?): TunnelStatus? {
             if (text.isNullOrBlank()) return null
@@ -82,6 +112,7 @@ data class TunnelStatus(
                 lastError = obj.str("lastError"),
                 lastStageMs = obj.lng("lastStageMs"),
                 touched = obj.bool("touched") ?: false,
+                phase = obj.lng("phase").toInt(),
             )
         }
     }

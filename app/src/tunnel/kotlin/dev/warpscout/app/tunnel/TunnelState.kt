@@ -72,6 +72,18 @@ object TunnelState {
         }
 
     /**
+     * Машинная фаза (см. `TunnelStatus.PHASE_*`): по ней интерфейс решает, что показать, не
+     * разбирая русский текст статуса.
+     */
+    @Volatile
+    var phase: Int = TunnelStatus.PHASE_IDLE
+        set(v) {
+            if (field == v) return
+            field = v
+            publishNow(urgent = true)
+        }
+
+    /**
      * Сервис занят: поднимается или уже работает. По этому флагу контроллер ждёт, пока прошлая
      * сессия действительно завершится, прежде чем стартовать новую — иначе два подъёма идут
      * одновременно и второй упирается в «уже поднимается».
@@ -99,6 +111,7 @@ object TunnelState {
         gaveUp = gaveUp,
         busy = busy,
         startedAt = startedAt,
+        phase = phase,
         bytesUp = TunnelDebug.bytesUp,
         bytesDown = TunnelDebug.bytesDown,
         handshakeAttempts = TunnelDebug.handshakeAttempts,
@@ -118,6 +131,7 @@ object TunnelState {
             gaveUp = snapshot.gaveUp
             busy = snapshot.busy
             startedAt = snapshot.startedAt
+            phase = snapshot.phase
         } finally {
             mirroring = false
         }
@@ -132,6 +146,7 @@ object TunnelState {
         up = false
         error = null
         gaveUp = false
+        phase = TunnelStatus.PHASE_STARTING
     }
 
     /**
