@@ -105,6 +105,11 @@ class MainActivity : AppCompatActivity() {
             sink().log("   подробности: Journal → «Скопировать журнал» (раздел «Падения»)")
         }
         binding.textStatus.setText(R.string.status_idle)
+        binding.textVersion.text = getString(
+            R.string.version_footer,
+            BuildConfig.VERSION_NAME,
+            getString(if (BuildConfig.TUNNEL_SUPPORTED) R.string.variant_tunnel else R.string.variant_scout)
+        )
     }
 
     override fun onDestroy() {
@@ -858,6 +863,7 @@ class MainActivity : AppCompatActivity() {
         override fun log(message: String) = runOnUiThread {
             if (log.isNotEmpty()) log.append('\n')
             log.append(message)
+            binding.textLogHint.visibility = android.view.View.GONE
             if (log.length > 30000) log.delete(0, log.length - 30000)
             binding.textLog.text = log.toString()
         }

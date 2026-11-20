@@ -11,8 +11,14 @@
 | `xch.txt` | текст `draft-irtf-cfrg-xchacha` (векторы для XChaCha20-Poly1305 и hChaCha20) | свободный документ IETF |
 | `script.js`, `quic.js` | публичные страницы генератора WARP (https://warp-generation.github.io/) — шаблоны конфигов, пулы подсетей/портов, генерация QUIC-Initial | публично доступно; использовано как источник параметров, не как код проекта |
 
-Наш код ни один из этих файлов не включает и не линкует: X25519/ChaCha20-Poly1305/BLAKE2s
-реализованы заново (`core/.../crypto/`), а сверены — с CPython, OpenSSL и векторами из RFC.
+Наш код ни один из этих файлов не включает и не линкует:
+
+* BLAKE2s реализован заново (`core/.../crypto/Blake2s.kt`) и сверен с `hashlib` из CPython;
+* X25519 и ChaCha20-Poly1305 берутся из BouncyCastle (`bcprov-jdk18on`, MIT-подобная лицензия) и
+  сверены с RFC 7748 §6.1 / OpenSSL и Appendix A.1 `draft-irtf-cfrg-xchacha`;
+* AES-GCM/AES-ECB и HMAC-SHA256 — из стандартного JCA (`javax.crypto`).
+
+Полный список сторонних материалов и их лицензий — в `THIRD_PARTY_NOTICES.md` в корне репозитория.
 
 Обновить копии:
 

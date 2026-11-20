@@ -35,6 +35,8 @@ KOTLIN_DIRS = [ROOT / "app/src/main/kotlin", ROOT / "app/src/scout/kotlin", ROOT
 # Типы ресурсов, которые живут в values*.xml тегом, а не отдельным файлом.
 VALUE_KINDS = ["string", "color", "dimen", "style", "bool", "integer"]
 FILE_KINDS = {"drawable": ["drawable", "drawable-night", "mipmap"], "xml": ["xml"], "layout": ["layout"], "menu": ["menu"]}
+# mipmap-anydpi-v26 и подобные: адаптивные иконки живут в каталогах с квалификаторами.
+QUALIFIED_DIRS = {"mipmap": "mipmap", "drawable": "drawable"}
 
 ALLOWED_FGS_TYPES = {
     "none", "manifest", "camera", "connectedDevice", "dataSync", "health", "location",
@@ -120,7 +122,7 @@ def declared_ids() -> set[str]:
 
 def value_resources() -> dict[str, list[str]]:
     """kind → имена, объявленные в values*.xml (с повторами — их ловит проверка дубликатов)."""
-    out: dict[str, list[str]] = {k: [] for k in VALUE_KINDS + list(FILE_KINDS)}
+    out: dict[str, list[str]] = {k: [] for k in VALUE_KINDS + list(FILE_KINDS) + list(QUALIFIED_DIRS)}
     for kind in VALUE_KINDS:
         for d in ("values", "values-night"):
             for f in sorted((RES / d).glob("*.xml")) if (RES / d).is_dir() else []:
@@ -135,6 +137,12 @@ def value_resources() -> dict[str, list[str]]:
                 out[kind].append(f.stem)
         for f in sorted((RES / (dirs[0])).glob("*.*")) if (RES / dirs[0]).is_dir() else []:
             out[kind].append(f.stem)
+    # каталоги с квалификаторами: mipmap-anydpi-v26, drawable-v24 и т.п.
+    for kind, prefix in QUALIFIED_DIRS.items():
+        for d in sorted(RES.glob(prefix + "-*")):
+            if d.is_dir():
+                for f in sorted(d.glob("*.*")):
+                    out[kind].append(f.stem)
     return {k: v for k, v in out.items()}
 
 
@@ -196,7 +204,8 @@ def check_resources() -> list[str]:
             if "." in name:  # @style/Widget.Material3… — ресурс из библиотеки, не отсюда
                 continue
             if name not in names.get(kind, set()):
-                problems.append(f"{f.relative_to(RES)}: висячая ссылка @{kind}/{name}")
+                where = f.relative_to(RES) if RES in f.parents else f.relative_to(ROOT)
+                problems.append(f"{where}: висячая ссылка @{kind}/{name}")
 
     kt = "\n".join(p.read_text(encoding="utf-8") for d in KOTLIN_DIRS if d.is_dir() for p in d.rglob("*.kt"))
     for kind, name in re.findall(r"(?<![a-zA-Z.])R\.(string|id|layout|style|dimen|color|drawable|xml|menu)\.([a-zA-Z_0-9]+)", kt):

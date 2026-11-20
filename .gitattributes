@@ -1,0 +1,16 @@
+# Единые переводы строк: в репозитории — LF, чтобы сборка на Linux/CI и Android Studio
+# не давали диффов «весь файл изменён».
+* text=auto eol=lf
+
+# Windows-скрипты и бинарники — исключения.
+*.bat text eol=crlf
+*.jar binary
+*.zip binary
+*.png binary
+*.jpg binary
+*.webp binary
+*.pyc binary
+
+# Справочные копии первоисточников (docs/vendor-reference) не трогаем вообще:
+# они лежат ровно в том виде, в каком их отдают апстримы.
+docs/vendor-reference/** -text

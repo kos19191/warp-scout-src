@@ -970,6 +970,14 @@
                 android:paddingBottom="24dp">
 
                 <TextView
+                    android:id="@+id/textLogHint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/journal_empty"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <TextView
                     android:id="@+id/textLog"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -1042,8 +1050,7 @@
                 <!-- ── отчёт ──────────────────────────────────────────────── -->
                 <TextView
                     style="@style/SectionHeader"
-                    android:text="@string/tab_report" />
-
+                    android:text="@string/section_report" />
 
                 <!-- ── что реально открылось: проверки ресурсов с ✓/✗ ── -->
                 <TextView
@@ -1071,6 +1078,14 @@
                     android:textAppearance="?attr/textAppearanceBodySmall"
                     android:textIsSelectable="true" />
 
+
+                <TextView
+                    android:id="@+id/textVersion"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:gravity="center"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
             </LinearLayout>
         </ScrollView>
     </FrameLayout>
