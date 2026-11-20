@@ -59,10 +59,29 @@ class Engine(private val context: Context) {
             return
         }
         val main = Handler(Looper.getMainLooper())
+        val guard = context.applicationContext
         running = true
         cancelled.set(false)
+        // Пока идёт подбор, процесс держится foreground-сервисом: иначе сворачивание экрана
+        // отдаёт процесс системе на растерзание и скан обрывается молча.
+        ScanGuard.start(guard)
+        // Прогресс дублируем в уведомление — по нему видно, что подбор жив, когда приложение свёрнуто.
+        val watched = object : ProgressSink {
+            override fun log(message: String) {
+                ScanGuard.update(guard, message)
+                sink.log(message)
+            }
+
+            override fun progress(done: Int, total: Int, current: String) {
+                ScanGuard.update(guard, if (total > 0) "$done из $total · $current" else current)
+                sink.progress(done, total, current)
+            }
+
+            override fun isCancelled(): Boolean = cancelled.get() || sink.isCancelled()
+        }
         executor.execute {
-            val outcome = runCatching { runOnce(spec, manual, sink) }
+            val outcome = runCatching { runOnce(spec, manual, watched) }
+            ScanGuard.stop(guard)
             main.post {
                 running = false
                 onDone(outcome.getOrNull(), outcome.exceptionOrNull()?.let { describe(it) })

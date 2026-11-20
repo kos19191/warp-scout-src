@@ -296,4 +296,7 @@
     <string name="pool_mode_default">Пул генератора</string>
     <string name="check_result_ms">, %1$s, %2$d мс</string>
     <string name="share_file">Отправить %1$s</string>
+    <string name="scan_notif_title">Идёт подбор</string>
+    <string name="scan_notif_text">проверяю точки, можно свернуть приложение</string>
+    <string name="scan_notif_channel">Подбор конфигурации</string>
 </resources>
