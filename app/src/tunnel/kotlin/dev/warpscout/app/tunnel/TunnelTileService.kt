@@ -82,6 +82,7 @@ class TunnelTileService : TileService() {
 
     private fun updateTile() {
         val tile = qsTile ?: return
+        runCatching { TunnelStatusBus.snapshot(this) }
         val hasConfig = Prefs(this).lastConfigText.isNotBlank()
         tile.state = when {
             TunnelState.up -> Tile.STATE_ACTIVE

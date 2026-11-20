@@ -1030,6 +1030,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateTunnelButton() {
+        // Снимок мог «зависнуть» на «работает», если сервис убила система: проверка дешёвая
+        // (не чаще раза в 2 секунды) и возвращает правду до того, как её покажет кнопка.
+        runCatching { TunnelStatusBus.snapshot(this) }
         updateConnStatus()
         if (!tunnel.supported) {
             binding.btnTunnel.isEnabled = false

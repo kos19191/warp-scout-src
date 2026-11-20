@@ -888,6 +888,11 @@ class WarpVpnService : VpnService() {
          * что в последний раз реально работало.
          */
         fun startWithText(context: Context, text: String) {
+            // Новая попытка: результат прежней не должен влиять на неё. Без этого интерфейс
+            // успевал прочитать старое «туннель работает» или «сдался» из предыдущего снимка и
+            // делал вывод по устаревшим данным. Здесь это покрывает все пути запуска: кнопку,
+            // плитку, верификацию из-под туннеля и перебор точек.
+            TunnelState.forgetAttempt()
             val intent = Intent(context, WarpVpnService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_CONF, text)

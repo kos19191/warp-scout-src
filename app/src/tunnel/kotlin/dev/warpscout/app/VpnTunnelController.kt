@@ -42,9 +42,7 @@ class VpnTunnelController(private val context: Context) : TunnelController {
             )
             return false
         }
-        // Прошлый результат не должен влиять на новую попытку: иначе интерфейс увидит старое
-        // «сдался» раньше, чем сервис успеет опубликовать новое состояние, и соврёт про отказ.
-        TunnelState.forgetAttempt()
+        // Сброс прошлого результата делает сам запуск сервиса (WarpVpnService.startWithText).
         WarpVpnService.start(context, config)
         return true
     }

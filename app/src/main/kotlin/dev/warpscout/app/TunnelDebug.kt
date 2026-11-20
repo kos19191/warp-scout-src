@@ -167,7 +167,8 @@ object TunnelDebug {
             val cut = text.substring(text.length - DUMP_LIMIT_BYTES)
             cut.substringAfter('\n', cut)   // не показываем половину первой строки
         } else text
-        return tail.trimEnd()
+        // Нули в журнале — след совпавшей ротации из двух процессов; показывать их незачем.
+        return tail.replace("\u0000", "").trimEnd()
     }
 
     /**

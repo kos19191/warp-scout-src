@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *    JSON;
  *  - **понятная смерть**. Если сервис убили (не наш `stopSelf`, а OOM или системный kill),
  *    снимок останется «туннель работает». Поэтому в снимке есть время записи, а сервис раз в
- *    10 секунд пишет «сердцебиение»; если время давно не обновлялось, интерфейс проверяет,
+ *    полминуты пишет «сердцебиение»; если время давно не обновлялось, интерфейс проверяет,
  *    жив ли процесс сервиса, и не врёт про состояние.
  */
 object TunnelStatusBus {
@@ -40,7 +40,7 @@ object TunnelStatusBus {
     private const val SNAPSHOT = "tunnel-status.json"
 
     /** Снимок старше этого — повод проверить, жив ли сервис (при живом приходит сердцебиение). */
-    private const val STALE_MS = 30_000L
+    private const val STALE_MS = 90_000L
 
     /** Проверка «процесс сервиса жив» не чаще раза в 2 секунды: она системная и не бесплатная. */
     private const val LIVENESS_THROTTLE_MS = 2_000L
@@ -106,8 +106,19 @@ object TunnelStatusBus {
         if (now - lastLivenessAt < LIVENESS_THROTTLE_MS) return current
         lastLivenessAt = now
         if (serviceProcessRunning(context) == false) {
-            val dead = status.copy(up = false, busy = false, gaveUp = false, error = status.error, status = "туннель не запущен")
-            current = dead
+            // Сервиса нет, а снимок говорит «работает»: это процесс, убитый системой. Правим
+            // состояние у всех, кто его показывает (кнопка, карточка, плитка).
+            val dead = status.copy(
+                up = false,
+                busy = false,
+                gaveUp = false,
+                status = "туннель не запущен",
+                // Отметку времени ставим свою: иначе проверка будет повторяться каждые две
+                // секунды и каждый раз дёргать интерфейс одним и тем же выводом. В файл это
+                // состояние не пишется — его владелец только процесс сервиса.
+                updatedAt = now
+            )
+            applySnapshot(context, dead, force = true)
             return dead
         }
         return status
@@ -146,9 +157,9 @@ object TunnelStatusBus {
         return TunnelStatus.fromJson(runCatching { file.readText() }.getOrNull())
     }
 
-    private fun applySnapshot(context: Context, status: TunnelStatus?) {
+    private fun applySnapshot(context: Context, status: TunnelStatus?, force: Boolean = false) {
         val fresh = status ?: return
-        if (loaded && fresh.updatedAt == current.updatedAt) return
+        if (!force && loaded && fresh.updatedAt == current.updatedAt) return
         current = fresh
         loaded = true
         // Журнал: часть полей живёт в снимке (счётчики, последняя ошибка), их надо отразить,
