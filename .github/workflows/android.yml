@@ -82,6 +82,8 @@ jobs:
           need /tmp/selftest.log "rekey: сессия пересогласована сама"
           need /tmp/selftest.log "rekey: данные идут после пересогласования"
           need /tmp/selftest.log "rekey: возраст сессии обнулился"
+          need /tmp/selftest.log "rekey: в тишине сессия не пересогласовывается"
+          need /tmp/selftest.log "rekey: после простоя данные идут"
           need /tmp/selftest.log "сеть: handshake переживает потерю первой инициации"
           need /tmp/selftest.log "сеть: повтор ушёл раньше общего окна (быстро)"
           need /tmp/selftest.log "сеть: данные идут после потери инициации"

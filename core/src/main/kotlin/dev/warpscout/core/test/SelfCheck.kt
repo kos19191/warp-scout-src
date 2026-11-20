@@ -1046,8 +1046,14 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         try {
             check("rekey: сессия поднялась", h.awaitUp(4000), h.log.toString())
 
+            // Пересогласование по требованию (1.10.13): в полной тишине rekey не выполняется —
+            // иначе модем просыпается каждые 150 с без всякой пользы. Значит, чтобы проверить
+            // плановый rekey, нужен живой трафик: подкидываем по пакету, пока не наберётся два.
             val rekeyUntil = System.currentTimeMillis() + 6000
-            while (h.plane.rekeyCount < 2 && System.currentTimeMillis() < rekeyUntil) Thread.sleep(50)
+            while (h.plane.rekeyCount < 2 && System.currentTimeMillis() < rekeyUntil) {
+                h.tunIn.offer(testPacket())
+                Thread.sleep(50)
+            }
             check(
                 "rekey: сессия пересогласована сама (2 раза)",
                 h.plane.rekeyCount >= 2,
@@ -1061,6 +1067,27 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
                 server.error ?: "back=${back?.size}; ${h.log}")
             check("rekey: возраст сессии обнулился", h.plane.sessionAgeMs() < 4000,
                 "age=${h.plane.sessionAgeMs()}")
+
+            // Тишина: ждём дольше, чем rekeyAfterMs, и убеждаемся, что рукопожатий не прибавилось.
+            // Это и есть «не будить радио зря»: расход батареи в простое давали именно эти
+            // пересогласования каждые 150 секунд.
+            val before = h.plane.rekeyCount
+            Thread.sleep(1400)
+            check(
+                "rekey: в тишине сессия не пересогласовывается",
+                h.plane.rekeyCount == before,
+                "было $before, стало ${h.plane.rekeyCount}; ${h.log}"
+            )
+
+            // А первый пакет после простоя должен вернуть сессию: либо уже действующую, либо
+            // пересогласованную на месте (см. tunToUdp).
+            val afterIdle = testPacket()
+            h.tunIn.offer(afterIdle)
+            check(
+                "rekey: после простоя данные идут",
+                h.tunOut.poll(4000L) != null,
+                "back=null; ${h.log}"
+            )
         } finally {
             h.stop()
             server.stop()
@@ -1175,8 +1202,14 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
 
                 // Ровно тот баг, из-за которого Telegram умирал через три минуты: сессия обязана
                 // пересогласовываться САМА, без перезапуска сервиса.
+                // Трафик во время ожидания обязателен: с 1.10.13 в полной тишине пересогласования
+                // нет (не будим радио зря), а с потоком пакетов плановый rekey работает как раньше.
                 val rekeyUntil = System.currentTimeMillis() + 6000
-                while (plane.rekeyCount < 1 && System.currentTimeMillis() < rekeyUntil) Thread.sleep(50)
+                while (plane.rekeyCount < 1 && System.currentTimeMillis() < rekeyUntil) {
+                    tunIn.offer(ip)
+                    tunOut.poll(200L)
+                    Thread.sleep(50)
+                }
                 check("integration: сессия пересогласована автоматически", plane.rekeyCount >= 1,
                     "rekey=${plane.rekeyCount}; ${planeLog}")
             } finally {
