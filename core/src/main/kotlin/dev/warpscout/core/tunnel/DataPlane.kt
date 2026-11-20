@@ -228,7 +228,13 @@ class DataPlane(
         if (peerPub == null) return fail("PublicKey пира не разбирается как base64 или короче ${Wg.KEY_LEN} байт")
 
         // Читатель стартует ДО handshake: теперь он один на всё — и транспорт, и ответы на rekey.
-        val reader = Thread({ readerLoop() }, "warpscout-tunnel-in").apply { isDaemon = true; start() }
+        val reader = Thread({
+            try {
+                readerLoop()
+            } catch (e: InterruptedException) {
+                stopped = true   // штатная остановка
+            }
+        }, "warpscout-tunnel-in").apply { isDaemon = true; start() }
 
         if (!negotiate(initial = true)) {
             log("handshake не прошёл — туннель не поднят")
@@ -240,7 +246,13 @@ class DataPlane(
         log("handshake OK, туннель поднят")
         runCatching { onTunnelUp?.invoke() }
 
-        val timers = Thread({ timerLoop() }, "warpscout-tunnel-timers").apply { isDaemon = true; start() }
+        val timers = Thread({
+            try {
+                timerLoop()
+            } catch (e: InterruptedException) {
+                stopped = true   // штатная остановка, а не сбой
+            }
+        }, "warpscout-tunnel-timers").apply { isDaemon = true; start() }
         val sender = Thread({ tunToUdp() }, "warpscout-tunnel-out").apply { isDaemon = true; start() }
 
         reader.join()
@@ -366,7 +378,14 @@ class DataPlane(
                 log("повтор инициации №${sent} — ответа не было ${spacing} мс")
             }
             val waitMs = minOf(deadline - now, (nextSendAt - now).coerceAtLeast(20))
-            val reply = handshakeInbox.poll(waitMs.coerceAtLeast(1), TimeUnit.MILLISECONDS) ?: continue
+            // Прерывание — это штатная остановка (closeAll() будит ожидающие потоки), а не сбой.
+            // Раньше оно вылетало из negotiate, убивало поток и попадало в «падения» журнала.
+            val reply = try {
+                handshakeInbox.poll(waitMs.coerceAtLeast(1), TimeUnit.MILLISECONDS)
+            } catch (e: InterruptedException) {
+                failureReason = "остановлено"
+                return false
+            } ?: continue
 
             // Чей это ответ? В response receiver_index на смещении 8, в cookie reply — на 4.
             val type = if (reply.size >= 4) Crypto.readLe32(reply, 0) else -1

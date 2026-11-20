@@ -51,7 +51,8 @@ class VpnTunnelController(private val context: Context) : TunnelController {
      */
     override fun startAndAwait(config: WarpConfig, waitMs: Int): Boolean {
         if (!start(config)) return false
-        val deadline = System.currentTimeMillis() + waitMs.coerceAtLeast(3000)
+        val startMark = System.currentTimeMillis()
+        val deadline = startMark + waitMs.coerceAtLeast(3000)
         var announced = false
         var lastRead = 0L
         while (System.currentTimeMillis() < deadline) {
@@ -66,8 +67,12 @@ class VpnTunnelController(private val context: Context) : TunnelController {
                 TunnelDebug.ok("туннель работает: ${config.endpoint.render()}")
                 return true
             }
-            // Сервис уже сдался (или упал) — ждать дальше смысла нет.
-            if (!announced && WarpVpnService.gaveUp()) {
+            // Сервис уже сдался (или упал) — ждать дальше смысла нет. Но только если это про
+            // НАШУ попытку: «сдался» из снимка прошлой точки раньше обрывало новую через 50 мс
+            // после старта, интерфейс уходил к следующей точке, а прежняя всё равно поднималась —
+            // и в итоге работали два туннеля сразу (двойные рукопожатия, двойной расход).
+            val ours = TunnelState.startedAt >= startMark
+            if (!announced && ours && System.currentTimeMillis() - startMark > 500 && WarpVpnService.gaveUp()) {
                 announced = true
                 TunnelDebug.error(
                     WarpVpnService.failureReason() ?: "сервис остановился без причины",

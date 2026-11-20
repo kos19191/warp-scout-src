@@ -237,6 +237,9 @@ class WarpVpnService : VpnService() {
         postNotification(getString(R.string.notif_starting))
 
         watchNetwork()
+        // Экземпляр и эпоха в журнале: по ним видно, один подъём идёт или два параллельно (второй
+        // экземпляр сервиса — это двойные рукопожатия и двойной расход, а не «просто лог»).
+        TunnelDebug.stage("подъём: экземпляр ${System.identityHashCode(this)}, эпоха $myEpoch")
         TunnelDebug.stage("конфиг получен (${text.toByteArray().size} байт)")
         val cfg = runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull()
         if (cfg == null) {
@@ -276,6 +279,9 @@ class WarpVpnService : VpnService() {
         val router = secondCfg?.let { ExitRouter.of(ExitRouter.parse(serviceSettings().secondCidrs)) }
             ?.takeIf { !it.isEmpty } ?: ExitRouter.EMPTY
         val multiExit = secondCfg != null && !router.isEmpty
+        // Говорим и про выключенный второй выход: иначе «две цепочки рукопожатий в журнале»
+        // невозможно объяснить, не заглядывая в настройки.
+        TunnelDebug.stage(if (multiExit) "второй выход включён" else "второй выход выключен")
 
         val builder = builderFor(cfg)
         if (multiExit) {
