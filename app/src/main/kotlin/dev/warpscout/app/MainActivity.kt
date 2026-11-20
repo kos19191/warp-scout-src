@@ -1332,6 +1332,8 @@ class MainActivity : AppCompatActivity() {
                     banner(getString(R.string.banner_connect_ok, used.endpoint.render()))
                     // Бекап «на всякий случай»: после каждого удачного подключения, молча.
                     runCatching { Backup.save(this, getString(R.string.backup_note_connected, used.endpoint.render())) }
+                    // Ручное подключение тоже наполняет кеш: следующая «Подбор» начнётся с этой точки.
+                    runCatching { TuningCache.save(this, used.endpoint, used.junk.name) }
                     probeExitRegion()
                 } else {
                     TunnelDebug.error(

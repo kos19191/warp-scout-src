@@ -9,7 +9,6 @@ import dev.warpscout.core.keys.KeySourceConfig
 import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.net.HttpClient
 import dev.warpscout.core.net.ResourceProber
-import dev.warpscout.core.net.Socks5Endpoint
 import dev.warpscout.core.net.TlsProber
 import dev.warpscout.core.net.WgProber
 import dev.warpscout.core.report.Report
@@ -98,17 +97,10 @@ class Engine(private val context: Context) {
             spec.copy(net = spec.net.copy(udpFactory = udp, tcpFactory = tcp))
         } ?: spec
 
-        // 1b) «Базу» можно мерить и через обход DPI (ByeDPI в режиме прокси): тогда подбор видит
-        // картину «после фрагментации», а не «что нарисовал провайдер».
-        val socks = Socks5Endpoint.parse(prefs.byedpiProxy)
-        val withProxy = if (prefs.tuneViaByedpi && socks != null && socks.configured) {
-            sink.log("базовые замеры идут через SOCKS5 ${socks.render()} (ByeDPI)")
-            tuned.copy(net = tuned.net.copy(socks5 = socks))
-        } else {
-            if (prefs.tuneViaByedpi) sink.log("замеры через ByeDPI включены, но адрес SOCKS5 не разобран — мёрим напрямую")
-            tuned
-        }
-        val resourceHttp = if (withProxy.net.socks5 != null) HttpClient(6000, proxy = withProxy.net.socks5) else HttpClient(6000)
+        // Замеры идут напрямую: настройки внешнего SOCKS5-обхода в интерфейсе нет, а «включено, но
+        // не настроено» — худший вид настройки: подбор молча мерил бы не то, что видит пользователь.
+        val withProxy = tuned
+        val resourceHttp = HttpClient(6000)
 
         val vault = KeyVault(context)
         val keySource = KeySource(
@@ -124,8 +116,12 @@ class Engine(private val context: Context) {
             resources = ResourceProber(resourceHttp),
             tunnel = tunnel.verifier()
         )
+        // Быстрый старт: если на этой же сети недавно нашлась рабочая точка, проверяем сначала
+        // только её (секунды вместо минут и без разогрева радио на весь скан). Не подтвердится —
+        // подбор сам уйдёт в полный проход по пулу.
+        val withCache = withProxy.copy(cachedStart = TuningCache.cachedStart(context, withProxy.junkProfiles))
         val result = try {
-            tuner.run(withProxy, sink)
+            tuner.run(withCache, sink)
         } finally {
             CleanNetwork.unbind(context)
         }
@@ -153,6 +149,7 @@ class Engine(private val context: Context) {
         val now = System.currentTimeMillis()
         prefs.lastTunedAt = now
         result.best?.let { cfg ->
+            runCatching { TuningCache.save(context, cfg.endpoint, cfg.junk.name) }
             val prev = prefs.lastTunedEndpoint
             val rendered = cfg.endpoint.render()
             if (rendered != prev) {

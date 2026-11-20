@@ -236,16 +236,6 @@ class Prefs(private val context: Context) {
         get() = sp.getBoolean("checkByLists", false)
         set(v) = sp.edit().putBoolean("checkByLists", v).apply()
 
-    /** Адрес SOCKS5-прокси ByeDPI ('' = не использовать). */
-    var byedpiProxy: String
-        get() = sp.getString("byedpiProxy", "") ?: ""
-        set(v) = sp.edit().putString("byedpiProxy", v.trim()).apply()
-
-    /** true — базовые замеры во время подбора идут через ByeDPI, а не напрямую. */
-    var tuneViaByedpi: Boolean
-        get() = sp.getBoolean("tuneViaByedpi", false)
-        set(v) = sp.edit().putBoolean("tuneViaByedpi", v).apply()
-
     var autoApply: Boolean
         get() = sp.getBoolean("autoApply", false)
         set(v) = sp.edit().putBoolean("autoApply", v).apply()

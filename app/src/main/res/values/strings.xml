@@ -107,7 +107,6 @@
     <string name="duration_min">%1$d мин</string>
     <string name="duration_sec">%1$d с</string>
     <string name="duration_hours">%1$d ч %2$d мин</string>
-    <string name="hint_socks">SOCKS5 ByeDPI, напр. 127.0.0.1:1080</string>
     <string name="section_export">Экспорт: клиент, сервер, каналы</string>
     <string name="tgt_amnezia">AmneziaWG</string>
     <string name="tgt_wg">WireGuard</string>
