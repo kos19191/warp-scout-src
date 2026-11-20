@@ -28,20 +28,37 @@ class SocketUdpChannel(
     private val timeoutMs: Int = 1500
 ) : UdpChannel {
 
+    /**
+     * Буфер и пакет приёма — одни на канал, а не на пакет.
+     *
+     * Раньше `receive()` создавал массив на 64 КБ **на каждый входящий пакет** и ещё один пакет
+     * поверх него. На скорости в сотни пакетов в секунду это десятки мегабайт мусора в секунду:
+     * сборщик мусора работает без остановки, процессор занят им, и скорость загрузки проседает —
+     * именно это и видно на медиа в мессенджерах. wireguard-пакет не бывает больше MTU + 32 байта,
+     * поэтому 4 КБ хватает с запасом на любой шум.
+     */
+    private val rxBuf = ByteArray(4096)
+    private val rxPacket = java.net.DatagramPacket(rxBuf, rxBuf.size)
+    private val txPacket = java.net.DatagramPacket(ByteArray(1), 0)
+
     init {
         if (!socket.isConnected) socket.connect(InetSocketAddress(endpoint.host, endpoint.port))
         socket.soTimeout = timeoutMs
     }
 
     override fun send(packet: ByteArray) {
-        socket.send(java.net.DatagramPacket(packet, packet.size))
+        // Пакет отправки переиспользуется: send() копирует данные в ядро сразу и не держит ссылку.
+        txPacket.data = packet
+        txPacket.length = packet.size
+        socket.send(txPacket)
     }
 
     override fun receive(): ByteArray? = try {
-        val buf = ByteArray(65536)
-        val p = java.net.DatagramPacket(buf, buf.size)
-        socket.receive(p)
-        p.data.copyOfRange(0, p.length)
+        rxPacket.setLength(rxBuf.size)
+        socket.receive(rxPacket)
+        // Копия нужна: буфер приёма переиспользуется, а расшифровка идёт уже после возврата.
+        // Но это одна копия размера пакета вместо 64 КБ мусора на каждый пакет.
+        rxPacket.data.copyOfRange(0, rxPacket.length)
     } catch (e: java.net.SocketTimeoutException) {
         null
     }
@@ -589,11 +606,12 @@ class DataPlane(
             }
             if (n < 0) break
             if (n == 0) continue
-            val payload = buf.copyOf(n)
+            // Без копии: буфер tun переиспользуется, а длина передаётся отдельно. Раньше под
+            // каждый пакет делался ByteArray(n) только ради того, чтобы «подрезать» буфер.
             val packet: ByteArray? = synchronized(lock) {
                 val s = session
                 if (s == null) null else {
-                    val (pkt, next) = Wg.buildTransport(peerIndex, s, payload)
+                    val (pkt, next) = Wg.buildTransport(peerIndex, s, buf, n)
                     session = next
                     pkt
                 }

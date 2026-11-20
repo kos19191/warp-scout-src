@@ -198,6 +198,20 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         val ct = Crypto.chacha20Poly1305Seal(key, nonce, pt, aad)
         check("chachapoly: длина = plaintext+16", ct.size == pt.size + 16)
 
+        // Шифрование «первые N байт буфера» — путь отправки из tun без копии пакета. Результат
+        // обязан совпадать с шифрованием точной копии, иначе на проводе окажется мусор.
+        val full = ByteArray(64) { (it * 7).toByte() }
+        val partOfBuffer = Crypto.chacha20Poly1305Seal(key, nonce, full, Crypto.EMPTY_AAD, 40)
+        val partCopied = Crypto.chacha20Poly1305Seal(key, nonce, full.copyOf(40), Crypto.EMPTY_AAD)
+        check("chachapoly: часть буфера шифруется как копия части", partOfBuffer.contentEquals(partCopied))
+        check("chachapoly: часть даёт длину N+16", partOfBuffer.size == 56, "${partOfBuffer.size}")
+        val openedPart = Crypto.chacha20Poly1305Open(key, nonce, partOfBuffer, Crypto.EMPTY_AAD)
+        check(
+            "chachapoly: часть расшифровывается обратно",
+            openedPart != null && openedPart.contentEquals(full.copyOf(40)),
+            "раскрылось ${openedPart?.size} байт"
+        )
+
         val jca = javax.crypto.Cipher.getInstance("ChaCha20-Poly1305")
         jca.init(
             javax.crypto.Cipher.DECRYPT_MODE,
