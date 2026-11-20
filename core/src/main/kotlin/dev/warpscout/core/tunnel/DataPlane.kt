@@ -139,6 +139,22 @@ class DataPlane(
     @Volatile
     private var lastOutboundAt: Long = 0L
 
+    /** Когда последний раз с сервера пришёл хоть один пакет: любое «да» — признак живой сети. */
+    @Volatile
+    private var lastRxAt: Long = 0L
+
+    /** Когда начался текущий поток исходящих пакетов, на который ответа ещё не было. */
+    @Volatile
+    private var burstStartAt: Long = 0L
+
+    /** Сколько пользовательских пакетов ушло с начала этого потока. */
+    @Volatile
+    private var burstPackets: Int = 0
+
+    /** О мёртвой сессии сообщаем один раз, иначе каждая следующая отправка дёргала бы сервис. */
+    @Volatile
+    private var stallReported: Boolean = false
+
     /** Сколько раз подряд не удалось пересогласовать сессию (rekey). */
     private var rekeyFailures = 0
 
@@ -215,6 +231,11 @@ class DataPlane(
                 return
             } ?: continue
             if (pkt.isEmpty()) continue
+            // Любой пришедший пакет (даже чужой/мусорный) значит, что путь до сервера жив.
+            lastRxAt = System.currentTimeMillis()
+            burstPackets = 0
+            burstStartAt = 0L
+            stallReported = false
             val type = if (pkt.size >= 4) Crypto.readLe32(pkt, 0) else -1
             when (type) {
                 // Ответ на инициацию (в том числе на rekey) или cookie reply — отдаём ожидающему.
@@ -523,6 +544,7 @@ class DataPlane(
             try {
                 sendTracked(packet)
                 bytesUp += n
+                noteUserPacketSent()
             } catch (e: Exception) {
                 if (!stopped) log("отправка: ${e.javaClass.simpleName}: ${e.message}")
                 break
@@ -530,5 +552,27 @@ class DataPlane(
         }
         // tun закрылся — значит, сервис останавливают: гасим и читателя с таймерами.
         stopped = true
+    }
+
+    /**
+     * Учёт пользовательских пакетов и проверка «а отвечает ли сервер».
+     *
+     * Раньше мёртвая сессия обнаруживалась только по провалу пересогласования — это две-три
+     * минуты, в течение которых интернет «есть», но ничего не открывается. Здесь видно раньше:
+     * если ушло [StallDetector.MIN_PACKETS] пакетов и за [StallDetector.WINDOW_MS] не пришло ни
+     * одного ответа, соединение мертво. Проверка стоит одно сравнение времени на пакет, никаких
+     * таймеров и пробуждений.
+     */
+    private fun noteUserPacketSent() {
+        if (stallReported) return
+        val now = System.currentTimeMillis()
+        val sent = burstPackets + 1
+        burstPackets = sent
+        if (sent == 1) burstStartAt = now
+        if (!StallDetector.isStalled(now, lastRxAt, burstStartAt, sent)) return
+        stallReported = true
+        val reason = StallDetector.explain(now, lastRxAt, burstStartAt, sent)
+        log(reason)
+        onFatal?.invoke(reason)
     }
 }

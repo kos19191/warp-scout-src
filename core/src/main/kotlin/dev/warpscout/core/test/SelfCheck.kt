@@ -9,6 +9,7 @@ import dev.warpscout.core.lists.AllowLists
 import dev.warpscout.core.lists.ListSide
 import dev.warpscout.core.report.ConfigExport
 import dev.warpscout.core.tunnel.ExitRouter
+import dev.warpscout.core.tunnel.StallDetector
 import dev.warpscout.core.tunnel.IpPacket
 import dev.warpscout.core.crypto.Blake2s
 import dev.warpscout.core.crypto.Crypto
@@ -75,6 +76,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("конфиги") {
             confRoundTrip()
             sampleFiles()
+        }
+        section("живость сессии по трафику") {
+            stallDetection()
         }
         section("состояние сервиса между процессами") {
             serviceState()
@@ -474,6 +478,70 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             "размер=${explicit.size}"
         )
         expect("роуты обхода белых списков", RoutePresets.BYPASS_WHITELIST.size, 56)
+    }
+
+    // ------------------------------------------------- живость сессии по трафику
+
+    /**
+     * Правило «сессия мертва» решает, рвать ли рабочий туннель. Слишком чувствительное — рвёт
+     * нормальную работу, слишком грубое — оставляет мёртвое соединение на минуты. Поэтому
+     * проверяются ровно те сценарии, которые бывают в жизни.
+     */
+    private fun stallDetection() {
+        val d = StallDetector
+        val t0 = 1_000_000L
+
+        // Пока трафик стоит, судить не о чем: молчащий туннель без трафика — норма.
+        check("живость: без трафика не считается мёртвой", !d.isStalled(t0 + 600_000, t0, 0L, 0))
+        check("живость: трафика нет, но счётчик шумит", !d.isStalled(t0 + 600_000, t0, 0L, 500))
+
+        // Единичные пакеты (UDP-датаграммы, DNS) ответа не ждут — порог по количеству обязателен.
+        check(
+            "живость: 10 пакетов без ответа — ещё не приговор",
+            !d.isStalled(t0 + 300_000, t0, t0, 10)
+        )
+        check(
+            "живость: 49 пакетов за 10 минут — под порогом",
+            !d.isStalled(t0 + 600_000, t0, t0, StallDetector.MIN_PACKETS - 1)
+        )
+
+        // Поток только начался — окно ещё не вышло, даже если ответа не было давно.
+        val burst = t0 + 600_000
+        check(
+            "живость: поток только начался",
+            !d.isStalled(burst + 1_000, t0, burst, 80)
+        )
+
+        // Ответ был недавно — соединение живое, сколько бы ни ушло пакетов.
+        check(
+            "живость: недавний ответ снимает подозрения",
+            !d.isStalled(t0 + 60_000, t0 + 55_000, t0, 200)
+        )
+
+        // Классический случай: 50+ пакетов, 45 секунд тишины.
+        check(
+            "живость: 50 пакетов и 45 секунд тишины — мертва",
+            d.isStalled(t0 + 45_000, t0, t0, StallDetector.MIN_PACKETS)
+        )
+        check(
+            "живость: за секунду до окна — ещё нет",
+            !d.isStalled(t0 + 44_000, t0, t0, StallDetector.MIN_PACKETS)
+        )
+        check(
+            "живость: окно считается от последнего ответа, а не от начала",
+            !d.isStalled(t0 + 100_000, t0 + 80_000, t0, 500)
+        )
+
+        // Ни одного ответа за всю жизнь сессии: отсчёт от начала потока.
+        check(
+            "живость: ответов не было вовсе",
+            d.isStalled(t0 + 50_000, 0L, t0, StallDetector.MIN_PACKETS)
+        )
+
+        // Объяснение должно быть понятным человеку и содержать секунды и число пакетов.
+        val why = d.explain(t0 + 60_000, t0, t0, 120)
+        check("живость: объяснение называет число пакетов", why.contains("120"), why)
+        check("живость: объяснение называет время тишины", why.contains("60 с"), why)
     }
 
     // -------------------------------------------------- состояние между процессами
