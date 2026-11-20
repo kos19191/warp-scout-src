@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- В тёмной теме те же смыслы, но светлее: иначе тёмно-зелёный на тёмном фоне не читается. -->
+    <color name="state_ok">#7BD88F</color>
+    <color name="state_warn">#D7BFA0</color>
+    <color name="state_error">#FFB4AB</color>
+    <color name="state_off">#B0B4BA</color>
+    <color name="check_ok">#7BD88F</color>
+    <color name="check_fail">#FFB4AB</color>
+</resources>

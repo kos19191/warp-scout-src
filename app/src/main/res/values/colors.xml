@@ -1,4 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Иконка запуска -->
     <color name="ic_launcher_background">#F6821F</color>
+
+    <!-- Цвета состояний: в светлой теме тёмные, в тёмной — светлые (см. values-night) -->
+    <color name="state_ok">#1B5E20</color>
+    <color name="state_warn">#8D6E63</color>
+    <color name="state_error">#B3261E</color>
+    <color name="state_off">#5F6368</color>
+    <color name="check_ok">#2E7D32</color>
+    <color name="check_fail">#C62828</color>
 </resources>

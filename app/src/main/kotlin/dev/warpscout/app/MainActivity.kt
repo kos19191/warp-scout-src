@@ -326,7 +326,7 @@ class MainActivity : AppCompatActivity() {
      * а не что-то, что можно менять на лету.
      */
     private fun setupApps() {
-        loadApps()
+        refreshInstalledApps()
         binding.appsGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
             if (!isChecked) return@addOnButtonCheckedListener
             prefs.appsMode = appsModeOf(checkedId)
@@ -351,27 +351,36 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Список только «запускаемых» приложений: библиотеки и сервисы без иконки пользователю не нужны. */
-    private fun loadApps() {
-        appEntries = runCatching {
-            val pm = packageManager
-            pm.getInstalledApplications(0).mapNotNull { info ->
-                if (info.packageName == packageName) return@mapNotNull null
-                if (pm.getLaunchIntentForPackage(info.packageName) == null) return@mapNotNull null
-                val system = (info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
-                AppEntry(info.packageName, pm.getApplicationLabel(info).toString(), system)
-            }.sortedBy { it.label.lowercase() }
-        }.getOrDefault(emptyList())
-    }
+    /** Чтение списка приложений: дорогое (getApplicationLabel на каждое), поэтому зовём вне UI-потока. */
+    private fun loadAppsSync(): List<AppEntry> = runCatching {
+        val pm = packageManager
+        pm.getInstalledApplications(0).mapNotNull { info ->
+            if (info.packageName == packageName) return@mapNotNull null
+            if (pm.getLaunchIntentForPackage(info.packageName) == null) return@mapNotNull null
+            val system = (info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
+            AppEntry(info.packageName, pm.getApplicationLabel(info).toString(), system)
+        }.sortedBy { it.label.lowercase() }
+    }.getOrDefault(emptyList())
 
     /**
      * Приложения могли установить, пока приложение открыто (или туннель уже поднят). Список
      * перечитывается при возврате в приложение — иначе только что установленное приложение просто
-     * некуда отметить. Перезапускать для этого приложение не нужно.
+     * некуда отметить. Читаем в фоне: `getInstalledApplications` + подпись каждого приложения на
+     * главном потоке — это заметные подтормаживания при каждом возврате в приложение.
      */
     private fun refreshInstalledApps() {
         val before = appEntries.size
-        loadApps()
-        if (appEntries.size != before && ::binding.isInitialized) rebuildAppsList()
+        Thread {
+            val loaded = loadAppsSync()
+            runOnUiThread {
+                if (!::binding.isInitialized) return@runOnUiThread
+                appEntries = loaded
+                if (loaded.size != before) {
+                    rebuildAppsList()
+                    updateAppsState()
+                }
+            }
+        }.apply { isDaemon = true; name = "warpscout-apps" }.start()
     }
 
     private fun rebuildAppsList() {
@@ -503,7 +512,12 @@ class MainActivity : AppCompatActivity() {
             this.text = text
             textSize = 13f
             setPadding(0, 4, 0, 4)
-            setTextColor(if (ok) 0xFF2E7D32.toInt() else 0xFFC62828.toInt())
+            setTextColor(
+                androidx.core.content.ContextCompat.getColor(
+                    this,
+                    if (ok) R.color.check_ok else R.color.check_fail
+                )
+            )
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -1409,7 +1423,9 @@ class MainActivity : AppCompatActivity() {
     private fun banner(text: String, error: Boolean = false) {
         if (!::binding.isInitialized) return
         binding.textBanner.text = text
-        binding.textBanner.setTextColor(if (error) 0xFFB3261E.toInt() else 0xFF1B5E20.toInt())
+        binding.textBanner.setTextColor(
+            androidx.core.content.ContextCompat.getColor(this, if (error) R.color.state_error else R.color.state_ok)
+        )
         binding.cardBanner.visibility = View.VISIBLE
         tunnelHandler.removeCallbacks(bannerHide)
         if (!error) tunnelHandler.postDelayed(bannerHide, 8000L)
@@ -1578,23 +1594,23 @@ class MainActivity : AppCompatActivity() {
                 }
                 val endpoint = TunnelDebug.endpoint.ifBlank { prefs.lastEndpoint.ifBlank { "endpoint?" } }
                 text = getString(R.string.conn_on, uptime, endpoint)
-                color = 0xFF1B5E20.toInt()
+                color = androidx.core.content.ContextCompat.getColor(this, R.color.state_ok)
             }
             noNet -> {
                 text = getString(R.string.conn_no_network)
-                color = 0xFF8D6E63.toInt()
+                color = androidx.core.content.ContextCompat.getColor(this, R.color.state_warn)
             }
             starting -> {
                 text = getString(R.string.conn_starting_plain)
-                color = 0xFF8D6E63.toInt()
+                color = androidx.core.content.ContextCompat.getColor(this, R.color.state_warn)
             }
             failed != null -> {
                 text = getString(R.string.conn_failed, failed.take(90))
-                color = 0xFFB3261E.toInt()
+                color = androidx.core.content.ContextCompat.getColor(this, R.color.state_error)
             }
             else -> {
                 text = getString(R.string.conn_off)
-                color = 0xFF5F6368.toInt()
+                color = androidx.core.content.ContextCompat.getColor(this, R.color.state_off)
             }
         }
         binding.textConnStatus.text = text
