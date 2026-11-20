@@ -33,6 +33,12 @@ object CrashLog {
         if (installed) return
         installed = true
         val app = context.applicationContext
+        // Запоминаем, когда начался этот запуск: по этой отметке потом понятно, падает приложение
+        // сразу на старте (тогда причину надо показать до интерфейса) или упало позже.
+        runCatching {
+            app.getSharedPreferences("crashes", Context.MODE_PRIVATE).edit()
+                .putLong("runStartedAt", System.currentTimeMillis()).apply()
+        }
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             runCatching { write(app, thread, error) }
@@ -54,8 +60,16 @@ object CrashLog {
             ("── " + parts.drop(1).take(KEEP).joinToString("── ")).trimEnd() + "\n"
         }
         runCatching {
-            context.getSharedPreferences("crashes", Context.MODE_PRIVATE).edit()
-                .putString("last", head.toString()).apply()
+            val now = System.currentTimeMillis()
+            val sp = context.getSharedPreferences("crashes", Context.MODE_PRIVATE)
+            val startedAt = sp.getLong("runStartedAt", 0L)
+            sp.edit()
+                .putString("last", head.toString())
+                .putLong("lastAt", now)
+                // Сколько прожил запуск до падения: «упало сразу» — отдельный, самый неприятный случай.
+                .putLong("lastAgeMs", if (startedAt > 0L && now >= startedAt) now - startedAt else -1L)
+                .putBoolean("shown", false)
+                .apply()
             file.writeText(merged)
         }
         runCatching { TunnelDebug.error("падение: " + (error.message ?: error.javaClass.simpleName)) }
@@ -67,6 +81,35 @@ object CrashLog {
             context.getSharedPreferences("crashes", Context.MODE_PRIVATE).getString("last", null)
         }.getOrNull()
         return saved?.takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * Падение, случившееся совсем недавно (по умолчанию — меньше трёх минут назад, и о нём ещё
+     * не рассказывали). Нужно ровно для одного сценария: приложение падает при запуске, и тогда
+     * человек не может открыть журнал, чтобы прислать причину. Такой отчёт показывается
+     * аварийным экраном ДО построения интерфейса, и кнопка «Продолжить» ведёт дальше как обычно.
+     *
+     * Повторно один и тот же отчёт не показывается: отметка «рассказали» снимается при следующем
+     * падении.
+     */
+    fun recentCrash(
+        context: Context,
+        maxAgeMs: Long = 3 * 60 * 1000L,
+        maxRunMs: Long = 20 * 1000L
+    ): String? {
+        val sp = runCatching {
+            context.getSharedPreferences("crashes", Context.MODE_PRIVATE)
+        }.getOrNull() ?: return null
+        val text = sp.getString("last", null)?.takeIf { it.isNotBlank() } ?: return null
+        if (sp.getBoolean("shown", false)) return null
+        val at = sp.getLong("lastAt", 0L)
+        if (at <= 0L || System.currentTimeMillis() - at > maxAgeMs) return null
+        // Только «упало почти сразу после запуска»: иначе человека, который вернулся в приложение
+        // через минуту после падения в фоне, встречала бы стена текста вместо обычного экрана.
+        val age = sp.getLong("lastAgeMs", -1L)
+        if (age < 0L || age > maxRunMs) return null
+        runCatching { sp.edit().putBoolean("shown", true).apply() }
+        return text
     }
 
     /** Отчёт целиком — попадает в «Скопировать журнал», чтобы не гадать по скриншоту. */

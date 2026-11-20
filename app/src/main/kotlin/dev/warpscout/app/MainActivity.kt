@@ -64,7 +64,7 @@ class MainActivity : AppCompatActivity() {
     private val lists by lazy { AllowListsRepo(this) }
     private var lastConfigFile: File? = null
 
-    /** Панели разделов в том же порядке, что и пункты нижней панели (см. [NAV_IDS]). */
+    /** Панели разделов в том же порядке, что и кнопки нижней панели (см. [navButtons]). */
     private lateinit var pages: List<View>
     private val appChecks = LinkedHashMap<String, MaterialCheckBox>()
     private var appEntries: List<AppEntry> = emptyList()
@@ -93,42 +93,71 @@ class MainActivity : AppCompatActivity() {
         // Журнал общий с процессом туннеля: строки обоих процессов сходятся в одном файле.
         TunnelDebug.attach(this)
         // Настройки сервиса — отдельным снимком: SharedPreferences между процессами расходятся.
-        ServiceSettingsStore.syncFromPrefs(this)
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-
-        prefs = Prefs(this)
-        // Подключаемся к состоянию туннеля из его процесса (идемпотентно, см. TunnelStatusBus).
-        TunnelStatusBus.install(this)
-        setupNav(savedInstanceState?.getInt(STATE_TAB) ?: 0)
-        fillFromPrefs()
-        buildJunkChecks()
-        buildResourceList()
-        setupButtons()
-        setupApps()
-        buildListsChecks()
-        refreshRoutesState()
-        updateEndpointNote()
-        renderShortlist()
-        askNotificationPermission()
-        CrashLog.lastCrash(this)?.let { crash ->
-            banner(getString(R.string.banner_last_crash), error = true)
-            TunnelDebug.error("прошлый запуск завершился падением", crash.lineSequence().first().take(160))
-            sink().log("✗ прошлый запуск завершился падением: " + crash.lineSequence().first().take(160))
-            sink().log("   подробности: Journal → «Скопировать журнал» (раздел «Падения»)")
+        // Синхронизация — внутри try ниже: она тоже может бросить (битый файл снимка).
+        // Если приложение падало только что (меньше трёх минут назад), сначала показываем причину:
+        // иначе получается замкнутый круг — падает при запуске, а журнал открыть не успеваешь.
+        // «Продолжить» ведёт к обычному экрану, так что застрять здесь нельзя.
+        val recent = CrashLog.recentCrash(this)
+        if (recent != null) {
+            TunnelDebug.error("показываю причину прошлого падения до запуска интерфейса")
+            SafeMode.showReport(this, recent) { buildUi(savedInstanceState) }
+        } else {
+            buildUi(savedInstanceState)
         }
-        binding.textStatus.setText(R.string.status_idle)
-        binding.textVersion.text = getString(
-            R.string.version_footer,
-            BuildConfig.VERSION_NAME,
-            getString(if (BuildConfig.TUNNEL_SUPPORTED) R.string.variant_tunnel else R.string.variant_scout)
-        )
+    }
+
+    /**
+     * Построение экрана целиком.
+     *
+     * Любая ошибка здесь раньше означала системное «приложение закрыто из-за ошибки»: ни журнала,
+     * ни возможности рассказать, что случилось. Теперь показываем аварийный экран с причиной — он
+     * собран из системных View и не может не загрузиться (см. [SafeMode]).
+     */
+    private fun buildUi(savedInstanceState: Bundle?) {
+        try {
+            ServiceSettingsStore.syncFromPrefs(this)
+            binding = ActivityMainBinding.inflate(layoutInflater)
+            setContentView(binding.root)
+
+            prefs = Prefs(this)
+            // Подключаемся к состоянию туннеля из его процесса (идемпотентно, см. TunnelStatusBus).
+            TunnelStatusBus.install(this)
+            setupNav(savedInstanceState?.getInt(STATE_TAB) ?: 0)
+            fillFromPrefs()
+            buildJunkChecks()
+            buildResourceList()
+            setupButtons()
+            setupApps()
+            buildListsChecks()
+            refreshRoutesState()
+            updateEndpointNote()
+            renderShortlist()
+            askNotificationPermission()
+            CrashLog.lastCrash(this)?.let { crash ->
+                banner(getString(R.string.banner_last_crash), error = true)
+                TunnelDebug.error("прошлый запуск завершился падением", crash.lineSequence().first().take(160))
+                sink().log("✗ прошлый запуск завершился падением: " + crash.lineSequence().first().take(160))
+                sink().log("   подробности: Journal → «Скопировать журнал» (раздел «Падения»)")
+            }
+            binding.textStatus.setText(R.string.status_idle)
+            binding.textVersion.text = getString(
+                R.string.version_footer,
+                BuildConfig.VERSION_NAME,
+                getString(if (BuildConfig.TUNNEL_SUPPORTED) R.string.variant_tunnel else R.string.variant_scout)
+            )
+        } catch (t: Throwable) {
+            SafeMode.show(this, t, "запуск интерфейса")
+        }
     }
 
     override fun onDestroy() {
         stopTunnelPolling()
         super.onDestroy()
     }
+
+    /** Экран мог не построиться (см. [SafeMode]) — тогда обращаться к binding нельзя. */
+    private fun uiReady(): Boolean =
+        ::binding.isInitialized && ::prefs.isInitialized && ::pages.isInitialized
 
     /**
      * В фоне экран не нужен: останавливаем опрос состояния туннеля (он ходит каждые 700 мс, пока
@@ -141,17 +170,28 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
     }
 
+
     override fun onResume() {
         super.onResume()
+        if (!uiReady()) return
         // Опрос нужен всегда, пока экран открыт: сервис сам переподнимает туннель после смены
         // сети, и кнопка должна это показывать. В фоне опрос выключен (см. onPause).
-        startTunnelPolling()
-        refreshInstalledApps()
-        updateAppsState()
-        updateTunnelButton()
-        updateTunnelDiagnostics()
-        renderShortlist()
-        showKeys()
+        //
+        // Всё обновление экрана — в runCatching: onResume вызывается после каждого возврата в
+        // приложение, и исключение здесь раньше снимало приложение целиком (системное «закрыто
+        // из-за ошибки»). Ошибка обновления — не повод терять экран.
+        runCatching {
+            startTunnelPolling()
+            refreshInstalledApps()
+            updateAppsState()
+            updateTunnelButton()
+            updateTunnelDiagnostics()
+            renderShortlist()
+            showKeys()
+        }.onFailure { t ->
+            TunnelDebug.error("обновление экрана: " + SafeMode.describe(t))
+            runCatching { banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true) }
+        }
     }
 
     // ------------------------------------------------------------- заполнение UI
@@ -290,26 +330,45 @@ class MainActivity : AppCompatActivity() {
             binding.pageStart, binding.pageScan, binding.pageConfig,
             binding.pageApps, binding.pageLog
         )
-        // Панели показываем тем же вызовом, что и по нажатию: один путь — одно поведение.
-        showPage(initial.coerceIn(0, pages.size - 1))
-        binding.navBar.setOnItemSelectedListener { item ->
-            val index = NAV_IDS.indexOf(item.itemId)
-            if (index < 0) return@setOnItemSelectedListener false
-            showPage(index)
-            true
+        navButtons().forEachIndexed { index, button ->
+            button.setOnClickListener { showPage(index) }
         }
+        // Первый показ — тем же вызовом, что и по нажатию: один путь — одно поведение.
+        showPage(initial.coerceIn(0, pages.size - 1))
     }
 
+    /** Пять кнопок нижней панели в том же порядке, что и [pages]. */
+    private fun navButtons(): List<com.google.android.material.button.MaterialButton> = listOf(
+        binding.navStart, binding.navScan, binding.navSettings, binding.navApps, binding.navLog
+    )
+
     /**
-     * Показать раздел. Список разделов и порядок кнопок нижней панели живут в [NAV_IDS]: раньше
-     * позиция бралась из самого TabLayout, и любая перестановка пунктов молча открывала не тот раздел.
+     * Показать раздел.
+     *
+     * Внутри `runCatching`: переключение разделов — самое частое действие, и оно не должно уметь
+     * ронять приложение. Если что-то пойдёт не так, человек останется на прежнем экране, а причина
+     * попадёт в журнал — это несравнимо лучше системного «приложение закрыто из-за ошибки».
      */
     private fun showPage(index: Int) {
-        val safe = index.coerceIn(0, pages.size - 1)
-        selectedTab = safe
-        pages.forEachIndexed { i, page -> page.visibility = if (i == safe) View.VISIBLE else View.GONE }
-        val id = NAV_IDS[safe]
-        if (binding.navBar.selectedItemId != id) binding.navBar.selectedItemId = id
+        runCatching {
+            val safe = index.coerceIn(0, pages.size - 1)
+            selectedTab = safe
+            pages.forEachIndexed { i, page ->
+                page.visibility = if (i == safe) View.VISIBLE else View.GONE
+            }
+            navButtons().forEachIndexed { i, button ->
+                val active = i == safe
+                button.isSelected = active
+                button.setTextColor(
+                    ContextCompat.getColor(
+                        this,
+                        if (active) R.color.colorPrimary else R.color.colorOnSurfaceVariant
+                    )
+                )
+            }
+        }.onFailure { t ->
+            TunnelDebug.error("не удалось открыть раздел $index: " + SafeMode.describe(t))
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -1122,6 +1181,14 @@ class MainActivity : AppCompatActivity() {
      */
     private fun renderShortlist() {
         if (!::binding.isInitialized) return
+        runCatching { renderShortlistUnsafe() }.onFailure { t ->
+            // Список замен — удобство, а не основа работы: его сбой не должен снимать экран.
+            TunnelDebug.error("список лучших конфигов: " + SafeMode.describe(t))
+            binding.cardTop3.visibility = View.GONE
+        }
+    }
+
+    private fun renderShortlistUnsafe() {
         val entries = runCatching { ConfigShortlist.load(this) }.getOrDefault(emptyList())
         shortlistEntries = entries
         if (entries.isEmpty()) {
@@ -1816,10 +1883,6 @@ class MainActivity : AppCompatActivity() {
         const val APP_ROWS_LIMIT = 60
         const val STATE_TAB = "warpscout.tab"
 
-        /** Разделы в том же порядке, что и пункты нижней панели (`res/menu/nav_main.xml`). */
-        val NAV_IDS = intArrayOf(
-            R.id.nav_start, R.id.nav_scan, R.id.nav_settings, R.id.nav_apps, R.id.nav_log
-        )
         const val TAB_START = 0
         const val TAB_CONFIG = 2
     }

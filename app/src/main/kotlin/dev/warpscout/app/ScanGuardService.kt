@@ -7,7 +7,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -35,9 +37,24 @@ object ScanGuard {
     @Volatile
     private var lastUpdateAt: Long = 0L
 
+    /** Когда попросили старт и когда сервис подтвердил вход в onStartCommand. */
+    @Volatile
+    private var requestedAt: Long = 0L
+
+    @Volatile
+    private var acknowledgedAt: Long = 0L
+
+    private val handler = Handler(Looper.getMainLooper())
+
+    /** Вызывается сервисом из onStartCommand: «я вошёл и уже показал уведомление». */
+    internal fun acknowledge() {
+        acknowledgedAt = System.currentTimeMillis()
+    }
+
     fun start(context: Context) {
         val app = context.applicationContext
         latest = app.getString(R.string.scan_notif_text)
+        requestedAt = System.currentTimeMillis()
         runCatching {
             ContextCompat.startForegroundService(app, Intent(app, ScanGuardService::class.java))
         }
@@ -61,8 +78,21 @@ object ScanGuard {
 
     fun stop(context: Context) {
         val app = context.applicationContext
-        runCatching { app.stopService(Intent(app, ScanGuardService::class.java)) }
-        runCatching { NotificationManagerCompat.from(app).cancel(ID) }
+        val stopNow = Runnable {
+            runCatching { app.stopService(Intent(app, ScanGuardService::class.java)) }
+            runCatching { NotificationManagerCompat.from(app).cancel(ID) }
+        }
+        // Опасная гонка: подбор мог закончиться раньше, чем сервис успел войти в onStartCommand
+        // (быстрый отказ, нажатие «Стоп»). stopService в этот момент отменяет старт, требование
+        // «покажи foreground-уведомление» остаётся невыполненным — и Android убивает процесс
+        // приложения целиком с ForegroundServiceDidNotStartInTimeException. Поэтому, если сервис
+        // ещё не подтвердил старт, даём ему войти и только потом останавливаем.
+        val pending = requestedAt > acknowledgedAt
+        if (pending && System.currentTimeMillis() - requestedAt < 3000) {
+            handler.postDelayed(stopNow, 800)
+        } else {
+            stopNow.run()
+        }
     }
 
     /** Текущая строка прогресса (для сервиса, который подхватывает её при старте). */
@@ -103,6 +133,9 @@ class ScanGuardService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Отмечаемся до startForeground: главное здесь — что сервис вообще вошёл, иначе его
+        // остановка отменит старт и уронит процесс приложения (см. ScanGuard.stop).
+        ScanGuard.acknowledge()
         val text = ScanGuard.progressText().ifEmpty { getString(R.string.scan_notif_text) }
         val notification = ScanGuard.build(this, text)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

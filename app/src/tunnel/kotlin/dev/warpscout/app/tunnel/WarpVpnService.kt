@@ -198,13 +198,6 @@ class WarpVpnService : VpnService() {
     private val AUTO_RESTART_WINDOW_MS = 10 * 60_000L
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            shutdown()
-            // stopSelf обязателен: без него экземпляр живёт дальше со своим состоянием, и следующий
-            // запуск может прийти в него же (см. эпоху выше и сброс stopped в startVpn).
-            runCatching { stopSelf() }
-            return START_NOT_STICKY
-        }
         // ГЛАВНОЕ ПРАВИЛО ANDROID: после startForegroundService() сервис обязан вызвать
         // startForeground() примерно за 5 секунд, иначе процесс убивают с
         // ForegroundServiceDidNotStartInTimeException — без записи в журнал, и туннель умирает
@@ -216,6 +209,19 @@ class WarpVpnService : VpnService() {
             val why = TunnelState.status
             TunnelDebug.error("startForeground не удался: $why")
             dev.warpscout.app.CrashLog.note(this, "startForeground отказал: $why")
+        }
+
+        // Остановка обрабатывается ПОСЛЕ перехода в foreground — иначе получается дыра: если
+        // система успела получить startForegroundService() и следом STOP, требование «покажи
+        // уведомление» осталось бы невыполненным, и она убила бы процесс приложения
+        // (ForegroundServiceDidNotStartInTimeException) — со стороны это выглядит как «вылетает
+        // при переключении вкладки».
+        if (intent?.action == ACTION_STOP) {
+            shutdown()
+            // stopSelf обязателен: без него экземпляр живёт дальше со своим состоянием, и следующий
+            // запуск может прийти в него же (см. эпоху выше и сброс stopped в startVpn).
+            runCatching { stopSelf() }
+            return START_NOT_STICKY
         }
 
         if (starting || plane != null) {

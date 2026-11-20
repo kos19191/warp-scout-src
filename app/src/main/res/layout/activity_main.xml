@@ -1185,14 +1185,48 @@
     </FrameLayout>
 
     <!--
-      Навигация внизу, а не вкладками сверху: до нижней панели дотягивается большой палец, и она
-      не уезжает, когда содержимое раздела длинное. Заголовки совпадают с прежними вкладками.
+      Навигация внизу: до неё дотягивается большой палец, и она не уезжает, когда содержимое
+      раздела длинное. Внутри — пять обычных кнопок, а не BottomNavigationView: у него слишком
+      много собственной механики (меню, иконки, презентер, состояние выбора), и ошибка в ней
+      роняет экран целиком. Здесь ломаться нечему.
     -->
-    <com.google.android.material.bottomnavigation.BottomNavigationView
+    <LinearLayout
         android:id="@+id/navBar"
-        style="@style/Widget.WarpScout.NavBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        app:labelVisibilityMode="labeled"
-        app:menu="@menu/nav_main" />
+        android:background="?attr/colorSurfaceContainerLow"
+        android:orientation="horizontal"
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/nav_start"
+            style="@style/Widget.WarpScout.NavButton"
+            android:layout_weight="1"
+            android:text="@string/tab_start" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/nav_scan"
+            style="@style/Widget.WarpScout.NavButton"
+            android:layout_weight="1"
+            android:text="@string/tab_scan" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/nav_settings"
+            style="@style/Widget.WarpScout.NavButton"
+            android:layout_weight="1"
+            android:text="@string/tab_config" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/nav_apps"
+            style="@style/Widget.WarpScout.NavButton"
+            android:layout_weight="1"
+            android:text="@string/tab_apps" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/nav_log"
+            style="@style/Widget.WarpScout.NavButton"
+            android:layout_weight="1"
+            android:text="@string/tab_log" />
+    </LinearLayout>
 </LinearLayout>

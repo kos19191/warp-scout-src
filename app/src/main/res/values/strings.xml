@@ -164,6 +164,16 @@
     <string name="tunnel_connecting_busy">Уже подключаюсь — дождись результата</string>
     <string name="connect_busy_scan">Идёт подбор — подключусь, когда он закончится</string>
     <string name="scan_busy_connecting">Сейчас подключаюсь — подбор запущу после этого</string>
+
+    <!-- аварийный экран: показывается, если интерфейс не удалось построить -->
+    <string name="safe_title">Приложение не смогло показать экран</string>
+    <string name="safe_hint">Это ошибка в коде, а не в ваших настройках. Ниже — её причина; её можно скопировать и отправить разработчику. Туннель при этом продолжает работать.</string>
+    <string name="safe_copy">Скопировать причину</string>
+    <string name="safe_copied">Скопировано</string>
+    <string name="safe_share">Отправить</string>
+    <string name="safe_restart">Перезапустить приложение</string>
+    <string name="safe_continue">Продолжить</string>
+    <string name="banner_ui_error">Экран не обновился: %1$s</string>
     <string name="schedule_period_label">Фоновый подбор (авто-сканирование):</string>
     <string name="schedule_period_off">выключен</string>
     <string name="schedule_period_hour">каждый час</string>
