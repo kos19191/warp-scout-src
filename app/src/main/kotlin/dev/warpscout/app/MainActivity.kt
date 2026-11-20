@@ -15,6 +15,8 @@ import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.checkbox.MaterialCheckBox
 import com.google.android.material.tabs.TabLayout
 import dev.warpscout.app.databinding.ActivityMainBinding
+import dev.warpscout.app.status.ServiceSettingsStore
+import dev.warpscout.app.status.TunnelStatusBus
 import android.net.Uri
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.model.ResourceCheck
@@ -84,10 +86,16 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         // Первым делом: если приложение падало, это должно попасть в журнал, а не исчезнуть.
         CrashLog.install(this)
+        // Журнал общий с процессом туннеля: строки обоих процессов сходятся в одном файле.
+        TunnelDebug.attach(this)
+        // Настройки сервиса — отдельным снимком: SharedPreferences между процессами расходятся.
+        ServiceSettingsStore.syncFromPrefs(this)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
         prefs = Prefs(this)
+        // Подключаемся к состоянию туннеля из его процесса (идемпотентно, см. TunnelStatusBus).
+        TunnelStatusBus.install(this)
         setupTabs(savedInstanceState?.getInt(STATE_TAB) ?: 0)
         fillFromPrefs()
         buildJunkChecks()
@@ -1497,7 +1505,10 @@ class MainActivity : AppCompatActivity() {
             exitRegion = ""
             binding.btnTunnel.setText(R.string.btn_tunnel_on)
             Thread {
-                Thread.sleep(900)
+                // Раньше здесь была фиксированная пауза 900 мс — «на глазок». Если сервис
+                // освобождался позже, старт упирался в «уже поднимается» и подключение молча
+                // не происходило. Теперь ждём фактического завершения прошлой сессии.
+                tunnel.waitStopped(6000)
                 runOnUiThread { connectWithFallback(chosen) }
             }.apply { isDaemon = true }.start()
         } else {

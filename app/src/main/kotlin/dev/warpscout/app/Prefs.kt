@@ -9,6 +9,7 @@ import dev.warpscout.core.net.NetSettings
 import dev.warpscout.core.net.PoolMode
 import dev.warpscout.core.presets.Presets
 import dev.warpscout.core.presets.RoutePresets
+import dev.warpscout.core.state.ServiceSettings
 import dev.warpscout.core.tune.TuningSpec
 
 /**
@@ -86,12 +87,18 @@ class Prefs(private val context: Context) {
     /** Второй выход: свой сервер (WireGuard/AmneziaWG) для выбранных подсетей. */
     var secondExitOn: Boolean
         get() = sp.getBoolean("secondExitOn", false)
-        set(v) = sp.edit().putBoolean("secondExitOn", v).apply()
+        set(v) {
+            sp.edit().putBoolean("secondExitOn", v).apply()
+            pushToService()
+        }
 
     /** Конфиг второго выхода: текст [Interface]/[Peer] от своего сервера. */
     var secondConf: String
         get() = sp.getString("secondConf", "").orEmpty()
-        set(v) = sp.edit().putString("secondConf", v).apply()
+        set(v) {
+            sp.edit().putString("secondConf", v).apply()
+            pushToService()
+        }
 
     /** Домены, которые должны идти через второй выход (для человека и для повторного сбора IP). */
     var secondDomains: String
@@ -101,7 +108,10 @@ class Prefs(private val context: Context) {
     /** Развёрнутые в CIDR адреса этих доменов — ровно их и раскладывает ExitRouter. */
     var secondCidrs: String
         get() = sp.getString("secondCidrs", "").orEmpty()
-        set(v) = sp.edit().putString("secondCidrs", v).apply()
+        set(v) {
+            sp.edit().putString("secondCidrs", v).apply()
+            pushToService()
+        }
 
     /** Период фонового подбора в часах: 0 — выключено. */
     var scheduleHours: Int
@@ -129,6 +139,7 @@ class Prefs(private val context: Context) {
             }
         }
         edit.apply()
+        pushToService()
     }
 
     /** .conf, импортированный вручную: используется, если генератор недоступен. */
@@ -192,12 +203,18 @@ class Prefs(private val context: Context) {
      */
     var appsMode: Int
         get() = sp.getInt("appsMode", APPS_ALL)
-        set(v) = sp.edit().putInt("appsMode", v).apply()
+        set(v) {
+            sp.edit().putInt("appsMode", v).apply()
+            pushToService()
+        }
 
     /** Пакеты, выбранные в режимах «только» и «кроме» (один список на оба режима). */
     var appsSelected: Set<String>
         get() = sp.getStringSet("appsSelected", emptySet()).orEmpty()
-        set(v) = sp.edit().putStringSet("appsSelected", v).apply()
+        set(v) {
+            sp.edit().putStringSet("appsSelected", v).apply()
+            pushToService()
+        }
 
     var allowBlockIds: Set<String>
         get() = sp.getStringSet("allowBlock", null) ?: dev.warpscout.core.lists.AllowLists.DEFAULT_BLOCK_IDS.toSet()
@@ -365,6 +382,24 @@ class Prefs(private val context: Context) {
         return out
     }
 
+    /**
+     * Донести «сервисные» настройки до процесса туннеля. SharedPreferences между процессами
+     * расходятся (у каждого своя копия в памяти), поэтому сервис читает отдельный снимок в файле,
+     * который переписывается здесь при каждом изменении.
+     */
+    private fun pushToService() {
+        dev.warpscout.app.status.ServiceSettingsStore.write(
+            context,
+            ServiceSettings(
+                secondExitOn = secondExitOn,
+                secondConf = secondConf,
+                secondCidrs = secondCidrs,
+                appsMode = appsMode,
+                appsSelected = appsSelected.toList().sorted(),
+            )
+        )
+    }
+
     /** Куда класть скачанные списки. */
     fun allowListStore(): dev.warpscout.core.lists.FileListStore =
         dev.warpscout.core.lists.FileListStore(java.io.File(context.filesDir, "allowlists"))
@@ -394,9 +429,10 @@ class Prefs(private val context: Context) {
     companion object {
         const val POOL_DEFAULT = 0
 
-        const val APPS_ALL = 0
-        const val APPS_ONLY = 1
-        const val APPS_EXCEPT = 2
+        // Значения берутся из общей модели: сервис и интерфейс не должны разойтись в нумерации.
+        const val APPS_ALL = ServiceSettings.APPS_ALL
+        const val APPS_ONLY = ServiceSettings.APPS_ONLY
+        const val APPS_EXCEPT = ServiceSettings.APPS_EXCEPT
         const val POOL_MASQUE = 1
         const val POOL_FULL = 2
 

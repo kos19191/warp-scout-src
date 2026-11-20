@@ -10,7 +10,6 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
-import dev.warpscout.app.Prefs
 import dev.warpscout.app.R
 import dev.warpscout.app.TunnelDebug
 import dev.warpscout.core.config.SplitRoutes
@@ -227,7 +226,7 @@ class WarpVpnService : VpnService() {
         // Второй выход: другой сервер для выбранных подсетей (страна/провайдер на выбор).
         // Внутри WARP выбрать регион нельзя, поэтому «регион для сайта» = второй туннель рядом.
         val secondCfg = secondConfig()
-        val router = secondCfg?.let { ExitRouter.of(ExitRouter.parse(Prefs(this).secondCidrs)) }
+        val router = secondCfg?.let { ExitRouter.of(ExitRouter.parse(serviceSettings().secondCidrs)) }
             ?.takeIf { !it.isEmpty } ?: ExitRouter.EMPTY
         val multiExit = secondCfg != null && !router.isEmpty
 
@@ -419,11 +418,20 @@ class WarpVpnService : VpnService() {
         }
     }
 
-    /** Конфиг второго выхода из настроек (null — выключен или пустой). */
+    /**
+     * Настройки для подъёма туннеля. Читаются из файла-снимка, а не из SharedPreferences: у
+     * каждого процесса своя копия настроек в памяти, и сервис мог бы поднимать туннель по
+     * устаревшим значениям («поменял в настройках — туннель не заметил»).
+     */
+    private fun serviceSettings(): dev.warpscout.core.state.ServiceSettings =
+        dev.warpscout.app.status.ServiceSettingsStore.read(this)
+            ?: dev.warpscout.core.state.ServiceSettings()
+
+    /** Конфиг второго выхода (null — выключен или пустой). */
     private fun secondConfig(): WarpConfig? {
-        val prefs = Prefs(this)
-        if (!prefs.secondExitOn) return null
-        val text = prefs.secondConf
+        val settings = serviceSettings()
+        if (!settings.secondExitOn) return null
+        val text = settings.secondConf
         if (text.isBlank()) return null
         return runCatching { WgConf.toWarpConfig("второй выход", text) }.getOrNull()
     }
@@ -474,6 +482,7 @@ class WarpVpnService : VpnService() {
         TunnelState.error = reason
         TunnelState.gaveUp = true
         TunnelDebug.error(reason)
+        runCatching { TunnelStatusPublisher.flush() }
         runCatching {
             TunnelDebug.writeToFile(File(filesDir, "tunnel-debug.log"))
         }
@@ -519,10 +528,10 @@ class WarpVpnService : VpnService() {
      * чем оставить телефон без интернета и без объяснений.
      */
     private fun applyAppSplit(builder: Builder) {
-        val prefs = Prefs(this)
-        val selected = prefs.appsSelected.filter { it != packageName }
-        when (prefs.appsMode) {
-            Prefs.APPS_ONLY -> {
+        val settings = serviceSettings()
+        val selected = settings.appsSelected.filter { it != packageName }
+        when (settings.appsMode) {
+            dev.warpscout.core.state.ServiceSettings.APPS_ONLY -> {
                 if (selected.isEmpty()) {
                     TunnelDebug.stage("приложения: режим «только выбранные», но список пуст — идут все")
                 } else {
@@ -531,7 +540,7 @@ class WarpVpnService : VpnService() {
                 }
             }
 
-            Prefs.APPS_EXCEPT -> {
+            dev.warpscout.core.state.ServiceSettings.APPS_EXCEPT -> {
                 if (selected.isEmpty()) {
                     TunnelDebug.stage("приложения: все через туннель (исключений нет)")
                 } else {
@@ -643,6 +652,8 @@ class WarpVpnService : VpnService() {
         unwatchNetwork()
         closeAll()
         runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        // Процесс может умереть сразу после stopSelf — состояние должно быть записано уже сейчас.
+        runCatching { TunnelStatusPublisher.flush() }
     }
 
     /** Закрыть сокеты, tun и оба data plane — без решения «останавливаемся навсегда». */
@@ -888,6 +899,7 @@ class WarpVpnService : VpnService() {
             if (first.isFailure) {
                 val why = first.exceptionOrNull()
                 TunnelState.status = "сервис не запустился: ${why?.message}"
+                TunnelDebug.error("сервис не запустился: ${why?.javaClass?.simpleName} ${why?.message}")
                 dev.warpscout.app.CrashLog.note(
                     context, "startForegroundService отказал: ${why?.javaClass?.simpleName}: ${why?.message}"
                 )

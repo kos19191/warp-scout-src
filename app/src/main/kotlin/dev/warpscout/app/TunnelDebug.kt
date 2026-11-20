@@ -1,5 +1,7 @@
 package dev.warpscout.app
 
+import dev.warpscout.core.state.TunnelStatus
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -16,6 +18,28 @@ import java.util.Locale
 object TunnelDebug {
 
     private const val MAX_LINES = 220
+
+    /**
+     * Журнал ещё и в файле. Причина простая: туннель живёт в отдельном процессе, и кольцевой
+     * буфер в памяти интерфейса о нём ничего не знает. Файл — единственное место, где сходятся
+     * строки обоих процессов: сервис пишет этапы подъёма и rekey, интерфейс — подбор и ошибки.
+     * Дописывание строки — одна запись в конец (O_APPEND), поэтому два процесса не перемешивают
+     * половины строк; размер ограничен, старое вытесняется.
+     */
+    private const val JOURNAL = "tunnel-journal.log"
+    private const val JOURNAL_MAX_BYTES = 256 * 1024
+    private const val JOURNAL_KEEP_LINES = 120
+    private const val DUMP_LIMIT_BYTES = 24 * 1024
+
+    @Volatile
+    private var journal: File? = null
+
+    /** Подключить журнал к файлу в `filesDir` (зовётся из обоих процессов при старте). */
+    fun attach(context: android.content.Context) {
+        val file = File(context.applicationContext.filesDir, JOURNAL)
+        if (journal?.absolutePath == file.absolutePath) return
+        journal = file
+    }
 
     private val lock = Any()
     private val lines = ArrayDeque<String>()
@@ -60,6 +84,7 @@ object TunnelDebug {
 
     fun reset() = synchronized(lock) {
         lines.clear()
+        appendToJournal("──── новая попытка ────")
         lastStageAt = System.currentTimeMillis()
         lastError = null
         bytesUp = 0L
@@ -105,19 +130,79 @@ object TunnelDebug {
             lines.addLast(full)
             while (lines.size > MAX_LINES) lines.removeFirst()
         }
+        appendToJournal(full)
         runCatching { android.util.Log.i(TAG, line) }
     }
 
-    fun dump(): String = synchronized(lock) {
-        if (lines.isEmpty()) {
-            return@synchronized if (touched) "журнал пуст" else "туннель ещё не запускался"
+    /** Дописать строку в общий журнал. Ошибки записи не должны влиять на туннель. */
+    private fun appendToJournal(full: String) {
+        val file = journal ?: return
+        runCatching {
+            if (file.length() > JOURNAL_MAX_BYTES) rotate(file)
+            java.io.FileOutputStream(file, true).use { out ->
+                out.write((full + "\n").toByteArray(Charsets.UTF_8))
+            }
         }
-        lines.joinToString("\n")
+    }
+
+    /** Журнал вырос: оставляем хвост, чтобы файл не рос бесконечно. */
+    private fun rotate(file: File) {
+        val tail = runCatching { file.readLines().takeLast(JOURNAL_KEEP_LINES) }.getOrDefault(emptyList())
+        val tmp = File(file.parentFile, file.name + ".tmp")
+        runCatching {
+            tmp.writeText(tail.joinToString("\n", postfix = "\n"))
+            if (!tmp.renameTo(file)) {
+                file.delete()
+                tmp.renameTo(file)
+            }
+        }
+    }
+
+    /** Содержимое общего журнала (хвост ограниченной длины), без обращения к памяти процесса. */
+    private fun readJournal(): String {
+        val file = journal ?: return ""
+        val text = runCatching { file.readText() }.getOrNull().orEmpty()
+        if (text.isBlank()) return ""
+        val tail = if (text.length > DUMP_LIMIT_BYTES) {
+            val cut = text.substring(text.length - DUMP_LIMIT_BYTES)
+            cut.substringAfter('\n', cut)   // не показываем половину первой строки
+        } else text
+        return tail.trimEnd()
+    }
+
+    /**
+     * Отразить состояние, пришедшее из процесса сервиса: счётчики, последняя ошибка и время
+     * последнего этапа живут в журнале сервиса, а интерфейсу они нужны для карточки.
+     */
+    fun mirror(status: TunnelStatus) {
+        bytesUp = status.bytesUp
+        bytesDown = status.bytesDown
+        handshakeAttempts = status.handshakeAttempts
+        lastError = status.lastError
+        if (status.lastStageMs > lastStageMs) lastStageMs = status.lastStageMs
+        if (status.touched) touched = true
+        if (status.endpoint.isNotBlank()) endpoint = status.endpoint
+    }
+
+    fun dump(): String {
+        val fromFile = readJournal()
+        if (fromFile.isNotEmpty()) return fromFile
+        return synchronized(lock) {
+            if (lines.isEmpty()) {
+                if (touched) "журнал пуст" else "туннель ещё не запускался"
+            } else {
+                lines.joinToString("\n")
+            }
+        }
     }
 
     /** Короткая «что не так»-строка для Toast/плашки: последняя ошибка или последний этап. */
     fun brief(): String {
         lastError?.let { return it }
+        val fromFile = readJournal()
+        if (fromFile.isNotEmpty()) {
+            return fromFile.substringAfterLast('\n').substringAfter(' ').ifBlank { "нет журнала" }
+        }
         return synchronized(lock) { lines.lastOrNull()?.substringAfter(' ') ?: "нет журнала" }
     }
 

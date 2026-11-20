@@ -36,6 +36,8 @@ import dev.warpscout.core.net.TlsProber
 import dev.warpscout.core.net.WgProber
 import dev.warpscout.core.presets.RoutePresets
 import dev.warpscout.core.report.Report
+import dev.warpscout.core.state.ServiceSettings
+import dev.warpscout.core.state.TunnelStatus
 import dev.warpscout.core.tune.Scoring
 import dev.warpscout.core.tune.Weights
 import dev.warpscout.core.wg.Wg
@@ -73,6 +75,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("конфиги") {
             confRoundTrip()
             sampleFiles()
+        }
+        section("состояние сервиса между процессами") {
+            serviceState()
         }
         section("пул endpoint'ов") {
             endpointPool()
@@ -469,6 +474,100 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             "размер=${explicit.size}"
         )
         expect("роуты обхода белых списков", RoutePresets.BYPASS_WHITELIST.size, 56)
+    }
+
+    // -------------------------------------------------- состояние между процессами
+
+    /**
+     * Снимок состояния — единственный способ узнать что-либо о туннеле из другого процесса,
+     * поэтому сериализация проверяется отдельно: битый снимок = «туннель работает, а UI молчит».
+     */
+    private fun serviceState() {
+        val full = TunnelStatus(
+            up = true,
+            status = "туннель поднят",
+            endpoint = "162.159.192.7:2408",
+            error = null,
+            gaveUp = false,
+            busy = true,
+            startedAt = 1_758_000_000_123,
+            updatedAt = 1_758_000_004_456,
+            bytesUp = 12_345_678_901L,
+            bytesDown = 98_765_432_109L,
+            handshakeAttempts = 3,
+            lastError = "endpoint молчит",
+            lastStageMs = 1_758_000_004_000,
+            touched = true,
+        )
+        val back = TunnelStatus.fromJson(full.toJson())
+        check("снимок: читается обратно", back != null)
+        expect("снимок: up", back?.up, true)
+        expect("снимок: статус", back?.status, "туннель поднят")
+        expect("снимок: endpoint", back?.endpoint, "162.159.192.7:2408")
+        expect("снимок: нет ошибки", back?.error, null)
+        expect("снимок: busy", back?.busy, true)
+        expect("снимок: время старта без потерь", back?.startedAt, 1_758_000_000_123L)
+        expect("снимок: время обновления без потерь", back?.updatedAt, 1_758_000_004_456L)
+        expect("снимок: счётчик вверх без потерь", back?.bytesUp, 12_345_678_901L)
+        expect("снимок: счётчик вниз без потерь", back?.bytesDown, 98_765_432_109L)
+        expect("снимок: попытки handshake", back?.handshakeAttempts, 3)
+        expect("снимок: последняя ошибка", back?.lastError, "endpoint молчит")
+        expect("снимок: время этапа", back?.lastStageMs, 1_758_000_004_000L)
+        expect("снимок: журнал трогали", back?.touched, true)
+
+        // Русский текст с кавычками и переводами строк — иначе журнал превратится в кашу.
+        val tricky = TunnelStatus(
+            status = "строка \"в кавычках\" и \\ слэш\nвторая строка\tтаб",
+            error = "ошибка: «ёлка», тире — и юникод ✓",
+        )
+        val trickyBack = TunnelStatus.fromJson(tricky.toJson())
+        expect("снимок: кавычки и переводы строк", trickyBack?.status, tricky.status)
+        expect("снимок: юникод в ошибке", trickyBack?.error, tricky.error)
+
+        // Битый и чужой ввод не должен ронять процесс интерфейса.
+        expect("снимок: пустая строка → null", TunnelStatus.fromJson(""), null)
+        expect("снимок: null → null", TunnelStatus.fromJson(null), null)
+        expect("снимок: мусор → null", TunnelStatus.fromJson("не json"), null)
+        expect("снимок: обрезанный json → null", TunnelStatus.fromJson("{\"up\": true, \"status\": \"тун"), null)
+        expect("снимок: не объект → null", TunnelStatus.fromJson("[1,2,3]"), null)
+        expect("снимок: пустой объект → значения по умолчанию", TunnelStatus.fromJson("{}"), TunnelStatus())
+        val unknown = TunnelStatus.fromJson("{\"up\": true, \"чужоеПоле\": 5, \"ещё\": {\"a\": 1}}")
+        expect("снимок: лишние поля не мешают", unknown?.up, true)
+        expect("снимок: лишние поля не ломают статус", unknown?.status, "")
+
+        // Настройки сервиса: то, из-за чего «поменял в настройках — туннель не заметил».
+        val settings = ServiceSettings(
+            secondExitOn = true,
+            secondConf = "[Interface]\nPrivateKey = abc=\n[Peer]\nEndpoint = 1.2.3.4:51820",
+            secondCidrs = "1.1.1.0/24, 8.8.8.8/32",
+            appsMode = 1,
+            appsSelected = listOf("org.telegram.messenger", "com.google.android.youtube", "ru.yandex.music"),
+        )
+        val settingsBack = ServiceSettings.fromJson(settings.toJson())
+        check("настройки сервиса: читаются обратно", settingsBack != null)
+        expect("настройки сервиса: второй выход", settingsBack?.secondExitOn, true)
+        expect("настройки сервиса: конфиг дословно", settingsBack?.secondConf, settings.secondConf)
+        expect("настройки сервиса: подсети", settingsBack?.secondCidrs, settings.secondCidrs)
+        expect("настройки сервиса: режим приложений", settingsBack?.appsMode, 1)
+        expect("настройки сервиса: список приложений", settingsBack?.appsSelected, settings.appsSelected)
+
+        val many = (0 until 300).map { "app.number.$it" }
+        expect(
+            "настройки сервиса: 300 приложений",
+            ServiceSettings.fromJson(ServiceSettings(appsSelected = many).toJson())?.appsSelected,
+            many
+        )
+        expect(
+            "настройки сервиса: пустой список",
+            ServiceSettings.fromJson(ServiceSettings().toJson())?.appsSelected,
+            emptyList<String>()
+        )
+        expect("настройки сервиса: мусор → null", ServiceSettings.fromJson("<xml/>"), null)
+
+        // Совместимость: снимок без новых полей (он же — снимок старой версии приложения).
+        val legacy = TunnelStatus.fromJson("{\"up\": true, \"status\": \"старый снимок\"}")
+        expect("снимок: читается без новых полей", legacy?.status, "старый снимок")
+        expect("снимок: отсутствующие поля по умолчанию", legacy, TunnelStatus(up = true, status = "старый снимок"))
     }
 
     // ----------------------------------------------------------- scoring/report

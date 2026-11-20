@@ -3,6 +3,7 @@ package dev.warpscout.app
 import android.app.Activity
 import android.content.Context
 import android.net.VpnService
+import dev.warpscout.app.status.TunnelStatusBus
 import dev.warpscout.app.tunnel.TunnelState
 import dev.warpscout.app.tunnel.WarpVpnService
 import dev.warpscout.core.model.ResourceCheck
@@ -12,6 +13,13 @@ import dev.warpscout.core.net.ResourceProber
 import dev.warpscout.core.tune.TunnelVerifier
 
 class VpnTunnelController(private val context: Context) : TunnelController {
+
+    init {
+        // Туннель живёт в отдельном процессе: подключаемся к его снимку состояния и держим
+        // TunnelState зеркалом. Один раз на процесс, повторные вызовы безопасны.
+        TunnelStatusBus.install(context)
+        TunnelStatusBus.addListener { status -> TunnelState.applySnapshot(status) }
+    }
 
     override val supported: Boolean get() = true
     override val isUp: Boolean get() = TunnelState.up
@@ -34,6 +42,9 @@ class VpnTunnelController(private val context: Context) : TunnelController {
             )
             return false
         }
+        // Прошлый результат не должен влиять на новую попытку: иначе интерфейс увидит старое
+        // «сдался» раньше, чем сервис успеет опубликовать новое состояние, и соврёт про отказ.
+        TunnelState.forgetAttempt()
         WarpVpnService.start(context, config)
         return true
     }
