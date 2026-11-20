@@ -53,7 +53,15 @@ class VpnTunnelController(private val context: Context) : TunnelController {
         if (!start(config)) return false
         val deadline = System.currentTimeMillis() + waitMs.coerceAtLeast(3000)
         var announced = false
+        var lastRead = 0L
         while (System.currentTimeMillis() < deadline) {
+            // Состояние пишет сервис в другом процессе. Читаем снимок сами, не полагаясь только на
+            // уведомление: потерянное уведомление не должно выглядеть как «туннель не поднимается».
+            val now = System.currentTimeMillis()
+            if (now - lastRead >= 500) {
+                lastRead = now
+                runCatching { dev.warpscout.app.status.TunnelStatusBus.refresh(context) }
+            }
             if (TunnelState.up) {
                 TunnelDebug.ok("туннель работает: ${config.endpoint.render()}")
                 return true
@@ -67,10 +75,14 @@ class VpnTunnelController(private val context: Context) : TunnelController {
                 )
                 return false
             }
-            Thread.sleep(200)
+            Thread.sleep(150)
         }
+        // Пустой этап — это не объяснение. Если сервис ничего не сказал, показываем последнюю
+        // строку общего журнала (его пишет и сервис), а если и её нет — так и говорим.
+        val stage = TunnelState.status.ifBlank { TunnelDebug.lastLine() }
+            .ifBlank { "сервис не написал ни строки — похоже, не запустился" }
         TunnelDebug.error(
-            "за ${waitMs} мс handshake не завершился (этап: ${TunnelState.status})",
+            "за ${waitMs} мс handshake не завершился (этап: ${stage.take(160)})",
             "обычно это endpoint, который не отвечает на инициацию: смени профиль шума или порт"
         )
         return false
@@ -80,7 +92,9 @@ class VpnTunnelController(private val context: Context) : TunnelController {
 
     override fun waitStopped(timeoutMs: Int): Boolean = WarpVpnService.waitDown(timeoutMs)
 
-    override fun lastError(): String? = TunnelDebug.lastError
+    // Причину отказа называет сервис, а живёт она в снимке его состояния: в процессе интерфейса
+    // TunnelDebug.lastError почти всегда пуст, и вместо причины показывалось «нет ответа».
+    override fun lastError(): String? = TunnelState.error ?: TunnelDebug.lastError
 
     override fun debugDump(): String = TunnelDebug.dump()
 

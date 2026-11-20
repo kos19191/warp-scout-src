@@ -11,8 +11,8 @@ android {
         applicationId = "dev.warpscout.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 28
-        versionName = "1.10.1"
+        versionCode = 29
+        versionName = "1.10.2"
     }
 
     flavorDimensions += "mode"

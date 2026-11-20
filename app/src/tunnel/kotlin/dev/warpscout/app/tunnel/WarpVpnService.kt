@@ -42,6 +42,32 @@ import java.util.concurrent.TimeUnit
  */
 class WarpVpnService : VpnService() {
 
+    /**
+     * Сервис живёт в отдельном процессе, и всё, что в прежней однопроцессной сборке делал интерфейс,
+     * здесь надо подключать заново.
+     *
+     * Это не формальность: без [TunnelStatusPublisher] процесс сервиса не писал ни снимка состояния,
+     * ни уведомления о нём — интерфейс не видел ровно ничего. Снаружи это выглядело так: «точка
+     * 1/5, через 5 секунд handshake не завершился (этап: )», все точки подряд, подключиться
+     * невозможно, хотя туннель при этом мог подниматься. Три строки ниже — не прогресс ради
+     * прогресса, а условие работоспособности.
+     */
+    override fun onCreate() {
+        super.onCreate()
+        runCatching { dev.warpscout.app.CrashLog.install(this) }
+        runCatching { dev.warpscout.app.TunnelDebug.attach(this) }
+        runCatching { TunnelStatusPublisher.start(this) }
+        // Первая строка журнала: по ней видно, что процесс сервиса вообще запустился.
+        runCatching {
+            dev.warpscout.app.TunnelDebug.stage("сервис запущен, процесс ${android.os.Process.myPid()}")
+        }
+        if (TunnelState.status.isBlank()) {
+            TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_STARTING
+            TunnelState.status = getString(R.string.notif_starting)
+        }
+        TunnelStatusPublisher.request(urgent = true)
+    }
+
     private var plane: DataPlane? = null
     /** Второй выход (другой сервер): свой data plane и сокет, если включён. */
     private var plane2: DataPlane? = null
