@@ -63,6 +63,9 @@
     <string name="resources_hint">Список проверяемых доменов редактируется в «Отчёт → ресурсы».</string>
 
     <string name="btn_run">Сканировать и подобрать</string>
+    <string name="home_last_tune">Последний подбор</string>
+    <string name="home_scan_title">Подбор сервера</string>
+    <string name="home_backup_title">Резервная копия</string>
     <string name="btn_stop">Остановить</string>
     <string name="btn_schedule">Включить фоновый подбор</string>
     <string name="btn_schedule_off">Выключить авто-обновление</string>

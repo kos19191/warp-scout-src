@@ -45,51 +45,125 @@
                 android:paddingEnd="16dp"
                 android:paddingBottom="24dp">
 
-                <TextView
-                    android:id="@+id/textStatus"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="@string/status_idle"
-                    android:textAppearance="?attr/textAppearanceBodyLarge" />
-
-                <com.google.android.material.progressindicator.LinearProgressIndicator
-                    android:id="@+id/progress"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:indeterminate="true"
-                    android:visibility="gone" />
-
-                <TextView
-                    android:id="@+id/textDone"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:text="@string/done_never"
-                    android:textAppearance="?attr/textAppearanceTitleLarge" />
-
-                <TextView
-                    android:id="@+id/textBest"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:textAppearance="?attr/textAppearanceTitleMedium" />
-
-                <!-- ── топ-3 подобранных конфигов: переключение одним нажатием ── -->
+                <!--
+                  Порядок блоков — по частоте использования. Сверху то, что нужно каждый день
+                  (подключить/отключить), ниже итог последнего подбора, потом список замен, и только
+                  в конце то, что открывают редко: подбор и резервные копии.
+                -->
                 <com.google.android.material.card.MaterialCardView
-                    android:id="@+id/cardTop3"
+                    android:id="@+id/cardConnect"
+                    style="@style/Card.Panel"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:visibility="gone"
-                    app:cardCornerRadius="@dimen/radius_card">
+                    android:layout_marginTop="@dimen/space_s">
 
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:orientation="vertical"
-                        android:padding="12dp">
+                        android:padding="@dimen/space_l">
+
+                        <TextView
+                            android:id="@+id/textStatus"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/status_idle"
+                            android:textAppearance="?attr/textAppearanceBodyMedium"
+                            android:textColor="?attr/colorOnSurfaceVariant" />
+
+                        <com.google.android.material.progressindicator.LinearProgressIndicator
+                            android:id="@+id/progress"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_s"
+                            android:indeterminate="true"
+                            android:visibility="gone" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnTunnel"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/button_primary"
+                            android:layout_marginTop="@dimen/space_m"
+                            android:text="@string/btn_tunnel_on"
+                            android:textSize="16sp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnStop"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/btn_stop" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+
+                <!-- Панель ошибок и подсказок: на первой странице, без всплывающих плашек. -->
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/cardBanner"
+                    style="@style/Card.Section"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_m"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:id="@+id/textBanner"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:padding="@dimen/space_m"
+                        android:textAppearance="?attr/textAppearanceBodyMedium" />
+                </com.google.android.material.card.MaterialCardView>
+
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/cardLastTune"
+                    style="@style/Card.Section"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_m">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="@dimen/space_l">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/home_last_tune"
+                            android:textAppearance="?attr/textAppearanceLabelLarge"
+                            android:textColor="?attr/colorOnSurfaceVariant" />
+
+                        <TextView
+                            android:id="@+id/textDone"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_s"
+                            android:text="@string/done_never"
+                            android:textAppearance="?attr/textAppearanceTitleMedium" />
+
+                        <TextView
+                            android:id="@+id/textBest"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_xs"
+                            android:textAppearance="?attr/textAppearanceBodyMedium" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+
+                <!-- ── топ-3 подобранных конфигов: переключение одним нажатием ── -->
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/cardTop3"
+                    style="@style/Card.Section"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_m"
+                    android:visibility="gone">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="@dimen/space_l">
 
                         <TextView
                             android:id="@+id/textTop3Title"
@@ -100,17 +174,14 @@
 
                         <TextView
                             android:id="@+id/textTop3Hint"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="2dp"
-                            android:text="@string/top3_hint"
-                            android:textAppearance="?attr/textAppearanceBodySmall" />
+                            style="@style/Text.Caption"
+                            android:text="@string/top3_hint" />
 
                         <RadioGroup
                             android:id="@+id/groupTop3"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:layout_marginTop="4dp"
+                            android:layout_marginTop="@dimen/space_xs"
                             android:orientation="vertical" />
 
                         <com.google.android.material.button.MaterialButton
@@ -122,98 +193,94 @@
                     </LinearLayout>
                 </com.google.android.material.card.MaterialCardView>
 
-                <!-- ── быстрые действия: три кнопки, всё остальное — по вкладкам ── -->
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnRun"
-                    android:layout_width="match_parent"
-                    android:layout_height="@dimen/button_primary"
-                    android:layout_marginTop="16dp"
-                    android:text="@string/btn_run"
-                    android:textSize="16sp" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnTunnel"
-                        android:layout_width="0dp"
-                        android:layout_height="@dimen/button_secondary"
-                        android:layout_weight="1"
-                        android:text="@string/btn_tunnel_on" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnQuickConfig"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="0dp"
-                        android:layout_height="@dimen/button_secondary"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:text="@string/btn_quick_config" />
-                </LinearLayout>
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnStop"
-                    style="@style/Widget.Material3.Button.TextButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/btn_stop" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnBackup"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/btn_backup" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnRestore"
-                        style="@style/Widget.Material3.Button.TextButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:text="@string/btn_restore" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="@string/backup_hint"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <TextView
-                    android:id="@+id/textQuickHint"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:text="@string/quick_hint"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
                 <com.google.android.material.card.MaterialCardView
-                    android:id="@+id/cardBanner"
+                    style="@style/Card.Section"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:visibility="gone"
-                    app:cardCornerRadius="@dimen/radius_card">
+                    android:layout_marginTop="@dimen/space_m">
 
-                    <TextView
-                        android:id="@+id/textBanner"
+                    <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:padding="12dp"
-                        android:textAppearance="?attr/textAppearanceBodyMedium" />
+                        android:orientation="vertical"
+                        android:padding="@dimen/space_l">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/home_scan_title"
+                            android:textAppearance="?attr/textAppearanceLabelLarge"
+                            android:textColor="?attr/colorOnSurfaceVariant" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnRun"
+                            style="@style/Widget.Material3.Button.TonalButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/button_secondary"
+                            android:layout_marginTop="@dimen/space_s"
+                            android:text="@string/btn_run" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnQuickConfig"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/button_secondary"
+                            android:text="@string/btn_quick_config" />
+
+                        <TextView
+                            android:id="@+id/textQuickHint"
+                            style="@style/Text.Caption"
+                            android:text="@string/quick_hint" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+
+                <com.google.android.material.card.MaterialCardView
+                    style="@style/Card.Section"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_m">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="@dimen/space_l">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/home_backup_title"
+                            android:textAppearance="?attr/textAppearanceLabelLarge"
+                            android:textColor="?attr/colorOnSurfaceVariant" />
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_s"
+                            android:orientation="horizontal">
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/btnBackup"
+                                style="@style/Widget.Material3.Button.OutlinedButton"
+                                android:layout_width="0dp"
+                                android:layout_height="@dimen/button_secondary"
+                                android:layout_weight="1"
+                                android:text="@string/btn_backup" />
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/btnRestore"
+                                style="@style/Widget.Material3.Button.TextButton"
+                                android:layout_width="0dp"
+                                android:layout_height="@dimen/button_secondary"
+                                android:layout_marginStart="@dimen/space_s"
+                                android:layout_weight="1"
+                                android:text="@string/btn_restore" />
+                        </LinearLayout>
+
+                        <TextView
+                            style="@style/Text.Caption"
+                            android:text="@string/backup_hint" />
+                    </LinearLayout>
                 </com.google.android.material.card.MaterialCardView>
 
 
