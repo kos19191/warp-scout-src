@@ -57,10 +57,27 @@ class MainActivity : AppCompatActivity() {
     private val tunnelHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     /**
-     * Пять попыток: три подряд по просьбе было слишком мало — сеть режет несколько адресов, и
-     * ошибка появлялась, хотя рабочая точка ещё не проверена. Каждая попытка — другая пара адрес:порт.
+     * Сколько точек пробуем за одно подключение.
+     *
+     * Шесть, а не пять: в перебор теперь входят проверенные точки из последнего подбора (до трёх),
+     * и при пяти слотах они вытесняли запасные адреса Cloudflare целиком. Верхняя граница важна не
+     * меньше нижней — каждая неудачная точка стоит около пяти секунд ожидания handshake, и десять
+     * попыток означали бы минуту молчания.
      */
-    private val MAX_ENDPOINT_TRIES = 5
+    private val MAX_ENDPOINT_TRIES = 6
+
+    /**
+     * Когда какая точка последний раз не поднялась (только в этом запуске приложения).
+     *
+     * Нужна, чтобы второй перебор не начинался с того же самого: в журнале за час было видно, как
+     * подряд идут круги по одним и тем же пяти адресам, хотя сеть их уже отклонила. Точки, которые
+     * не поднялись меньше десяти минут назад, уходят в конец очереди (но не выбрасываются: сеть
+     * меняется, и «мёртвая минуту назад» через десять минут может работать).
+     */
+    private val failedPoints = HashMap<String, Long>()
+
+    /** Сколько помним неудачу точки: дольше — уже неактуально, сеть успевает измениться. */
+    private val FAILED_MEMORY_MS = 10 * 60 * 1000L
     private val lists by lazy { AllowListsRepo(this) }
     private var lastConfigFile: File? = null
 
@@ -1267,7 +1284,9 @@ class MainActivity : AppCompatActivity() {
         if (!tunnel.ensurePermission(this)) return
         TunnelDebug.stage("переключение из топа: ${entry.endpoint} · шум ${entry.junk}")
         banner(getString(R.string.top3_switching, entry.endpoint))
-        connectWithFallback(cfg)
+        // Нажатая строка пробуется первой: раньше перебор начинался с «последнего сохранённого»
+        // конфига, и нажатие на второй-третий вариант фактически игнорировалось.
+        connectWithFallback(cfg, cfg)
     }
 
     // ------------------------------------------------ экспорт/сервер/каналы
@@ -1448,7 +1467,7 @@ class MainActivity : AppCompatActivity() {
         connectWithFallback(cfg)
     }
 
-    private fun connectWithFallback(base: WarpConfig) {
+    private fun connectWithFallback(base: WarpConfig, preferred: WarpConfig? = null) {
         if (connecting) {
             // Молча игнорировать нельзя: со стороны это выглядит как «кнопка не работает».
             banner(getString(R.string.tunnel_connecting_busy))
@@ -1461,8 +1480,14 @@ class MainActivity : AppCompatActivity() {
             banner(getString(R.string.connect_busy_scan))
             return
         }
-        val candidates = tunnelCandidates(base)
+        val candidates = tunnelCandidates(base, preferred)
         if (candidates.isEmpty()) return noConfig()
+        // Очередь целиком — в журнал. Вопрос «куда он вообще лезет» должен иметь ответ в тексте, а
+        // не в чтении исходников: первая строка всегда человеку (выбранная или проверенная точка).
+        TunnelDebug.stage(
+            "перебор ${candidates.size}: " +
+                candidates.joinToString(", ") { it.endpoint.render() + "/" + it.junk.name }
+        )
         val savedFirst = savedConfig()?.takeIf { it.endpoint == candidates.first().endpoint }
         connecting = true
         binding.btnTunnel.isEnabled = false
@@ -1495,6 +1520,7 @@ class MainActivity : AppCompatActivity() {
                     break
                 }
                 val why = tunnel.lastError() ?: getString(R.string.no_answer)
+                failedPoints[pointKey(cfg)] = System.currentTimeMillis()
                 if (failures.isNotEmpty()) failures.append("; ")
                 failures.append("${cfg.endpoint.render()} — $why")
                 // Гасим неудачную попытку и ДОЖИДАЕМСЯ фактической остановки: сервис
@@ -1645,24 +1671,48 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Очередь точек входа. Главное здесь — **разнообразие**: если сеть не пропускает handshake на
-     * одну пару «адрес:порт», три попытки на почти одинаковых точках бессмысленны (именно так и
-     * вышло в 1.8.0). Поэтому: сохранённая точка, затем разные anycast-адреса на разных портах
-     * (с ротацией от попытки к попытке), затем два «чистых» варианта — без мусорных пакетов и без
-     * IPv6-адреса на интерфейсе.
+     * Очередь точек входа для перебора.
+     *
+     * Порядок — от «доказано в этой сети» к «догадка»:
+     * 0) нажатая человеком строка топ-3 (если подключение начато с неё);
+     * 1) конфиг, который работал последним;
+     * 2) все точки из последнего подбора — единственный список, где handshake уже проходил;
+     * 3) текущие настройки;
+     * 4) разные anycast-адреса Cloudflare на разных портах, с ротацией от попытки к попытке;
+     * 5) два «чистых» варианта — без мусорных пакетов и без IPv6-адреса на интерфейсе.
+     *
+     * Это же и есть ответ на «предлагает три варианта, а пробует другие»: раньше пункта 2 здесь не
+     * было вообще, и проверенные подбором точки в перебор не попадали. Плюс точки, которые только
+     * что не поднялись, уезжают в конец очереди — второй перебор не должен повторять первый.
      */
-    private fun tunnelCandidates(base: WarpConfig): List<WarpConfig> {
+    private fun tunnelCandidates(base: WarpConfig, preferred: WarpConfig? = null): List<WarpConfig> {
         val out = mutableListOf<WarpConfig>()
         val seen = HashSet<String>()
         fun add(cfg: WarpConfig?) {
             if (cfg == null || out.size >= MAX_ENDPOINT_TRIES) return
-            val key = cfg.endpoint.render() + "|" + cfg.junk.name + "|" + cfg.mtu
+            val key = pointKey(cfg)
             if (seen.add(key)) out += cfg
         }
-        // 1) то, что работало в прошлый раз
-        add(savedConfig())
-        add(base)
-        // 2) разные адреса и порты, с ротацией: следующая попытка начнётся со следующего
+        fun addAll(list: List<WarpConfig?>) = list.forEach { add(it) }
+
+        // 0) Выбор человека: нажатая строка топ-3. Она идёт первой и не сдвигается никакой
+        //    статистикой — если человек показал пальцем, спорить не о чем.
+        add(preferred)
+
+        val head = mutableListOf<WarpConfig?>()
+        // 1) конфиг, который работал последним
+        head += savedConfig()
+        // 2) точки из последнего подбора: их handshake уже проходил в этой сети, и это
+        //    единственный список, который не является догадкой. Раньше его здесь не было вовсе —
+        //    отсюда и «предлагает три варианта, а пробует какие-то другие адреса».
+        runCatching { ConfigShortlist.load(this) }.getOrDefault(emptyList())
+            .forEach { entry -> head += runCatching { ConfigShortlist.config(entry) }.getOrNull() }
+        // 3) текущие настройки
+        head += base
+        addAll(head)
+
+        // 4) запасные anycast-адреса Cloudflare с ротацией: следующий перебор начинается со
+        //    следующего порта, чтобы ручные попытки не повторяли одну и ту же пятёрку.
         val dials = listOf(
             "162.159.192.1" to 2408,
             "188.114.97.1" to 500,
@@ -1676,11 +1726,22 @@ class MainActivity : AppCompatActivity() {
             val (host, port) = dials[(start + i) % dials.size]
             add(runCatching { base.copy(endpoint = dev.warpscout.core.model.Endpoint(host, port)) }.getOrNull())
         }
-        // 3) «чистые» варианты: на сетях с DPI отказ чаще всего даёт именно мусор
+        // 5) «чистые» варианты: на сетях с DPI отказ чаще всего даёт именно мусор
         add(runCatching { base.copy(junk = JunkLibrary.none(), mtu = 1280) }.getOrNull())
         add(runCatching { base.copy(enableIpv6Address = false, mtu = 1280) }.getOrNull())
-        return out
+
+        // Точки, которые только что не поднялись, — в конец. Порядок остальных не меняем.
+        val now = System.currentTimeMillis()
+        failedPoints.entries.removeAll { now - it.value > FAILED_MEMORY_MS }
+        val first = out.firstOrNull().takeIf { preferred != null }
+        val rest = out.filter { it !== first }
+        val ordered = rest.sortedBy { failedPoints[pointKey(it)] ?: 0L }
+        return (listOfNotNull(first) + ordered).take(MAX_ENDPOINT_TRIES)
     }
+
+    /** Ключ точки для памяти о неудачах: адрес, порт и профиль шума. */
+    private fun pointKey(cfg: WarpConfig): String =
+        cfg.endpoint.render() + "|" + cfg.junk.name + "|" + cfg.mtu
 
     /** «Другая точка входа»: следующая из очереди, сразу с переподключением. */
     private fun nextEndpoint() {
