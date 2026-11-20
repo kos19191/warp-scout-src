@@ -132,11 +132,6 @@ object TunnelState {
             busy = snapshot.busy
             startedAt = snapshot.startedAt
             phase = snapshot.phase
-            // Счётчики и последняя ошибка считаются в процессе сервиса, а читает их интерфейс
-            // из TunnelDebug. Значит, зеркалим и их: иначе карточка показывает нули, а любой
-            // отказ объясняется «причина неизвестна» — при том что причина есть, просто в
-            // другом процессе.
-            TunnelDebug.mirror(snapshot)
         } finally {
             mirroring = false
         }

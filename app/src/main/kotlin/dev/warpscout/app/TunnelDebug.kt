@@ -42,23 +42,6 @@ object TunnelDebug {
     private var journal: File? = null
 
     /** Подключить журнал к файлу в `filesDir` (зовётся из обоих процессов при старте). */
-    /**
-     * Забрать счётчики и последнюю ошибку из снимка состояния (другой процесс).
-     *
-     * В версии с отдельным процессом сервиса эти величины считаются там, а читает их интерфейс
-     * отсюда же, из [TunnelDebug]. Без зеркала карточка показывала нули, а любой отказ объяснялся
-     * «причина неизвестна».
-     */
-    fun mirror(status: dev.warpscout.core.state.TunnelStatus) {
-        bytesUp = status.bytesUp
-        bytesDown = status.bytesDown
-        handshakeAttempts = status.handshakeAttempts
-        lastError = status.lastError
-        lastStageMs = status.lastStageMs
-        touched = status.touched
-        if (status.endpoint.isNotBlank()) endpoint = status.endpoint
-    }
-
     fun attach(context: android.content.Context) {
         val file = File(context.applicationContext.filesDir, JOURNAL)
         if (journal?.absolutePath == file.absolutePath) return
