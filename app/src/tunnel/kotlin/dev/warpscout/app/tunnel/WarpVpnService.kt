@@ -77,6 +77,10 @@ class WarpVpnService : VpnService() {
     @Volatile
     private var cpuMarkMs: Long = android.os.Process.getElapsedCpuTime()
 
+    /** Число переподключений на прошлую строку статистики. */
+    @Volatile
+    private var reconnectMark = 0
+
     /** Отметки процессорного времени по потокам: разница между строками статистики. */
     private val threadCpuMarks = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
@@ -89,10 +93,39 @@ class WarpVpnService : VpnService() {
         val now = android.os.Process.getElapsedCpuTime()
         val delta = (now - cpuMarkMs).coerceAtLeast(0L)
         cpuMarkMs = now
-        val base = "cpu ${delta / 1000} с за интервал, переподключений ${reconnects.get()}"
+        // Переподключения — тоже за интервал: накопленное число за час само по себе ничего не
+        // объясняет, а вот «5 переподключений за 5 минут» — это уже диагноз.
+        val recon = reconnects.get()
+        val reconDelta = recon - reconnectMark
+        reconnectMark = recon
+        val base = "cpu ${delta / 1000} с за интервал, переподключений $reconDelta"
+        // Какая сеть была в эти минуты и горел ли экран: на мобильной сети каждое пробуждение
+        // модема стоит несравнимо дороже, чем на Wi-Fi, и без этих двух слов журнал не объясняет,
+        // почему один и тот же час стоит по-разному.
+        val env = "сеть ${netKind()}, экран ${if (isScreenOn()) "вкл" else "выкл"}"
         val threads = threadCpuLine()
-        return if (threads.isBlank()) base else "$base, $threads"
+        val tail = if (threads.isBlank()) "" else ", $threads"
+        return "$base, $env$tail"
     }
+
+    /** Вид активной сети одним словом — для строки статистики. */
+    private fun netKind(): String = runCatching {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java)
+            ?: return@runCatching "неизвестно"
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork ?: return@runCatching "нет сети")
+            ?: return@runCatching "неизвестно"
+        when {
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "мобильная"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+            else -> "другая"
+        }
+    }.getOrDefault("неизвестно")
+
+    /** Экран включён? Читается из того же места, что и для keepalive. */
+    private fun isScreenOn(): Boolean = runCatching {
+        (getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager).isInteractive
+    }.getOrDefault(true)
 
     /**
      * Процессорное время **по потокам** за интервал — чтобы следующий разбор журнала не начинался
