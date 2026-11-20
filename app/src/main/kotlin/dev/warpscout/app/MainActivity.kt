@@ -514,7 +514,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 4, 0, 4)
             setTextColor(
                 androidx.core.content.ContextCompat.getColor(
-                    this,
+                    this@MainActivity,
                     if (ok) R.color.check_ok else R.color.check_fail
                 )
             )
