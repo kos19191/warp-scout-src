@@ -295,7 +295,11 @@ class WarpVpnService : VpnService() {
                 attempts = 5, timeoutMs = 1000, retryEveryMs = 400, junkPacketsBeforeHandshake = 1
             ),
             // Сокет перестал отправлять — сеть ушла без уведомления от системы. Переподнимаем.
-            onFatal = { reason -> restartAfterNetworkChange(reason) },
+            onFatal = { reason ->
+                // Сессия умерла (нет ответов/rekey не проходит) — говорим об этом прямо, а не
+                // «после смены сети»: сеть могла и не меняться.
+                restartAfterNetworkChange(reason, R.string.status_reconnect_silent)
+            },
             // Подъём — по событию, а не по тексту журнала: правка формулировки в ядре раньше
             // молча лишала сервис сигнала «туннель работает».
             onTunnelUp = {
@@ -783,7 +787,7 @@ class WarpVpnService : VpnService() {
      * UDP-сокет привязан к прежнему маршруту, и после смены сети каждый `sendto` падает с
      * ENETUNREACH — «туннель есть, а трафика нет», при этом замочек в шторке висит активным.
      */
-    private fun restartAfterNetworkChange(why: String) {
+    private fun restartAfterNetworkChange(why: String, statusRes: Int = R.string.status_reconnect_net) {
         val now = System.currentTimeMillis()
         synchronized(this) {
             // Переключение сети приходит пачкой событий: перезапускаемся не чаще раза в 4 секунды.
@@ -795,7 +799,7 @@ class WarpVpnService : VpnService() {
                 Thread({
                     runCatching { Thread.sleep(4_500) }
                     netRestartPending = false
-                    if (!stopped.get()) restartAfterNetworkChange("$why (после паузы)")
+                    if (!stopped.get()) restartAfterNetworkChange("$why (после паузы)", statusRes)
                 }, "warpscout-net-defer").apply { isDaemon = true }.start()
                 return
             }
@@ -825,7 +829,7 @@ class WarpVpnService : VpnService() {
             autoRebind = true
             TunnelDebug.stage("$why — переподключаю туннель")
             TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_RECONNECTING
-            TunnelState.status = "переподключаюсь после смены сети"
+            TunnelState.status = getString(statusRes)
             postNotification(TunnelState.status)
             val myEpoch = epoch.incrementAndGet()
             stopped.set(true)

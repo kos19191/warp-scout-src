@@ -215,6 +215,9 @@
     <string name="conn_starting">● Подключаюсь… точка %1$s</string>
     <string name="conn_starting_plain">● Подключаюсь…</string>
     <string name="conn_lost">● Туннель потерян — переподключаюсь</string>
+    <!-- Причина переподъёма видна в уведомлении: «после смены сети» на ровном месте выглядит поломкой. -->
+    <string name="status_reconnect_net">переподключаюсь после смены сети</string>
+    <string name="status_reconnect_silent">сервер не отвечает — переподключаюсь</string>
     <string name="conn_no_network">● Нет сети — жду подключения</string>
     <string name="conn_failed">● Не удалось подключиться: %1$s</string>
     <string name="journal_empty">Журнал пуст: туннель ещё не запускался. Подключитесь на вкладке «Главная» — здесь появится каждый шаг с временем.</string>
