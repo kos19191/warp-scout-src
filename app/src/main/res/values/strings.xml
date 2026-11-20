@@ -33,9 +33,9 @@
     <string name="resources_off">Проверки ресурсов выключены — включите их во вкладке «Подбор».</string>
     <string name="resource_via_tunnel">из-под туннеля</string>
     <string name="tunnel_bytes">%1$s вверх / %2$s вниз</string>
-    <string name="tab_log">Диагностика</string>
+    <string name="tab_log">Журнал</string>
     <string name="btn_quick_config">Конфиг</string>
-    <string name="quick_hint">По умолчанию: WireGuard, сервер из последнего подбора, шум из пула, весь трафик в туннеле. Если не заработало — смотри разделы: «Подбор» (что проверять), «Настройки» (маршруты, шум, экспорт), «Диагностика» (что именно не получилось).</string>
+    <string name="quick_hint">По умолчанию: WireGuard, сервер из последнего подбора, шум из пула, весь трафик в туннеле. Если не заработало — смотри разделы: «Подбор» (что проверять), «Настройки» (маршруты, шум, экспорт), «Журнал» (что именно не получилось).</string>
     <string name="quick_config_ready">Конфиг готов — открыл «Настройки»</string>
 
     <string name="section_endpoints">Эндпоинты</string>
@@ -224,7 +224,7 @@
     <string name="banner_scan_stops_tunnel">Остановил туннель для подбора: из-под туннеля замеры врут (идут через WARP)</string>
     <string name="tunnel_failed_hint">Ни одна точка не ответила на handshake. Это сетевая блокировка UDP к WARP: попробуйте другой профиль шума, порт, включить или выключить IPv6 и Wi-Fi/мобильные данные по очереди.</string>
     <string name="state_working">Работаю…</string>
-    <string name="banner_last_crash">Прошлый запуск завершился падением — подробности в «Диагностика» → «Скопировать журнал»</string>
+    <string name="banner_last_crash">Прошлый запуск завершился падением — подробности в «Журнал» → «Скопировать журнал»</string>
     <string name="conn_off">● Туннель выключен</string>
     <string name="conn_on">● Туннель работает · %1$s · %2$s</string>
     <string name="conn_starting">● Подключаюсь… точка %1$s</string>

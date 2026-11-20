@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Шкала отступов. Одна на всё приложение: «на глаз» выставленные 10/14/18dp и были главной
+      причиной того, что экраны выглядели собранными из разных приложений.
+    -->
+    <dimen name="space_xs">4dp</dimen>
+    <dimen name="space_s">8dp</dimen>
+    <dimen name="space_m">12dp</dimen>
+    <dimen name="space_l">16dp</dimen>
+    <dimen name="space_xl">24dp</dimen>
+
+    <!-- Поля экрана: одинаковые на всех вкладках, включая нижнюю панель навигации. -->
+    <dimen name="screen_pad">16dp</dimen>
+
+    <!-- Скругления: карточка — 12dp, крупная панель — 16dp, мелочь — 8dp. -->
+    <dimen name="radius_small">8dp</dimen>
+    <dimen name="radius_card">12dp</dimen>
+    <dimen name="radius_panel">16dp</dimen>
+    <dimen name="stroke_card">1dp</dimen>
+
+    <!-- Высота кнопок: главная крупнее, второстепенные — 48dp, минимальная цель нажатия. -->
+    <dimen name="button_primary">56dp</dimen>
+    <dimen name="button_secondary">48dp</dimen>
+
+    <!-- Моноширинный текст для endpoint'ов, конфигов и журнала: цифры не «прыгают» при обновлении. -->
+    <dimen name="text_mono">13sp</dimen>
+</resources>

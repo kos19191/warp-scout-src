@@ -14,7 +14,6 @@ import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.checkbox.MaterialCheckBox
 import com.google.android.material.radiobutton.MaterialRadioButton
-import com.google.android.material.tabs.TabLayout
 import dev.warpscout.app.databinding.ActivityMainBinding
 import dev.warpscout.app.status.ServiceSettingsStore
 import dev.warpscout.core.state.TunnelStatus
@@ -65,7 +64,7 @@ class MainActivity : AppCompatActivity() {
     private val lists by lazy { AllowListsRepo(this) }
     private var lastConfigFile: File? = null
 
-    /** Панели вкладок в том же порядке, что и заголовки в [setupTabs]. */
+    /** Панели разделов в том же порядке, что и пункты нижней панели (см. [NAV_IDS]). */
     private lateinit var pages: List<View>
     private val appChecks = LinkedHashMap<String, MaterialCheckBox>()
     private var appEntries: List<AppEntry> = emptyList()
@@ -101,7 +100,7 @@ class MainActivity : AppCompatActivity() {
         prefs = Prefs(this)
         // Подключаемся к состоянию туннеля из его процесса (идемпотентно, см. TunnelStatusBus).
         TunnelStatusBus.install(this)
-        setupTabs(savedInstanceState?.getInt(STATE_TAB) ?: 0)
+        setupNav(savedInstanceState?.getInt(STATE_TAB) ?: 0)
         fillFromPrefs()
         buildJunkChecks()
         buildResourceList()
@@ -286,31 +285,31 @@ class MainActivity : AppCompatActivity() {
      * сгенерировать, подключить — с настройками по умолчанию. Остальные нужны только когда
      * быстрый путь не сработал или нужен особый конфиг, поэтому ничего не удалено — всё разложено.
      */
-    private fun setupTabs(initial: Int) {
+    private fun setupNav(initial: Int) {
         pages = listOf(
             binding.pageStart, binding.pageScan, binding.pageConfig,
             binding.pageApps, binding.pageLog
         )
-        val titles = listOf(
-            R.string.tab_start, R.string.tab_scan, R.string.tab_config,
-            R.string.tab_apps, R.string.tab_log
-        )
-        binding.tabs.removeAllTabs()
-        titles.forEach { binding.tabs.addTab(binding.tabs.newTab().setText(it)) }
-        // TabLayout сам подсветит выбранную вкладку сразу после addTab(0), поэтому панели
-        // показываем вручную и тем же вызовом, что и по клику.
+        // Панели показываем тем же вызовом, что и по нажатию: один путь — одно поведение.
         showPage(initial.coerceIn(0, pages.size - 1))
-        binding.tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
-            override fun onTabSelected(tab: TabLayout.Tab) = showPage(tab.position)
-            override fun onTabUnselected(tab: TabLayout.Tab) = Unit
-            override fun onTabReselected(tab: TabLayout.Tab) = Unit
-        })
+        binding.navBar.setOnItemSelectedListener { item ->
+            val index = NAV_IDS.indexOf(item.itemId)
+            if (index < 0) return@setOnItemSelectedListener false
+            showPage(index)
+            true
+        }
     }
 
+    /**
+     * Показать раздел. Список разделов и порядок кнопок нижней панели живут в [NAV_IDS]: раньше
+     * позиция бралась из самого TabLayout, и любая перестановка пунктов молча открывала не тот раздел.
+     */
     private fun showPage(index: Int) {
-        selectedTab = index
-        pages.forEachIndexed { i, page -> page.visibility = if (i == index) View.VISIBLE else View.GONE }
-        if (binding.tabs.selectedTabPosition != index) binding.tabs.getTabAt(index)?.select()
+        val safe = index.coerceIn(0, pages.size - 1)
+        selectedTab = safe
+        pages.forEachIndexed { i, page -> page.visibility = if (i == safe) View.VISIBLE else View.GONE }
+        val id = NAV_IDS[safe]
+        if (binding.navBar.selectedItemId != id) binding.navBar.selectedItemId = id
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -1801,6 +1800,11 @@ class MainActivity : AppCompatActivity() {
         /** Сколько приложений рисуем сразу: остальные — через поиск (иначе экран «залипает»). */
         const val APP_ROWS_LIMIT = 60
         const val STATE_TAB = "warpscout.tab"
+
+        /** Разделы в том же порядке, что и пункты нижней панели (`res/menu/nav_main.xml`). */
+        val NAV_IDS = intArrayOf(
+            R.id.nav_start, R.id.nav_scan, R.id.nav_settings, R.id.nav_apps, R.id.nav_log
+        )
         const val TAB_START = 0
         const val TAB_CONFIG = 2
     }

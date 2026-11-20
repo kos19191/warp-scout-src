@@ -3,6 +3,37 @@
     <!-- Иконка запуска -->
     <color name="ic_launcher_background">#F6821F</color>
 
+    <!--
+      Палитра Material 3. Тёплая нейтраль вместо синеватой: фирменный оранжевый WARP рядом с
+      холодным серым выглядит случайным пятном, а рядом с тёплым — частью одного набора.
+    -->
+    <color name="colorPrimary">#C2410C</color>
+    <color name="colorOnPrimary">#FFFFFF</color>
+    <color name="colorPrimaryContainer">#FFDCC2</color>
+    <color name="colorOnPrimaryContainer">#3C1500</color>
+
+    <color name="colorSecondary">#54504B</color>
+    <color name="colorOnSecondary">#FFFFFF</color>
+    <color name="colorSecondaryContainer">#E9E1D9</color>
+    <color name="colorOnSecondaryContainer">#1F1B17</color>
+
+    <color name="colorSurface">#FCF9F6</color>
+    <color name="colorOnSurface">#1C1B19</color>
+    <color name="colorSurfaceVariant">#EFE7DF</color>
+    <color name="colorOnSurfaceVariant">#4E453D</color>
+    <color name="colorSurfaceContainerLowest">#FFFFFF</color>
+    <color name="colorSurfaceContainerLow">#F9F4EF</color>
+    <color name="colorSurfaceContainer">#F4EDE6</color>
+    <color name="colorSurfaceContainerHigh">#EEE5DD</color>
+
+    <color name="colorOutline">#80756B</color>
+    <color name="colorOutlineVariant">#D3C8BE</color>
+
+    <color name="colorError">#B3261E</color>
+    <color name="colorOnError">#FFFFFF</color>
+    <color name="colorErrorContainer">#F9DEDC</color>
+    <color name="colorOnErrorContainer">#410E0B</color>
+
     <!-- Цвета состояний: в светлой теме тёмные, в тёмной — светлые (см. values-night) -->
     <color name="state_ok">#1B5E20</color>
     <color name="state_warn">#8D6E63</color>

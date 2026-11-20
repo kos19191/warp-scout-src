@@ -113,10 +113,16 @@ def ids_by_layout() -> dict[str, list[tuple[str, str]]]:
 
 
 def declared_ids() -> set[str]:
-    """Все id, объявленные в разметке (включая корневые) — для проверки ссылок."""
+    """Все id, объявленные в разметке и меню (включая корневые) — для проверки ссылок.
+
+    Меню — такой же источник id, как и layout: пункты нижней панели адресуются из кода
+    (`R.id.nav_start`), и aapt2 объявляет их точно так же.
+    """
     out: set[str] = set()
-    for f in (RES / "layout").glob("*.xml") if (RES / "layout").is_dir() else []:
-        out |= set(re.findall(r"@\+id/([a-zA-Z_0-9]+)", f.read_text(encoding="utf-8")))
+    for sub in ("layout", "menu"):
+        base = RES / sub
+        for f in base.glob("*.xml") if base.is_dir() else []:
+            out |= set(re.findall(r"@\+id/([a-zA-Z_0-9]+)", f.read_text(encoding="utf-8")))
     return out
 
 

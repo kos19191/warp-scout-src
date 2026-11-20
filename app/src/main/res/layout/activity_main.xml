@@ -11,11 +11,10 @@
         android:id="@+id/cardConnStatus"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginStart="16dp"
-        android:layout_marginTop="6dp"
-        android:layout_marginEnd="16dp"
-        app:cardCornerRadius="10dp"
-        app:strokeWidth="1dp">
+        style="@style/Card.Section"
+        android:layout_marginStart="@dimen/screen_pad"
+        android:layout_marginTop="@dimen/space_s"
+        android:layout_marginEnd="@dimen/screen_pad">
 
         <TextView
             android:id="@+id/textConnStatus"
@@ -25,14 +24,6 @@
             android:text="@string/conn_off"
             android:textAppearance="?attr/textAppearanceTitleSmall" />
     </com.google.android.material.card.MaterialCardView>
-
-    <com.google.android.material.tabs.TabLayout
-        android:id="@+id/tabs"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        app:tabMode="scrollable"
-        app:tabGravity="center"
-        app:tabIndicatorFullWidth="false" />
 
     <FrameLayout
         android:layout_width="match_parent"
@@ -92,7 +83,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="12dp"
                     android:visibility="gone"
-                    app:cardCornerRadius="12dp">
+                    app:cardCornerRadius="@dimen/radius_card">
 
                     <LinearLayout
                         android:layout_width="match_parent"
@@ -135,7 +126,7 @@
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnRun"
                     android:layout_width="match_parent"
-                    android:layout_height="56dp"
+                    android:layout_height="@dimen/button_primary"
                     android:layout_marginTop="16dp"
                     android:text="@string/btn_run"
                     android:textSize="16sp" />
@@ -149,7 +140,7 @@
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/btnTunnel"
                         android:layout_width="0dp"
-                        android:layout_height="52dp"
+                        android:layout_height="@dimen/button_secondary"
                         android:layout_weight="1"
                         android:text="@string/btn_tunnel_on" />
 
@@ -157,7 +148,7 @@
                         android:id="@+id/btnQuickConfig"
                         style="@style/Widget.Material3.Button.OutlinedButton"
                         android:layout_width="0dp"
-                        android:layout_height="52dp"
+                        android:layout_height="@dimen/button_secondary"
                         android:layout_marginStart="8dp"
                         android:layout_weight="1"
                         android:text="@string/btn_quick_config" />
@@ -215,7 +206,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="12dp"
                     android:visibility="gone"
-                    app:cardCornerRadius="10dp">
+                    app:cardCornerRadius="@dimen/radius_card">
 
                     <TextView
                         android:id="@+id/textBanner"
@@ -842,12 +833,8 @@
 
 <TextView
                     android:id="@+id/textConfig"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:fontFamily="monospace"
-                    android:textAppearance="?attr/textAppearanceBodySmall"
-                    android:textIsSelectable="true" />
+                    style="@style/Text.Mono"
+                    android:layout_marginTop="@dimen/space_s" />
 
 
                 <!-- ── шум: маскировка handshake (перенесён из вкладки «Обход DPI») ── -->
@@ -1118,21 +1105,27 @@
                     android:textAppearance="?attr/textAppearanceBodySmall" />
                 <TextView
                     android:id="@+id/textReport"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:fontFamily="monospace"
-                    android:textAppearance="?attr/textAppearanceBodySmall"
-                    android:textIsSelectable="true" />
+                    style="@style/Text.Mono" />
 
 
                 <TextView
                     android:id="@+id/textVersion"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="20dp"
-                    android:gravity="center"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
+                    style="@style/Text.Caption"
+                    android:layout_marginTop="@dimen/space_xl"
+                    android:gravity="center" />
             </LinearLayout>
         </ScrollView>
     </FrameLayout>
+
+    <!--
+      Навигация внизу, а не вкладками сверху: до нижней панели дотягивается большой палец, и она
+      не уезжает, когда содержимое раздела длинное. Заголовки совпадают с прежними вкладками.
+    -->
+    <com.google.android.material.bottomnavigation.BottomNavigationView
+        android:id="@+id/navBar"
+        style="@style/Widget.WarpScout.NavBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:labelVisibilityMode="labeled"
+        app:menu="@menu/nav_main" />
 </LinearLayout>
