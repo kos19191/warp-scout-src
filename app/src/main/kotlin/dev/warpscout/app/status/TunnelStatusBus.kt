@@ -170,6 +170,7 @@ object TunnelStatusBus {
         // ровно то, что нужно, поэтому устаревший API здесь уместнее привязки к сервису.
         val running = runCatching { manager.getRunningServices(Int.MAX_VALUE) }.getOrNull() ?: return null
         val self = context.packageName
-        return running.any { info -> info.service.packageName == self && info.processName != self }
+        // `process` — имя процесса сервиса; равно имени пакета, если сервис не вынесен.
+        return running.any { info -> info.service.packageName == self && info.process != self }
     }
 }
