@@ -45,6 +45,9 @@ object TunnelStatusBus {
     /** Проверка «процесс сервиса жив» не чаще раза в 2 секунды: она системная и не бесплатная. */
     private const val LIVENESS_THROTTLE_MS = 2_000L
 
+    /** Если снимок не обновлялся дольше этого, интерфейс перечитывает файл сам. */
+    private const val REREAD_MS = 5_000L
+
     private const val TAG = "WarpScout/status"
 
     @Volatile
@@ -98,6 +101,14 @@ object TunnelStatusBus {
      * [STALE_MS] и его процесса нет, показываем «не запущен», а не «работает».
      */
     fun snapshot(context: Context): TunnelStatus {
+        // Страховка: если обновлений давно не было, а туннель считается живым, перечитываем
+        // файл. Интерфейс опрашивает состояние постоянно, поэтому даже при потерянном
+        // уведомлении он не замирает на устаревшей картинке.
+        val before = current
+        if ((before.up || before.busy) && System.currentTimeMillis() - before.updatedAt > REREAD_MS) {
+            val disk = read(context)
+            if (disk != null && disk.updatedAt != before.updatedAt) applySnapshot(context, disk)
+        }
         val status = current
         if (!status.up && !status.busy) return status
         val fresh = status.updatedAt > 0 && System.currentTimeMillis() - status.updatedAt < STALE_MS

@@ -44,8 +44,7 @@ class TunnelTileService : TileService() {
             // переписать снимок настроек для сервиса (после обновления приложения его может
             // ещё не быть, и туннель поднялся бы по значениям по умолчанию).
             ServiceSettingsStore.syncFromPrefs(this)
-            TunnelStatusBus.install(this)
-            TunnelStatusBus.addListener { status -> TunnelState.applySnapshot(status) }
+            TunnelState.installMirror(this)
         }
     }
 

@@ -134,6 +134,20 @@ object TunnelState {
         gaveUp = false
     }
 
+    /**
+     * Подключить процесс интерфейса к снимку сервиса. Вызывается из контроллера и плитки;
+     * слушатель регистрируется ровно один раз на процесс — активность пересоздаётся при каждом
+     * повороте экрана, и добавлять зеркало каждый раз значило бы копить слушатели.
+     */
+    fun installMirror(context: android.content.Context) {
+        dev.warpscout.app.status.TunnelStatusBus.install(context)
+        if (mirrorInstalled.compareAndSet(false, true)) {
+            dev.warpscout.app.status.TunnelStatusBus.addListener { status -> applySnapshot(status) }
+        }
+    }
+
+    private val mirrorInstalled = java.util.concurrent.atomic.AtomicBoolean(false)
+
     /** true — поля заполняются из снимка другого процесса, публиковать их обратно не нужно. */
     @Volatile
     private var mirroring: Boolean = false
