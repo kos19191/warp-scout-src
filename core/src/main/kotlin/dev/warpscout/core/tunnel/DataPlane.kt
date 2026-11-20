@@ -87,6 +87,12 @@ class DataPlane(
      * последнему параметру, и её смысл не должен меняться от добавления нового события.
      */
     private val onTunnelUp: (() -> Unit)? = null,
+    /**
+     * Горит ли экран. От этого зависит частота keepalive: с погашенным экраном и без трафика
+     * телефон должен спать, а не будить радио каждые 25 секунд. Ядро не знает про Android, поэтому
+     * состояние приходит снаружи.
+     */
+    private val screenOn: () -> Boolean = { true },
     private val log: (String) -> Unit = {},
     /**
      * Зовётся, когда сокет перестал отправлять пакеты (ENETUNREACH/EPERM после смены сети или
@@ -139,6 +145,26 @@ class DataPlane(
     @Volatile
     private var lastOutboundAt: Long = 0L
 
+    /**
+     * Когда последний раз был настоящий пользовательский трафик (в любую сторону).
+     *
+     * Отдельно от `lastOutboundAt`: тот обновляется и самим keepalive, поэтому «сколько уже тихо»
+     * по нему не измерить — интервал никогда не вырастал, и телефон будили с прежней частотой.
+     */
+    @Volatile
+    private var lastUserTrafficAt: Long = 0L
+
+    /** Счётчики сеанса — для строки «сколько чего было» в журнале. */
+    @Volatile
+    private var keepalivesSent: Int = 0
+    @Volatile
+    private var handshakesDone: Int = 0
+    @Volatile
+    private var nextStatsAt: Long = 0L
+
+    /** Момент запуска: по нему считается тишина, если трафика не было вовсе. */
+    private val startedAt: Long = System.currentTimeMillis()
+
     /** Когда последний раз с сервера пришёл хоть один пакет: любое «да» — признак живой сети. */
     @Volatile
     private var lastRxAt: Long = 0L
@@ -161,8 +187,6 @@ class DataPlane(
     /** Сколько раз ПОДРЯД не удалось отправить пакет: несколько подряд = сеть ушла. */
     private val sendFailures = java.util.concurrent.atomic.AtomicInteger(0)
 
-    /** После двух минут тишины keepalive уходит реже (см. [keepaliveIntervalMs]). */
-    private val IDLE_BEFORE_BACKOFF_MS = 120_000L
 
     private val lock = Any()
     private var session: Wg.Session? = null
@@ -286,6 +310,7 @@ class DataPlane(
             tunOutput.write(plain)
             tunOutput.flush()
             bytesDown += plain.size
+            lastUserTrafficAt = System.currentTimeMillis()
         } catch (e: Exception) {
             if (!stopped) log("в tun: ${e.javaClass.simpleName}: ${e.message}")
             stop()
@@ -354,6 +379,7 @@ class DataPlane(
                     val idx = res.peerSenderIndex ?: continue
                     log("handshake за ${System.currentTimeMillis() - startedAt} мс, инициаций: $sent")
                     install(s, idx, initiation.state.senderIndex, initial)
+                    handshakesDone += 1
                     return true
                 }
 
@@ -477,22 +503,30 @@ class DataPlane(
             if (keepaliveSeconds > 0 && now - lastOutboundAt >= keepaliveIntervalMs(now)) {
                 sendKeepalive()
             }
+
+            // Раз в полчаса — честные цифры в журнал: сколько было пробуждений радио и рукопожатий.
+            // Без этого «батарея садится» обсуждается догадками, а не фактами.
+            if (now >= nextStatsAt) {
+                nextStatsAt = now + STATS_EVERY_MS
+                val idle = if (lastUserTrafficAt == 0L) now - startedAt else now - lastUserTrafficAt
+                log(
+                    "$STATS_PREFIX keepalive $keepalivesSent, рукопожатий $handshakesDone, " +
+                        "трафика нет ${idle / 1000} с, " +
+                        Keepalive.describe(keepaliveIntervalMs(now), screenOn(), idle)
+                )
+            }
         }
     }
 
     /**
-     * Как часто слать keepalive. Пока трафик есть — базовый интервал из настроек (по умолчанию 25 с):
-     * на активном соединении лишний пакет дешевле, чем потеря первого входящего.
-     *
-     * Если трафик не шёл дольше двух минут, соединение и так держится пересогласованием (rekey
-     * каждые 120 с заново пробивает NAT), поэтому keepalive можно слать реже — вдвое. На мобильной
-     * сети это ровно то, что жрёт батарею: каждое пробуждение радио стоит около секунды.
+     * Как часто шлём keepalive. Раньше здесь было «интервал из конфига, а после двух минут тишины —
+     * вдвое реже», и это не работало: тишину мерили по `lastOutboundAt`, который обновляет сам же
+     * keepalive, поэтому удвоение не наступало никогда. Теперь решение принимает [Keepalive] по
+     * настоящему простою и состоянию экрана.
      */
     private fun keepaliveIntervalMs(now: Long): Long {
-        val base = (config.persistentKeepalive ?: 0).toLong() * 1000L
-        if (base <= 0L) return Long.MAX_VALUE
-        val idleMs = if (lastOutboundAt == 0L) 0L else now - lastOutboundAt
-        return if (idleMs >= IDLE_BEFORE_BACKOFF_MS) minOf(base * 2, 90_000L) else base
+        val idleMs = if (lastUserTrafficAt == 0L) Long.MAX_VALUE else now - lastUserTrafficAt
+        return Keepalive.intervalMs(config.persistentKeepalive ?: 0, idleMs, screenOn())
     }
 
     private fun sendKeepalive() {
@@ -503,6 +537,7 @@ class DataPlane(
             bytes
         }
         sendTracked(pkt)
+        keepalivesSent += 1
         // Отметку времени ставим даже при ошибке: иначе таймер будет пытаться слать keepalive
         // вплотную, пока сеть не вернётся.
         lastOutboundAt = System.currentTimeMillis()
@@ -564,8 +599,9 @@ class DataPlane(
      * таймеров и пробуждений.
      */
     private fun noteUserPacketSent() {
-        if (stallReported) return
         val now = System.currentTimeMillis()
+        lastUserTrafficAt = now
+        if (stallReported) return
         val sent = burstPackets + 1
         burstPackets = sent
         if (sent == 1) burstStartAt = now
@@ -574,5 +610,16 @@ class DataPlane(
         val reason = StallDetector.explain(now, lastRxAt, burstStartAt, sent)
         log(reason)
         onFatal?.invoke(reason)
+    }
+
+    companion object {
+        /**
+         * Строки с этим префиксом — статистика, а не состояние: сервис пишет их в журнал, но не
+         * выставляет в уведомление, иначе вместо «туннель поднят» там мелькали бы цифры.
+         */
+        const val STATS_PREFIX = "статистика:"
+
+        /** Раз в полчаса — достаточно, чтобы увидеть расход, и мало, чтобы не засорять журнал. */
+        private const val STATS_EVERY_MS = 30 * 60_000L
     }
 }

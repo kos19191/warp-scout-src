@@ -9,6 +9,7 @@ import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import dev.warpscout.app.R
 import dev.warpscout.app.TunnelDebug
@@ -294,6 +295,13 @@ class WarpVpnService : VpnService() {
             settings = NetSettings(
                 attempts = 5, timeoutMs = 1000, retryEveryMs = 400, junkPacketsBeforeHandshake = 1
             ),
+            // Экран решает, как часто будить радио: с погашенным экраном и без трафика keepalive
+            // уходит реже. Сам сервис про экран ничего не решает — только сообщает состояние.
+            screenOn = {
+                runCatching {
+                    (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
+                }.getOrDefault(true)
+            },
             // Сокет перестал отправлять — сеть ушла без уведомления от системы. Переподнимаем.
             onFatal = { reason ->
                 // Сессия умерла (нет ответов/rekey не проходит) — говорим об этом прямо, а не
@@ -310,7 +318,10 @@ class WarpVpnService : VpnService() {
                 postNotification(getString(R.string.notif_active, cfg.endpoint.render()))
             },
             log = { line ->
-                TunnelState.status = line
+                // Статистика расхода — для журнала, в уведомлении ей не место.
+                if (!line.startsWith(dev.warpscout.core.tunnel.DataPlane.STATS_PREFIX)) {
+                    TunnelState.status = line
+                }
                 when {
                     // Пересогласование сессии — штатное событие раз в две минуты, но именно его
                     // отсутствие раньше выглядело как «туннель есть, интернета нет».

@@ -9,6 +9,7 @@ import dev.warpscout.core.lists.AllowLists
 import dev.warpscout.core.lists.ListSide
 import dev.warpscout.core.report.ConfigExport
 import dev.warpscout.core.tunnel.ExitRouter
+import dev.warpscout.core.tunnel.Keepalive
 import dev.warpscout.core.tunnel.StallDetector
 import dev.warpscout.core.tune.CachedPoint
 import dev.warpscout.core.tunnel.IpPacket
@@ -83,6 +84,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         }
         section("быстрый старт подбора") {
             cachedPoint()
+        }
+        section("расход батареи: интервал keepalive") {
+            keepalivePolicy()
         }
         section("состояние сервиса между процессами") {
             serviceState()
@@ -497,6 +501,56 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         check("быстрый старт: открылся хотя бы один ресурс", c.confirmed(3, 9, 1))
         check("быстрый старт: все ресурсы открылись", c.confirmed(3, 9, 9))
         check("быстрый старт: отрицательные числа не считаются успехом", !c.confirmed(-1, 9, 9))
+    }
+
+    /**
+     * Интервал keepalive — главный наш вклад в расход батареи на мобильной сети. Проверяем ровно
+     * то, что важно: активный экран будит радио не реже раза в минуту, лежащий телефон — реже,
+     * а сам пользователь может попросить ещё реже, но не чаще нижней границы.
+     */
+    private fun keepalivePolicy() {
+        val k = Keepalive
+        val active = k.intervalMs(configuredSeconds = 25, idleMs = 0, screenOn = true)
+        check("батарея: на активном экране не чаще раза в минуту", active == Keepalive.ACTIVE_FLOOR_MS, "$active")
+
+        val idle = k.intervalMs(25, idleMs = 300_000, screenOn = false)
+        check("батарея: экран погашен и тишина — полторы минуты", idle == Keepalive.IDLE_SCREEN_OFF_FLOOR_MS, "$idle")
+
+        val idleScreenOn = k.intervalMs(25, idleMs = 300_000, screenOn = true)
+        check("батарея: экран горит — минута даже в тишине", idleScreenOn == Keepalive.ACTIVE_FLOOR_MS, "$idleScreenOn")
+
+        val justIdle = k.intervalMs(25, idleMs = Keepalive.IDLE_AFTER_MS - 1_000, screenOn = false)
+        check("батарея: тишина ещё не наступила — держим минуту", justIdle == Keepalive.ACTIVE_FLOOR_MS, "$justIdle")
+
+        val userWantsRare = k.intervalMs(110, idleMs = 0, screenOn = true)
+        check("батарея: просьбу «реже» уважаем", userWantsRare == 110_000L, "$userWantsRare")
+
+        val tooSlow = k.intervalMs(120, idleMs = 300_000, screenOn = false)
+        check("батарея: дольше двух минут не растягиваем", tooSlow == Keepalive.MAX_MS, "$tooSlow")
+
+        val off = k.intervalMs(0, idleMs = 0, screenOn = true)
+        check("батарея: keepalive выключен — не будим вовсе", off == Long.MAX_VALUE, "$off")
+
+        // Частота за час: было 144 пробуждения (25 с), стало не больше 60/40.
+        val perHourActive = 3_600_000L / active
+        val perHourIdle = 3_600_000L / idle
+        check("батарея: за час активных пробуждений не больше 60", perHourActive <= 60, "$perHourActive")
+        check("батарея: за час в тишине не больше 40", perHourIdle <= 40, "$perHourIdle")
+        check(
+            "батарея: тишина реже активности",
+            perHourIdle < perHourActive,
+            "$perHourIdle против $perHourActive"
+        )
+        check(
+            "батарея: пересогласование успевает до жёсткого предела протокола",
+            NetSettings().rekeyAfterMs < 180_000L,
+            "${NetSettings().rekeyAfterMs}"
+        )
+        check(
+            "батарея: запас на повторные попытки не меньше трёх штук",
+            (180_000L - NetSettings().rekeyAfterMs) / NetSettings().rekeyRetryMs >= 3,
+            "${(180_000L - NetSettings().rekeyAfterMs) / NetSettings().rekeyRetryMs}"
+        )
     }
 
     // ------------------------------------------------- живость сессии по трафику
