@@ -64,7 +64,7 @@ object JunkLibrary {
             // «Без шума» — такой же участник сравнения, как остальные: на части сетей DPI не трогает
             // WireGuard вообще, и тогда любая маскировка только мешает. Раньше этот вариант
             // проверялся лишь для лучшей точки одной запасной конфигурацией.
-            add(none())
+            add(this@JunkLibrary.none())
             add(tlsFixed())
             for ((i, sni) in snis.withIndex()) add(quic(sni, level, seed + i))
             add(sip())
