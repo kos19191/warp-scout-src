@@ -239,6 +239,32 @@ class DataPlane(
     /** Возраст текущей сессии: по нему видно, жива ли она вообще. */
     fun sessionAgeMs(): Long = if (sessionStartedAt == 0L) 0 else System.currentTimeMillis() - sessionStartedAt
 
+    /**
+     * Пересогласование по требованию: «сессия старая, но трафика не было — не буди радио зря».
+     *
+     * Раньше rekey шёл строго по таймеру — каждые 150 секунд даже в полной тишине. За час это 24
+     * рукопожатия, и каждое поднимает модем: сеть отвечает, радио переходит в активное состояние и
+     * висит в нём ещё несколько секунд после ответа. В списке «расход батареи» этого не видно —
+     * там показываются приложения, которые гоняют данные, — а заряд уходит.
+     *
+     * WireGuard в ядре делает так же: пересогласование запускается тогда, когда есть что отправлять.
+     * Поэтому теперь rekey идёт либо по таймеру при живом трафике, либо перед первым пакетом после
+     * простоя.
+     */
+
+    /** Отметки счётчиков на прошлую строку статистики: показываем расход за интервал. */
+    private var keepaliveMark = 0L
+    private var handshakeMark = 0L
+    private var bytesUpMark = 0L
+    private var bytesDownMark = 0L
+
+    /** Один пересогласователь на туннель: таймер и отправитель не должны войти в handshake вдвоём. */
+    private val rekeyLock = Any()
+
+    /** Когда последний раз пытались пересогласовать — чтобы неудача не блокировала отправителя. */
+    @Volatile
+    private var lastRekeyAttemptAt = 0L
+
     /** @return true, если handshake удался и передача шла (поток завершается при stop()). */
     fun run(): Boolean {
         if (localPriv == null || localPub == null) return fail("PrivateKey не разбирается как base64 или короче ${Wg.KEY_LEN} байт")
@@ -251,7 +277,7 @@ class DataPlane(
             } catch (e: InterruptedException) {
                 stopped = true   // штатная остановка
             }
-        }, "warpscout-tunnel-in").apply { isDaemon = true; start() }
+        }, "ws-tun-in").apply { isDaemon = true; start() }
 
         if (!negotiate(initial = true)) {
             log("handshake не прошёл — туннель не поднят")
@@ -269,8 +295,8 @@ class DataPlane(
             } catch (e: InterruptedException) {
                 stopped = true   // штатная остановка, а не сбой
             }
-        }, "warpscout-tunnel-timers").apply { isDaemon = true; start() }
-        val sender = Thread({ tunToUdp() }, "warpscout-tunnel-out").apply { isDaemon = true; start() }
+        }, "ws-tun-timer").apply { isDaemon = true; start() }
+        val sender = Thread({ tunToUdp() }, "ws-tun-out").apply { isDaemon = true; start() }
 
         reader.join()
         sender.join(1000)
@@ -503,6 +529,26 @@ class DataPlane(
     // ---------------------------------------------------------------- таймеры
 
     /**
+     * Пересогласовать сессию. Возвращает true, если новая сессия установлена.
+     *
+     * Вызывается из двух мест: таймера (плановый rekey) и отправителя (первый пакет после простоя).
+     * Замок нужен потому, что handshake — это обмен по общему `handshakeInbox`: два одновременных
+     * вызывающих съели бы ответы друг друга. Повтор чаще, чем раз в `rekeyRetryMs`, не начинаем —
+     * иначе при молчащем сервере отправитель вставал бы на полный таймаут на каждом пакете.
+     */
+    private fun rekey(force: Boolean = false): Boolean {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastRekeyAttemptAt < settings.rekeyRetryMs) return false
+        return synchronized(rekeyLock) {
+            if (stopped) return@synchronized false
+            val again = System.currentTimeMillis()
+            if (!force && again - lastRekeyAttemptAt < settings.rekeyRetryMs) return@synchronized false
+            lastRekeyAttemptAt = again
+            negotiate(initial = false)
+        }
+    }
+
+    /**
      * Rekey и keepalive. Отдельный поток, потому что пересогласование занимает до нескольких
      * секунд и не должно останавливать пересылку.
      */
@@ -522,6 +568,10 @@ class DataPlane(
             } else {
                 Long.MAX_VALUE
             }
+            // Трафик «живой», если пользователь что-то отправлял недавно. В полной тишине сессию не
+            // пересогласовываем: радио за это время успевает уснуть, а модем — не просыпается.
+            val idleFor = if (lastUserTrafficAt == 0L) Long.MAX_VALUE else now - lastUserTrafficAt
+            val idleAndQuiet = idleFor >= settings.rekeyAfterMs
             val nextRekeyAt = if (age >= settings.rekeyAfterMs) now else {
                 val wait = settings.rekeyAfterMs - age
                 if (lastAttemptAt == 0L || now - lastAttemptAt >= settings.rekeyRetryMs) now + wait
@@ -540,13 +590,26 @@ class DataPlane(
                 continue
             }
 
+            if (age >= settings.rekeyAfterMs && idleAndQuiet) {
+                // Планового rekey нет — но и будить радио незачем. Ждём первого пакета: отправитель
+                // попросит пересогласование сам (см. tunToUdp).
+                warnedExpiry = false
+                val sleep = (nextKeepaliveAt - now).coerceIn(250L, 60_000L)
+                try {
+                    Thread.sleep(sleep)
+                } catch (e: InterruptedException) {
+                    return
+                }
+                continue
+            }
+
             if (age >= settings.rekeyAfterMs && now - lastAttemptAt >= settings.rekeyRetryMs) {
                 lastAttemptAt = now
                 if (age >= 180_000 && !warnedExpiry) {
                     warnedExpiry = true
                     log("сессия старше 180 с — сервер её уже мог выбросить, пересогласовываю")
                 }
-                if (!negotiate(initial = false)) {
+                if (!rekey(force = true)) {
                     lastRekeyFailure = failureReason ?: "rekey не удался"
                     rekeyFailures += 1
                     log("rekey не удался: ${lastRekeyFailure}")
@@ -577,14 +640,25 @@ class DataPlane(
             val untilRetry = (lastAttemptAt + settings.rekeyRetryMs) - System.currentTimeMillis()
             if (untilRetry > 0) runCatching { Thread.sleep(untilRetry.coerceAtMost(1_000L)) }
 
-            // Раз в полчаса — честные цифры в журнал: сколько было пробуждений радио и рукопожатий.
+            // Раз в пять минут — честные цифры в журнал: сколько было пробуждений радио и рукопожатий.
             // Без этого «батарея садится» обсуждается догадками, а не фактами.
             if (now >= nextStatsAt) {
                 nextStatsAt = now + STATS_EVERY_MS
                 val idle = if (lastUserTrafficAt == 0L) now - startedAt else now - lastUserTrafficAt
                 val extra = vitals?.invoke().orEmpty()
+                // Цифры за интервал, а не накопленные: «keepalive 30» за час ничего не говорит о
+                // том, что было в эти пять минут.
+                val ka = keepalivesSent - keepaliveMark
+                val hs = handshakesDone - handshakeMark
+                val upKb = (bytesUp - bytesUpMark) / 1024
+                val downKb = (bytesDown - bytesDownMark) / 1024
+                keepaliveMark = keepalivesSent.toLong()
+                handshakeMark = handshakesDone.toLong()
+                bytesUpMark = bytesUp
+                bytesDownMark = bytesDown
                 log(
-                    "$STATS_PREFIX keepalive $keepalivesSent, рукопожатий $handshakesDone, " +
+                    "$STATS_PREFIX за ${STATS_EVERY_MS / 60_000} мин: keepalive $ka, " +
+                        "рукопожатий $hs, вверх $upKb КБ, вниз $downKb КБ, " +
                         "трафика нет ${idle / 1000} с, " +
                         Keepalive.describe(keepaliveIntervalMs(now), screenOn(), idle) +
                         (if (extra.isNotBlank()) ", $extra" else "")
@@ -642,6 +716,11 @@ class DataPlane(
                 runCatching { Thread.sleep(20) }
                 continue
             }
+            // Первый пакет после долгой тишины: сессия, скорее всего, уже выброшена сервером
+            // (REJECT_AFTER_TIME), и отправлять им бессмысленно. Пересогласовываем здесь, на
+            // отправителе: таймер в это время спит и радио не будит, а ожидание ответа (0,2–0,4 с)
+            // случается ровно тогда, когда пользователь и так ждёт загрузки.
+            if (sessionAgeMs() > settings.rekeyAfterMs) rekey()
             // Без копии: буфер tun переиспользуется, а длина передаётся отдельно. Раньше под
             // каждый пакет делался ByteArray(n) только ради того, чтобы «подрезать» буфер.
             val packet: ByteArray? = synchronized(lock) {
@@ -701,6 +780,13 @@ class DataPlane(
         const val STATS_PREFIX = "статистика:"
 
         /** Раз в полчаса — достаточно, чтобы увидеть расход, и мало, чтобы не засорять журнал. */
-        private const val STATS_EVERY_MS = 30 * 60_000L
+        /**
+         * Как часто писать строку статистики.
+         *
+         * Было 30 минут — и по такой строке нельзя было понять, что происходит: за полчаса
+         * смешиваются и простой, и работа, и переподключения. Пять минут дают цифры, по которым
+         * видно, что именно жгло процессор и модем.
+         */
+        private const val STATS_EVERY_MS = 5 * 60_000L
     }
 }

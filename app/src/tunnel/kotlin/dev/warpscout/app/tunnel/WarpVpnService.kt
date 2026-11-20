@@ -104,9 +104,10 @@ class WarpVpnService : VpnService() {
     private fun threadCpuLine(): String {
         val ticks = readThreadCpu() ?: return ""
         val parts = StringBuilder()
-        for ((name, total) in ticks) {
-            val prev = threadCpuMarks[name] ?: total
-            threadCpuMarks[name] = total
+        for ((key, total) in ticks) {
+            val prev = threadCpuMarks[key] ?: total
+            threadCpuMarks[key] = total
+            val name = key.substringAfter('|', key)
             val deltaMs = (total - prev) * 10
             if (deltaMs >= 1_000) parts.append(name).append(' ').append(deltaMs / 1000).append(" с; ")
         }
@@ -125,7 +126,10 @@ class WarpVpnService : VpnService() {
             val utime = tail.getOrNull(11)?.toLongOrNull() ?: continue
             val stime = tail.getOrNull(12)?.toLongOrNull() ?: 0L
             val name = runCatching { java.io.File(task, "comm").readText().trim() }.getOrNull().orEmpty()
-            if (name.isNotEmpty()) out[name] = utime + stime
+            // Ключ — номер потока, а не имя. Ядро отдаёт `comm` обрезанным до 15 символов, и три
+            // потока «warpscout-tunnel-in/-out/-timers» превращались в один ключ: цифры в строке
+            // статистики перезаписывали друг друга и показывали разницу между разными потоками.
+            if (name.isNotEmpty()) out["${task.name}|$name"] = utime + stime
         }
         return out
     }
@@ -382,7 +386,10 @@ class WarpVpnService : VpnService() {
         }
 
         val plane = DataPlane(
-            udp = SocketUdpChannel(socket, cfg.endpoint, 1500),
+            // Таймаут приёма 0 — ждать пакет бесконечно. Было 1500 мс: в тишине поток просыпался
+            // 40 раз в минуту только чтобы посмотреть на часы, и процесс не уходил в глубокий сон.
+            // Остановка и смена сети будят его закрытием сокета, а не таймаутом.
+            udp = SocketUdpChannel(socket, cfg.endpoint, 0),
             tunInput = tunIn,
             tunOutput = tunOut,
             config = cfg,
@@ -477,7 +484,7 @@ class WarpVpnService : VpnService() {
         // и его падение не должно ронять туннель — трафик просто продолжит идти через WARP.
         val secondary = if (lanes.size > 1 && secondCfg != null && secondSock != null) {
             DataPlane(
-                udp = SocketUdpChannel(secondSock, secondCfg.endpoint, 1500),
+                udp = SocketUdpChannel(secondSock, secondCfg.endpoint, 0),
                 tunInput = lanes[1],
                 tunOutput = tunOut,
                 config = secondCfg,
