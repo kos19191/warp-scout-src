@@ -181,14 +181,16 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # AGP создаёт debug-ключ в ~/.android, если его нет. На свежем раннере он каждый раз
-      # новый → APK не ставится «поверх» предыдущей версии. Кэш с постоянным ключом фиксирует
-      # подпись, и обновления на телефоне ставятся обычным «Установить».
-      - name: "Постоянный debug-ключ (чтобы APK ставился поверх прошлой версии)"
-        uses: actions/cache@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: warpscout-debug-keystore-v1
+      # Ключ подписи лежит в репозитории (app/debug.keystore) и одинаков во всех сборках.
+      # Раньше его «фиксировали» кешем GitHub Actions: кеш истекает после недели простоя,
+      # на следующей сборке создавался новый ключ, и обновление на телефоне переставало
+      # ставиться. Теперь стабильность подписи проверяется прямо в логе сборки.
+      - name: "Проверка ключа подписи"
+        run: |
+          set -o pipefail
+          test -f app/debug.keystore || { echo "::error title=подпись::нет app/debug.keystore"; exit 1; }
+          keytool -list -v -keystore app/debug.keystore -storetype PKCS12 \
+            -storepass "${WARPSCOUT_STOREPASS:-warpscout}" 2>&1 | tee /tmp/keytool.log | grep -E "Alias|SHA256|Valid"
 
       - name: "Ресурсы и форматные строки (без SDK)"
         run: |
