@@ -1,15 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Знак WarpScout: щит и лиса в анфас, из простых геометрических фигур.
+  Знак WarpScout: щит с мордой лисы в анфас, из простых геометрических фигур.
 
-  Почему так. Щит — это туннель и защита, лиса — разведка (scout), и вместе они читаются
-  с одного взгляда даже в 48dp. Никаких градиентов и мелких деталей: три цвета (рыжий,
-  почти чёрный, белый), крупные формы. Всё, что рисуется, умещается в безопасный круг
-  диаметром 66dp из 108dp — поэтому адаптивная маска (круг, квадрат со скруглением, капля)
-  ничего не обрезает.
+  Из чего собрано:
+    • щит — рыжая кромка, тёмный зазор и почти чёрное поле (кромка + зазор = один контур
+      с правилом evenOdd, поэтому «зазор» — это настоящая дырка, а не подкраска под фон:
+      знак одинаково выглядит и на тёмной иконке, и на светлой карточке в приложении);
+    • поле — два оттенка, левая половина светлее: это даёт объём без градиентов;
+    • лиса — рыжая голова с острыми скулами, белые клинья-«усы», белая морда, тёмные глаза
+      и нос; белое в ушах — тонкие прожилки.
 
-  Белое здесь — только «тень-блик»: узкая полоса по левому краю щита и морда. Больше
-  белого не нужно, иначе знак начинает выглядеть как чужая иконка.
+  Три цвета: рыжий #F6821F, почти чёрный #1E1813, белый. Всё содержимое сжато группой до
+  безопасного круга 66dp из 108dp, поэтому адаптивная маска (круг, квадрат со скруглением,
+  капля) ничего не срезает.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
@@ -17,53 +20,71 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Тень под щитом: на светлом фоне даёт объём, на тёмном почти незаметна. -->
-    <path
-        android:fillColor="#000000"
-        android:fillAlpha="0.28"
-        android:pathData="M30,33.2 H78 V54 C78,68.5 66,78.6 54,82.6 C42,78.6 30,68.5 30,54 Z" />
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.82"
+        android:scaleY="0.82">
 
-    <!-- Тело щита. -->
-    <path
-        android:fillColor="#F6821F"
-        android:pathData="M30,32 H78 V54 C78,68 66,78 54,82 C42,78 30,68 30,54 Z" />
+        <!-- Кромка щита: внешний контур без внутреннего (evenOdd). -->
+        <path
+            android:fillColor="#F6821F"
+            android:fillType="evenOdd"
+            android:pathData="M26.5,25 L81.5,25 L81.5,50.62 C81.5,72.56 71.05,83 54,86 C36.95,83 26.5,72.56 26.5,50.62 Z M30.5,30 L77.5,30 L77.5,51.63 C77.5,70.15 68.57,78.5 54,81.5 C39.43,78.5 30.5,70.15 30.5,51.63 Z" />
 
-    <!-- Блик по левому краю: «немного тени белым». -->
-    <path
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="2.2"
-        android:strokeAlpha="0.35"
-        android:strokeLineCap="round"
-        android:pathData="M33,37 V54 C33,65 43,74 54,78.4" />
+        <!-- Поле: две половины разного оттенка. -->
+        <path
+            android:fillColor="#1B1611"
+            android:pathData="M54,30.5 L31,30.5 L31,51.71 C31,69.87 39.74,78 54,81 Z" />
+        <path
+            android:fillColor="#241C15"
+            android:pathData="M54,30.5 L77,30.5 L77,51.71 C77,69.87 68.26,78 54,81 Z" />
 
-    <!-- Уши: два узких треугольника, отдельно от головы, чтобы силуэт читался. -->
-    <path
-        android:fillColor="#16130F"
-        android:pathData="M43.5,32.5 L49.5,44 L40,46 Z" />
-    <path
-        android:fillColor="#16130F"
-        android:pathData="M64.5,32.5 L58.5,44 L68,46 Z" />
+        <!-- Уши. -->
+        <path
+            android:fillColor="#F6821F"
+            android:pathData="M40,36 L47,52 L35,57 Z" />
+        <path
+            android:fillColor="#F6821F"
+            android:pathData="M68,36 L61,52 L73,57 Z" />
 
-    <!-- Голова: ромб с вытянутым подбородком. -->
-    <path
-        android:fillColor="#16130F"
-        android:pathData="M45,45 L63,45 L60,58 L54,72 L48,58 Z" />
+        <!-- Голова с острыми скулами. -->
+        <path
+            android:fillColor="#F6821F"
+            android:pathData="M54,43 L64,51 L68,59 L62,61 L54,79 L46,61 L40,59 L44,51 Z" />
 
-    <!-- Морда. -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M48.5,58.5 L59.5,58.5 L54,68.5 Z" />
+        <!-- Белые клинья-«усы». -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M45.5,57 L48.5,62 L37,63 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M62.5,57 L59.5,62 L71,63 Z" />
 
-    <!-- Глаза: ромбы, цвет щита — так они видны на чёрной голове. -->
-    <path
-        android:fillColor="#F6821F"
-        android:pathData="M50,50.6 L52.2,52.6 L50,54.6 L47.8,52.6 Z" />
-    <path
-        android:fillColor="#F6821F"
-        android:pathData="M58,50.6 L60.2,52.6 L58,54.6 L55.8,52.6 Z" />
+        <!-- Морда. -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M48.8,62.5 L59.2,62.5 L54,77.5 Z" />
 
-    <!-- Нос. -->
-    <path
-        android:fillColor="#16130F"
-        android:pathData="M52.4,62.6 L55.6,62.6 L54,65.6 Z" />
+        <!-- Прожилки в ушах. -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M42,43 L45,50.5 L40,53 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M66,43 L63,50.5 L68,53 Z" />
+
+        <!-- Глаза. -->
+        <path
+            android:fillColor="#1B1611"
+            android:pathData="M47.6,52 L50.6,54.7 L47.6,57.4 L44.6,54.7 Z" />
+        <path
+            android:fillColor="#1B1611"
+            android:pathData="M60.4,52 L63.4,54.7 L60.4,57.4 L57.4,54.7 Z" />
+
+        <!-- Нос. -->
+        <path
+            android:fillColor="#1B1611"
+            android:pathData="M51.6,67 L56.4,67 L54,71 Z" />
+    </group>
 </vector>

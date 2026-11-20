@@ -267,29 +267,28 @@
                             android:textAppearance="?attr/textAppearanceLabelLarge"
                             android:textColor="?attr/colorOnSurfaceVariant" />
 
-                        <LinearLayout
+                        <!--
+                          Обе кнопки — одного вида и во всю ширину, друг под другом: раньше
+                          «Восстановить последний» была текстовой кнопкой в половину строки,
+                          подпись не влезала и обрезалась, а рядом с рамкой выглядела как текст.
+                        -->
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnBackup"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
                             android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
+                            android:layout_height="@dimen/button_secondary"
                             android:layout_marginTop="@dimen/space_s"
-                            android:orientation="horizontal">
+                            android:text="@string/btn_backup"
+                            android:textSize="14sp" />
 
-                            <com.google.android.material.button.MaterialButton
-                                android:id="@+id/btnBackup"
-                                style="@style/Widget.Material3.Button.OutlinedButton"
-                                android:layout_width="0dp"
-                                android:layout_height="@dimen/button_secondary"
-                                android:layout_weight="1"
-                                android:text="@string/btn_backup" />
-
-                            <com.google.android.material.button.MaterialButton
-                                android:id="@+id/btnRestore"
-                                style="@style/Widget.Material3.Button.TextButton"
-                                android:layout_width="0dp"
-                                android:layout_height="@dimen/button_secondary"
-                                android:layout_marginStart="@dimen/space_s"
-                                android:layout_weight="1"
-                                android:text="@string/btn_restore" />
-                        </LinearLayout>
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnRestore"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/button_secondary"
+                            android:layout_marginTop="@dimen/space_xs"
+                            android:text="@string/btn_restore"
+                            android:textSize="14sp" />
 
                         <TextView
                             style="@style/Text.Caption"
@@ -973,41 +972,42 @@
                     android:text="@string/apps_note"
                     android:textAppearance="?attr/textAppearanceBodySmall" />
 
-                <com.google.android.material.button.MaterialButtonToggleGroup
+                <!--
+                  Три режима списком, а не тесной группой из трёх кнопок: подписи вроде
+                  «Только выбранные» в треть ширины не влезали и обрезались. Здесь каждая
+                  строка во всю ширину и нажимается целиком.
+                -->
+                <RadioGroup
                     android:id="@+id/appsGroup"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    app:selectionRequired="true"
-                    app:singleSelection="true">
+                    android:orientation="vertical">
 
-                    <com.google.android.material.button.MaterialButton
+                    <com.google.android.material.radiobutton.MaterialRadioButton
                         android:id="@+id/btnAppsAll"
-                        style="?attr/materialButtonOutlinedStyle"
-                        android:layout_width="0dp"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:textSize="11sp"
-                        android:text="@string/apps_all" />
+                        android:minHeight="48dp"
+                        android:text="@string/apps_all"
+                        android:textSize="15sp" />
 
-                    <com.google.android.material.button.MaterialButton
+                    <com.google.android.material.radiobutton.MaterialRadioButton
                         android:id="@+id/btnAppsOnly"
-                        style="?attr/materialButtonOutlinedStyle"
-                        android:layout_width="0dp"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:textSize="11sp"
-                        android:text="@string/apps_only" />
+                        android:minHeight="48dp"
+                        android:text="@string/apps_only"
+                        android:textSize="15sp" />
 
-                    <com.google.android.material.button.MaterialButton
+                    <com.google.android.material.radiobutton.MaterialRadioButton
                         android:id="@+id/btnAppsExcept"
-                        style="?attr/materialButtonOutlinedStyle"
-                        android:layout_width="0dp"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:textSize="11sp"
-                        android:text="@string/apps_except" />
-                </com.google.android.material.button.MaterialButtonToggleGroup>
+                        android:minHeight="48dp"
+                        android:text="@string/apps_except"
+                        android:textSize="15sp" />
+                </RadioGroup>
 
                 <TextView
                     android:id="@+id/textAppsState"

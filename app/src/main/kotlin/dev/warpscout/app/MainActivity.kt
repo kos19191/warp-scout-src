@@ -420,8 +420,8 @@ class MainActivity : AppCompatActivity() {
      */
     private fun setupApps() {
         refreshInstalledApps()
-        binding.appsGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
-            if (!isChecked) return@addOnButtonCheckedListener
+        binding.appsGroup.setOnCheckedChangeListener { _, checkedId ->
+            if (checkedId == View.NO_ID) return@setOnCheckedChangeListener
             prefs.appsMode = appsModeOf(checkedId)
             updateAppsState()
             markSettingsDirty(getString(R.string.dirty_apps_mode))
@@ -479,6 +479,9 @@ class MainActivity : AppCompatActivity() {
     private fun rebuildAppsList() {
         binding.appsBox.removeAllViews()
         appChecks.clear()
+        // В режиме «все приложения» список не нужен: не тратим время на getApplicationLabel
+        // для сотни пакетов и не показываем то, что ни на что не влияет.
+        if (prefs.appsMode == Prefs.APPS_ALL) return
         val query = binding.editAppSearch.text?.toString()?.trim()?.lowercase().orEmpty()
         val showSystem = binding.checkAppsSystem.isChecked
         val selected = prefs.appsSelected
@@ -539,6 +542,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateAppsState() {
+        // Список нужен только там, где есть что выбирать. В режиме «все приложения» он
+        // ничего не переключает, но занимает пол-экрана и выглядит как рабочая настройка —
+        // поэтому прячем его целиком: поиск, «системные», сам список.
+        val needsList = prefs.appsMode != Prefs.APPS_ALL
+        binding.tilAppSearch.visibility = if (needsList) View.VISIBLE else View.GONE
+        binding.checkAppsSystem.visibility = if (needsList) View.VISIBLE else View.GONE
+        binding.appsBox.visibility = if (needsList) View.VISIBLE else View.GONE
+        if (!needsList) {
+            binding.appsBox.removeAllViews()
+        } else if (binding.appsBox.childCount == 0) {
+            rebuildAppsList()
+        }
         val selected = prefs.appsSelected
         binding.textAppsState.text = when (prefs.appsMode) {
             Prefs.APPS_ONLY ->
@@ -820,6 +835,17 @@ class MainActivity : AppCompatActivity() {
             markSettingsDirty(getString(R.string.dirty_second_exit))
         }
         binding.btnSecondResolve.setOnClickListener { resolveSecondDomains() }
+        // Конфиг второго выхода вставляют копипастом: пока он не разобран, включённый
+        // переключатель ничего не значит. Поэтому состояние пересчитываем сразу, а не
+        // после «Сохранить и применить».
+        binding.editSecondConf.doAfterTextChanged {
+            prefs.secondConf = it?.toString()?.trim().orEmpty()
+            updateSecondState()
+        }
+        binding.editSecondDomains.doAfterTextChanged {
+            prefs.secondDomains = it?.toString().orEmpty()
+            updateSecondState()
+        }
 
         binding.btnSaveAndApply.setOnClickListener { saveAndApply(getString(R.string.dirty_config)) }
         binding.btnSaveAndSend.setOnClickListener { saveAndSend() }
@@ -1147,8 +1173,12 @@ class MainActivity : AppCompatActivity() {
         }.getOrNull()
         binding.textSecondState.text = when {
             !prefs.secondExitOn -> getString(R.string.second_off)
+            // Конфиг вставлен, но не разбирается — это единственная ошибка, которую человек
+            // не увидит сам: переключатель включён, а сервера фактически нет.
+            prefs.secondConf.isBlank() -> getString(R.string.second_need_conf)
+            server == null -> getString(R.string.second_bad_conf)
             cidrs == 0 -> getString(R.string.second_need_cidrs)
-            else -> getString(R.string.second_on_summary, domains, cidrs, server ?: "—") +
+            else -> getString(R.string.second_on_summary, domains, cidrs, server) +
                 "\n" + getString(R.string.second_apply_note)
         }
     }
