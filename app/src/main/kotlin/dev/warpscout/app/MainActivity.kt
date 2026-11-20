@@ -1739,9 +1739,15 @@ class MainActivity : AppCompatActivity() {
         return (listOfNotNull(first) + ordered).take(MAX_ENDPOINT_TRIES)
     }
 
-    /** Ключ точки для памяти о неудачах: адрес, порт и профиль шума. */
+    /**
+     * Ключ точки: адрес, порт и профиль шума.
+     *
+     * MTU сюда намеренно не входит. В журнале было видно, как перебор дважды подряд шёл на один и
+     * тот же адрес с одним и тем же шумом — конфиги отличались только MTU (1280 против 1420), и
+     * второй заход стоил ещё пяти секунд ожидания. Для handshake это одна и та же точка.
+     */
     private fun pointKey(cfg: WarpConfig): String =
-        cfg.endpoint.render() + "|" + cfg.junk.name + "|" + cfg.mtu
+        cfg.endpoint.render() + "|" + cfg.junk.name
 
     /** «Другая точка входа»: следующая из очереди, сразу с переподключением. */
     private fun nextEndpoint() {
