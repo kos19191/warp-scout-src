@@ -245,10 +245,6 @@ class Prefs(private val context: Context) {
         get() = sp.getLong("lastTunedAt", 0L)
         set(v) = sp.edit().putLong("lastTunedAt", v).apply()
 
-    /**
-     * Последний конфиг, которым поднимали туннель (текст WireGuard/AmneziaWG). Нужен плитке
-     * быстрых настроек: она подключает «то же, что в прошлый раз», не собирая конфиг заново.
-     */
     /** Последняя точка входа, которая реально поднялась: её пробуем раньше «сегодняшней». */
     var lastEndpoint: String
         get() = sp.getString("lastEndpoint", "").orEmpty()
@@ -259,6 +255,19 @@ class Prefs(private val context: Context) {
         get() = sp.getString("lastExitRegion", "").orEmpty()
         set(v) = sp.edit().putString("lastExitRegion", v).apply()
 
+    /**
+     * Какой конфиг из тройки сейчас работает (`host:port|шум`). Отдельно от [lastConfigText]:
+     * текст последнего конфига зависит от выбранного клиента (Amnezia/WireGuard/Clash), и сравнивать
+     * его с записью в списке напрямую нельзя — активная строка переставала бы подсвечиваться.
+     */
+    var shortlistActive: String
+        get() = sp.getString("shortlistActive", "").orEmpty()
+        set(v) = sp.edit().putString("shortlistActive", v).apply()
+
+    /**
+     * Последний конфиг, которым поднимали туннель (текст WireGuard/AmneziaWG). Нужен плитке
+     * быстрых настроек: она подключает «то же, что в прошлый раз», не собирая конфиг заново.
+     */
     var lastConfigText: String
         get() = sp.getString("lastConfigText", "").orEmpty()
         set(v) = sp.edit().putString("lastConfigText", v).apply()

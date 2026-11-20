@@ -187,6 +187,21 @@
     <string name="banner_connect_ok">Туннель поднят: %1$s</string>
     <string name="banner_connect_failed">Не удалось подключиться (%1$d попыток): %2$s</string>
     <string name="banner_stopped">Туннель отключён</string>
+
+    <!-- топ-3 подобранных конфигов -->
+    <string name="top3_title">Лучшие конфиги</string>
+    <string name="top3_hint">Три точки из последнего подбора. Нажми на любую, чтобы переключиться на неё без нового скана.</string>
+    <string name="top3_forget">Забыть список</string>
+    <string name="top3_forgotten">Список лучших конфигов очищен</string>
+    <string name="top3_row">%1$d) %2$s · шум %3$s</string>
+    <string name="top3_row_detail">%1$s · проверен %2$s назад</string>
+    <string name="top3_row_unknown">изнутри не проверялся</string>
+    <string name="top3_row_active">активен</string>
+    <string name="top3_row_other_network">другая сеть</string>
+    <string name="top3_switching">Переключаюсь на %1$s</string>
+    <string name="top3_res">открылось %1$d из %2$d</string>
+    <string name="top3_already">Этот конфиг уже работает</string>
+    <string name="top3_broken">Запись испорчена — убираю её из списка</string>
     <string name="routes_spinner_label">Что туннелировать (попадает в AllowedIPs конфига)</string>
     <string name="routes_dropdown_hint">Выбранный режим превращается в строку AllowedIPs в конфиге: «весь трафик» → 0.0.0.0/0, ::/0; «список обхода» → готовый набор CIDR; «свой список» → ровно то, что вписано ниже. Именно эти CIDR и увидит любой клиент, которому вы отправите конфиг.</string>
     <string name="route_all_dd">Весь трафик — 0.0.0.0/0, ::/0</string>

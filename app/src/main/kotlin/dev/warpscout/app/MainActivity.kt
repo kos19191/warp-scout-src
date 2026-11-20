@@ -13,6 +13,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.checkbox.MaterialCheckBox
+import com.google.android.material.radiobutton.MaterialRadioButton
 import com.google.android.material.tabs.TabLayout
 import dev.warpscout.app.databinding.ActivityMainBinding
 import dev.warpscout.app.status.ServiceSettingsStore
@@ -80,6 +81,9 @@ class MainActivity : AppCompatActivity() {
     private var exitRegion = ""
     private var settingsReconnect: Runnable? = null
 
+    /** Тройка подобранных конфигов, показанная сейчас (в порядке «лучший → третий»). */
+    private var shortlistEntries: List<ConfigShortlist.Entry> = emptyList()
+
     /** Пока true — переподключение по настройкам не затевается (идёт заполнение экрана из Prefs). */
     private var suppressSettingsReconnect = false
 
@@ -106,6 +110,7 @@ class MainActivity : AppCompatActivity() {
         buildListsChecks()
         refreshRoutesState()
         updateEndpointNote()
+        renderShortlist()
         askNotificationPermission()
         CrashLog.lastCrash(this)?.let { crash ->
             banner(getString(R.string.banner_last_crash), error = true)
@@ -146,6 +151,7 @@ class MainActivity : AppCompatActivity() {
         updateAppsState()
         updateTunnelButton()
         updateTunnelDiagnostics()
+        renderShortlist()
         showKeys()
     }
 
@@ -782,6 +788,14 @@ class MainActivity : AppCompatActivity() {
             updateScheduleNote()
         }
 
+        binding.btnTop3Forget.setOnClickListener {
+            // Список — подсказка из прошлого скана, а не настройка: убрать его должно быть так же
+            // просто, как он появился. Следующий подбор соберёт новый.
+            ConfigShortlist.forget(this)
+            renderShortlist()
+            banner(getString(R.string.top3_forgotten))
+        }
+
         binding.btnBackup.setOnClickListener {
             persistUi()
             val file = Backup.save(this, getString(R.string.backup_note_manual))
@@ -957,6 +971,7 @@ class MainActivity : AppCompatActivity() {
         renderResources(result.report.resources)
         binding.textReport.text = runCatching { Report.toMarkdown(result.report) }
             .getOrElse { getString(R.string.report_broken, it.message.orEmpty()) }
+        renderShortlist()
         lastConfigFile = engine.storedConfigFile ?: best?.let { cfg ->
             runCatching { File(ConfigFiles.dir(this, "configs"), ConfigExport.filename(cfg)) }
                 .getOrNull()?.takeIf { it.exists() }
@@ -1089,6 +1104,96 @@ class MainActivity : AppCompatActivity() {
             s < 3600 -> getString(R.string.duration_min, (s / 60).toInt())
             else -> getString(R.string.duration_hours, (s / 3600).toInt(), ((s % 3600) / 60).toInt())
         }
+    }
+
+    // ------------------------------------------- топ-3 подобранных конфигов
+
+    /**
+     * «Чем заменить текущую точку»: три конфига из последнего подбора. Строим вручную, а не через
+     * адаптер — строк максимум три, зато каждая должна выглядеть как выбор, а не как текст: работающая
+     * сейчас отмечена, остальные доступны одним нажатием.
+     */
+    private fun renderShortlist() {
+        if (!::binding.isInitialized) return
+        val entries = runCatching { ConfigShortlist.load(this) }.getOrDefault(emptyList())
+        shortlistEntries = entries
+        if (entries.isEmpty()) {
+            binding.cardTop3.visibility = View.GONE
+            binding.groupTop3.removeAllViews()
+            return
+        }
+        binding.cardTop3.visibility = View.VISIBLE
+        val network = runCatching { TuningCache.transportOf(this) }.getOrDefault("")
+        // Отметка «активен» имеет смысл только при поднятом туннеле: иначе строка врёт.
+        val up = runCatching { tunnel.isUp }.getOrDefault(false)
+        binding.groupTop3.removeAllViews()
+        val lp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+        for ((i, entry) in entries.withIndex()) {
+            val active = up && ConfigShortlist.isActive(entry, prefs)
+            val row = MaterialRadioButton(this)
+            row.id = View.generateViewId()
+            row.text = shortlistRowText(i, entry, network, active)
+            row.textSize = 14f
+            row.setPadding(0, 8, 0, 8)
+            row.isChecked = active
+            // Нажатие на уже выбранную строку тоже обрабатываем: «переподключиться к ней» — законное
+            // желание, если туннель отвалился, а RadioGroup сам по себе повторный выбор не заметит.
+            row.setOnClickListener { switchToShortlist(entry) }
+            binding.groupTop3.addView(row, lp)
+        }
+    }
+
+    /** Две строки в одной: кто это и насколько он хорош. Ширины хватает, длинный шум переносится. */
+    private fun shortlistRowText(
+        index: Int,
+        entry: ConfigShortlist.Entry,
+        network: String,
+        active: Boolean
+    ): String {
+        val header = getString(R.string.top3_row, index + 1, entry.endpoint, entry.junk)
+        val result = if (entry.resourcesOk >= 0 && entry.resourcesTotal > 0) {
+            getString(R.string.top3_res, entry.resourcesOk, entry.resourcesTotal)
+        } else {
+            getString(R.string.top3_row_unknown)
+        }
+        val age = humanDuration((System.currentTimeMillis() - entry.savedAt).coerceAtLeast(0L))
+        val detail = StringBuilder(getString(R.string.top3_row_detail, result, age))
+        if (active) detail.append(" · ").append(getString(R.string.top3_row_active))
+        if (entry.network.isNotBlank() && network.isNotBlank() && entry.network != network) {
+            detail.append(" · ").append(getString(R.string.top3_row_other_network))
+        }
+        return header + "\n" + detail
+    }
+
+    /**
+     * Переключение на один из трёх: тот же путь, что и «Включить туннель», поэтому работает и когда
+     * туннель уже поднят (он перезапускается), и когда выключен.
+     */
+    private fun switchToShortlist(entry: ConfigShortlist.Entry) {
+        if (!tunnel.supported) {
+            banner(getString(R.string.tunnel_unavailable), error = true)
+            return
+        }
+        val cfg = ConfigShortlist.config(entry)
+        if (cfg == null) {
+            // Испорченную запись не оставляем: иначе нажатие «переключиться» просто ничего не делает.
+            val rest = shortlistEntries.filter { it !== entry }
+            if (rest.isEmpty()) ConfigShortlist.forget(this) else ConfigShortlist.save(this, rest)
+            renderShortlist()
+            banner(getString(R.string.top3_broken), error = true)
+            return
+        }
+        if (tunnel.isUp && ConfigShortlist.isActive(entry, prefs)) {
+            banner(getString(R.string.top3_already))
+            return
+        }
+        if (!tunnel.ensurePermission(this)) return
+        TunnelDebug.stage("переключение из топа: ${entry.endpoint} · шум ${entry.junk}")
+        banner(getString(R.string.top3_switching, entry.endpoint))
+        connectWithFallback(cfg)
     }
 
     // ------------------------------------------------ экспорт/сервер/каналы
@@ -1260,6 +1365,7 @@ class MainActivity : AppCompatActivity() {
             tunnel.stop()
             tunnelStartedAtLocal = 0L
             binding.btnTunnel.setText(R.string.btn_tunnel_on)
+            renderShortlist()
             banner(getString(R.string.banner_stopped))
             return
         }
@@ -1326,8 +1432,11 @@ class MainActivity : AppCompatActivity() {
                     prefs.endpointCursor = 0
                     prefs.lastConfigText = runCatching { WgConf.render(used) }.getOrDefault("")
                     prefs.lastEndpoint = used.endpoint.render()
+                    // Какой строке из топа соответствует работающий туннель (точка + профиль шума).
+                    prefs.shortlistActive = used.endpoint.render() + "|" + used.junk.name
                     tunnelStartedAtLocal = System.currentTimeMillis()
                     exitRegion = ""
+                    renderShortlist()
                     updateEndpointNote()
                     banner(getString(R.string.banner_connect_ok, used.endpoint.render()))
                     // Бекап «на всякий случай»: после каждого удачного подключения, молча.

@@ -41,7 +41,9 @@ import dev.warpscout.core.presets.RoutePresets
 import dev.warpscout.core.report.Report
 import dev.warpscout.core.state.ServiceSettings
 import dev.warpscout.core.state.TunnelStatus
+import dev.warpscout.core.model.Candidate
 import dev.warpscout.core.tune.Scoring
+import dev.warpscout.core.tune.Shortlist
 import dev.warpscout.core.tune.Weights
 import dev.warpscout.core.wg.Wg
 
@@ -84,6 +86,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         }
         section("быстрый старт подбора") {
             cachedPoint()
+        }
+        section("топ-3 конфига для переключения") {
+            shortlistPick()
         }
         section("расход батареи: интервал keepalive") {
             keepalivePolicy()
@@ -525,6 +530,52 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         check("быстрый старт: открылся хотя бы один ресурс", c.confirmed(3, 9, 1))
         check("быстрый старт: все ресурсы открылись", c.confirmed(3, 9, 9))
         check("быстрый старт: отрицательные числа не считаются успехом", !c.confirmed(-1, 9, 9))
+    }
+
+    /**
+     * Топ-3 для переключения. Проверяем не «функция вернула три элемента», а два свойства, из-за
+     * которых список вообще имеет смысл: варианты стоят на разных адресах (иначе сеть режет их
+     * вместе) и первым идёт тот, что реально пускал трафик, а не просто отвечал на handshake.
+     */
+    private fun shortlistPick() {
+        fun cand(host: String, port: Int, junk: String, score: Int, replies: Int = 1, ok: Int = -1, total: Int = 0): Candidate {
+            val cfg = WarpConfig(
+                name = "тест",
+                account = WarpAccount("a=", "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=", "172.16.0.2", "2606::1"),
+                endpoint = Endpoint(host, port),
+                junk = if (junk == "none") JunkLibrary.none() else JunkLibrary.tlsFixed(),
+                allowedIps = "0.0.0.0/0, ::/0"
+            )
+            val st = EndpointStats(cfg.endpoint, emptyList(), Verdict.HANDSHAKE_OK, replies, 1)
+            return Candidate(cfg, st, Scoring.evaluate(st, replies > 0, ok.coerceAtLeast(0), total), emptyList(), ok, total)
+        }
+
+        val a = cand("162.159.192.1", 2408, "tls-fixed", 900, ok = 9, total = 9)
+        val b = cand("162.159.192.1", 2408, "none", 950, ok = 4, total = 9)      // та же точка, другой шум
+        val c = cand("188.114.97.1", 500, "tls-fixed", 800, ok = 7, total = 9)
+        val d = cand("162.159.195.1", 1701, "tls-fixed", 700, ok = 5, total = 9)
+        val dead = cand("188.114.99.1", 2408, "tls-fixed", -500, replies = 0, ok = -1, total = 0)
+
+        val top = Shortlist.pick(listOf(dead, d, b, c, a))
+        expect("топ-3: ровно три варианта", top.size, Shortlist.LIMIT)
+        expect("топ-3: первым — где открылось больше всего", top.first().config.endpoint.render(), "162.159.192.1:2408")
+        expect("топ-3: на первом месте тот же адрес, но с лучшим результатом изнутри", top.first().resourcesOk, 9)
+        check("топ-3: сначала разные адреса, а не три профиля на одном",
+            top.map { it.config.endpoint.render() }.distinct().size == 3,
+            top.joinToString { it.config.endpoint.render() + "/" + it.junk.name })
+        check("топ-3: мёртвая точка не предлагается", top.none { it.config.endpoint.port == 2408 && it.stats.replies == 0 })
+
+        // Если точек меньше трёх — добираем профилями шума, но не повторяем один и тот же вариант.
+        val two = Shortlist.pick(listOf(a, b), limit = 3)
+        expect("топ-3: при двух точках добирается вторым профилем шума", two.size, 2)
+        expect("топ-3: варианты не повторяются", two.map { it.config.endpoint.render() + "/" + it.junk.name }.distinct().size, 2)
+
+        // Непроверенное изнутри не должно обгонять проверенное, даже если балл выше.
+        val unverified = cand("162.159.198.2", 443, "tls-fixed", 990, replies = 2, ok = -1, total = 0)
+        val ordered = Shortlist.pick(listOf(unverified, c), limit = 1)
+        expect("топ-3: проверенный изнутри выше более «балльного»", ordered.single().resourcesOk, 7)
+
+        check("топ-3: пустой отчёт не ломает отбор", Shortlist.pick(emptyList()).isEmpty())
     }
 
     /**

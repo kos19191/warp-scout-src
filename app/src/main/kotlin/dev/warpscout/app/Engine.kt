@@ -15,6 +15,7 @@ import dev.warpscout.core.report.Report
 import dev.warpscout.core.tune.AutoTuner
 import dev.warpscout.core.tune.ProgressSink
 import dev.warpscout.core.tune.TuningResult
+import dev.warpscout.core.tune.Shortlist
 import dev.warpscout.core.tune.TuningSpec
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -179,6 +180,41 @@ class Engine(private val context: Context) {
             }
         }
 
+        // 2b) Топ-3: не только победитель, но и две готовые замены. Сеть режет адреса выборочно и
+        // без предупреждения — «переключиться на второй» должно быть нажатием, а не новым сканом.
+        runCatching {
+            val picked = Shortlist.pick(result.report.candidates)
+            val network = TuningCache.transportOf(context)
+            val savedAt = System.currentTimeMillis()
+            val entries = picked.mapNotNull { cand ->
+                val composed = ConfigComposer.applyPrefs(cand.config, prefs, prefs.junkPool)
+                // Ручной сервер из настроек свёл бы всю тройку в один адрес, и список замен стал бы
+                // бесполезным: три строки, которые падают вместе. В тройке остаётся адрес подбора —
+                // именно он и есть альтернатива текущей точке.
+                val restoreEndpoint = if (composed.endpoint != cand.config.endpoint) {
+                    composed.copy(endpoint = cand.config.endpoint)
+                } else {
+                    composed
+                }
+                val text = ConfigComposer.render(restoreEndpoint, prefs)
+                if (text.isBlank()) return@mapNotNull null
+                ConfigShortlist.Entry(
+                    endpoint = restoreEndpoint.endpoint.render(),
+                    junk = restoreEndpoint.junk.name,
+                    score = cand.score,
+                    resourcesOk = cand.resourcesOk,
+                    resourcesTotal = cand.resourcesTotal,
+                    configText = text,
+                    savedAt = savedAt,
+                    network = network
+                )
+            }.distinctBy { it.endpoint + "|" + it.junk }
+            if (entries.isNotEmpty()) {
+                ConfigShortlist.save(context, entries)
+                sink.log("топ-${entries.size} для переключения: " + entries.joinToString { it.endpoint })
+            }
+        }
+
         // 3) Авто-применение: либо по галочке, либо восстанавливаем только что остановленный туннель.
         val best = result.best
         if (best != null && tunnel.supported) {
@@ -194,6 +230,7 @@ class Engine(private val context: Context) {
                         prefs.lastConfigText = runCatching { WgConf.render(withRoutes) }
                             .getOrDefault(prefs.lastConfigText)
                         prefs.lastEndpoint = withRoutes.endpoint.render()
+                        prefs.shortlistActive = withRoutes.endpoint.render() + "|" + withRoutes.junk.name
                         sink.log("туннель поднят на подобранном конфиге: ${withRoutes.endpoint.render()}")
                     } else {
                         val why = tunnel.lastError() ?: tunnel.status

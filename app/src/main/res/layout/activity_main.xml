@@ -85,6 +85,52 @@
                     android:layout_marginTop="12dp"
                     android:textAppearance="?attr/textAppearanceTitleMedium" />
 
+                <!-- ── топ-3 подобранных конфигов: переключение одним нажатием ── -->
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/cardTop3"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:visibility="gone"
+                    app:cardCornerRadius="12dp">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="12dp">
+
+                        <TextView
+                            android:id="@+id/textTop3Title"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/top3_title"
+                            android:textAppearance="?attr/textAppearanceTitleSmall" />
+
+                        <TextView
+                            android:id="@+id/textTop3Hint"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="@string/top3_hint"
+                            android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                        <RadioGroup
+                            android:id="@+id/groupTop3"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:orientation="vertical" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnTop3Forget"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/top3_forget" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+
                 <!-- ── быстрые действия: три кнопки, всё остальное — по вкладкам ── -->
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnRun"
