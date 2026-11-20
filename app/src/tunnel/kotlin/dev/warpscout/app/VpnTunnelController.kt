@@ -74,23 +74,47 @@ class VpnTunnelController(private val context: Context) : TunnelController {
             val ours = TunnelState.startedAt >= startMark
             if (!announced && ours && System.currentTimeMillis() - startMark > 500 && WarpVpnService.gaveUp()) {
                 announced = true
-                TunnelDebug.error(
-                    WarpVpnService.failureReason() ?: "сервис остановился без причины",
-                    "посмотри журнал: там видно, на каком этапе всё встало"
-                )
+                // Причину уже назвал сервис, и она попадает в журнал отдельной строкой. Второй
+                // строкой «посмотри журнал» мы объясняли очевидное — человек и так в нём.
+                val reason = WarpVpnService.failureReason() ?: "сервис остановился без причины"
+                TunnelDebug.error(reason, hintFor(reason))
                 return false
             }
             Thread.sleep(150)
         }
         // Пустой этап — это не объяснение. Если сервис ничего не сказал, показываем последнюю
         // строку общего журнала (его пишет и сервис), а если и её нет — так и говорим.
-        val stage = TunnelState.status.ifBlank { TunnelDebug.lastLine() }
-            .ifBlank { "сервис не написал ни строки — похоже, не запустился" }
+        // «Этап: туннель остановлен» — это не этап, а след уже случившейся остановки: показывать
+        // его вместо причины значит врать в самом важном месте. Такие служебные тексты пропускаем
+        // и берём последнюю содержательную строку журнала.
+        val status = TunnelState.status.trim()
+        val stage = status.takeIf { it.isNotBlank() && !it.isServiceNoise() }
+            ?: TunnelDebug.lastLine().takeIf { it.isNotBlank() && !it.isServiceNoise() }
+            ?: "сервис не написал ни строки — похоже, не запустился"
         TunnelDebug.error(
             "за ${waitMs} мс handshake не завершился (этап: ${stage.take(160)})",
             "обычно это endpoint, который не отвечает на инициацию: смени профиль шума или порт"
         )
         return false
+    }
+
+    /** Служебные отметки «мы остановились», в которых нет причины. */
+    private fun String.isServiceNoise(): Boolean =
+        startsWith("туннель остановлен") || startsWith("туннель закрыт") ||
+            startsWith("туннель закрыт (") || startsWith("сервис остановлен")
+
+    /**
+     * Подсказка по причине. Общая фраза «посмотри журнал» бесполезна: журнал открыт у человека на
+     * экране. Полезно то, что можно сделать прямо сейчас.
+     */
+    private fun hintFor(reason: String): String = when {
+        reason.contains("port unreachable", ignoreCase = true) || reason.contains("порт закрыт") ->
+            "порт не обслуживает WARP в этой сети — следующая точка поднимется сама"
+        reason.contains("молчит", ignoreCase = true) || reason.contains("ответа нет") ->
+            "endpoint молчит: помогает другой профиль шума или другой порт"
+        reason.contains("ключ", ignoreCase = true) ->
+            "ключи не подошли: нажми «Сканировать и подобрать» — они будут получены заново"
+        else -> "нажми «Включить туннель» ещё раз — перебор точек начнётся с другой пары адрес:порт"
     }
 
     override fun stop() = WarpVpnService.stop(context)

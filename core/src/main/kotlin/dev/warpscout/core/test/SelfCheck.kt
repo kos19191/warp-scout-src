@@ -83,6 +83,7 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         }
         section("живость сессии по трафику") {
             stallDetection()
+            deadPortFailsFast()
         }
         section("быстрый старт подбора") {
             cachedPoint()
@@ -959,6 +960,47 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         ) { line -> log.append(line).append("; ") }
         val thread = Thread { plane.run() }.apply { isDaemon = true; start() }
         return PlaneHarness(plane, tunIn, tunOut, log, thread)
+    }
+
+    /**
+     * ICMP port unreachable — самый частый ответ на «мёртвой» точке: сервер прямо говорит, что на
+     * этом порту WARP нет. Раньше это тонуло в общем «чтение сокета» и туннель продолжал ждать
+     * ещё пять инициаций по 400 мс — то есть каждая мёртвая точка стоила двух с половиной секунд
+     * и лишних датаграмм. Проверяем именно это: отказ быстрый и с внятной причиной.
+     */
+    private fun deadPortFailsFast() {
+        val clientPriv = ByteArray(32) { (it * 3 + 7).toByte() }
+        val serverPriv = ByteArray(32) { (it * 5 + 11).toByte() }
+        val dead = object : dev.warpscout.core.tunnel.UdpChannel {
+            override fun send(packet: ByteArray) = Unit
+            override fun receive(): ByteArray? =
+                throw java.net.PortUnreachableException("ICMP Port Unreachable")
+            override fun close() = Unit
+        }
+        val config = WarpConfig(
+            name = "test",
+            account = WarpAccount(Crypto.base64(clientPriv), Crypto.base64(Crypto.publicOf(serverPriv))),
+            endpoint = Endpoint("127.0.0.1", 9),
+            junk = JunkLibrary.none(),
+            persistentKeepalive = null
+        )
+        val startedAt = System.currentTimeMillis()
+        val plane = dev.warpscout.core.tunnel.DataPlane(
+            dead,
+            java.io.PipedInputStream(),
+            java.io.ByteArrayOutputStream(),
+            config,
+            NetSettings(attempts = 5, timeoutMs = 1000, retryEveryMs = 400, junkPacketsBeforeHandshake = 1)
+        )
+        val ok = plane.run()
+        val took = System.currentTimeMillis() - startedAt
+        check("закрытый порт: туннель не поднят", !ok)
+        check(
+            "закрытый порт: причина названа портом, а не «сервер молчит»",
+            plane.failureReason?.contains("порт закрыт") == true,
+            plane.failureReason ?: "причина не записана"
+        )
+        check("закрытый порт: не ждём остальные инициации", took < 1_500, "$took мс")
     }
 
     private fun dataPlaneLoopback() {

@@ -77,6 +77,9 @@ class WarpVpnService : VpnService() {
     @Volatile
     private var cpuMarkMs: Long = android.os.Process.getElapsedCpuTime()
 
+    /** Отметки процессорного времени по потокам: разница между строками статистики. */
+    private val threadCpuMarks = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     /**
      * Цифры для строки статистики: процессорное время за интервал и число переподключений.
      * Без них «батарея садится» — это разговор о догадках; с ними видно, виноват горячий путь
@@ -86,7 +89,45 @@ class WarpVpnService : VpnService() {
         val now = android.os.Process.getElapsedCpuTime()
         val delta = (now - cpuMarkMs).coerceAtLeast(0L)
         cpuMarkMs = now
-        return "cpu ${delta / 1000} с за интервал, переподключений ${reconnects.get()}"
+        val base = "cpu ${delta / 1000} с за интервал, переподключений ${reconnects.get()}"
+        val threads = threadCpuLine()
+        return if (threads.isBlank()) base else "$base, $threads"
+    }
+
+    /**
+     * Процессорное время **по потокам** за интервал — чтобы следующий разбор журнала не начинался
+     * с догадок. «cpu 377 с» говорит, что виноват процесс, но не кто внутри него: читатель сокета,
+     * пересылка, таймеры или публикация состояния. Здесь видно имя потока и его вклад.
+     *
+     * Тики `/proc` считаются сотыми долями секунды (USER_HZ = 100 на Android), поэтому 1 тик = 10 мс.
+     */
+    private fun threadCpuLine(): String {
+        val ticks = readThreadCpu() ?: return ""
+        val parts = StringBuilder()
+        for ((name, total) in ticks) {
+            val prev = threadCpuMarks[name] ?: total
+            threadCpuMarks[name] = total
+            val deltaMs = (total - prev) * 10
+            if (deltaMs >= 1_000) parts.append(name).append(' ').append(deltaMs / 1000).append(" с; ")
+        }
+        return if (parts.isEmpty()) "" else "потоки: ${parts.toString().trimEnd(' ', ';')}"
+    }
+
+    /** Имя потока → суммарное процессорное время в тиках. null — /proc недоступен. */
+    private fun readThreadCpu(): Map<String, Long>? {
+        val files = java.io.File("/proc/self/task").listFiles() ?: return null
+        val out = HashMap<String, Long>()
+        for (task in files) {
+            val stat = runCatching { java.io.File(task, "stat").readText() }.getOrNull() ?: continue
+            // Второе поле (имя потока) может содержать пробелы, поэтому режем по последней скобке:
+            // дальше идут ровные поля, и utime/stime — 11-е и 12-е из них.
+            val tail = stat.substringAfterLast(')').trim().split(' ')
+            val utime = tail.getOrNull(11)?.toLongOrNull() ?: continue
+            val stime = tail.getOrNull(12)?.toLongOrNull() ?: 0L
+            val name = runCatching { java.io.File(task, "comm").readText().trim() }.getOrNull().orEmpty()
+            if (name.isNotEmpty()) out[name] = utime + stime
+        }
+        return out
     }
     private var worker2: Thread? = null
     private var secondSocket: DatagramSocket? = null
@@ -243,7 +284,7 @@ class WarpVpnService : VpnService() {
         TunnelDebug.stage("конфиг получен (${text.toByteArray().size} байт)")
         val cfg = runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull()
         if (cfg == null) {
-            fail("конфиг не разбирается: нет PrivateKey или PublicKey", startId)
+            fail("конфиг не разбирается: нет PrivateKey или PublicKey", startId, myEpoch)
             return
         }
         TunnelState.endpoint = cfg.endpoint.render()
@@ -253,18 +294,18 @@ class WarpVpnService : VpnService() {
             // soTimeout = 1500: ровно столько ждём один ответ handshake; attempts в NetSettings умножает это.
             DatagramSocket(null).apply { reuseAddress = true; soTimeout = 1500 }
         } catch (e: Exception) {
-            fail("сокет: ${e.javaClass.simpleName} ${e.message}", startId)
+            fail("сокет: ${e.javaClass.simpleName} ${e.message}", startId, myEpoch)
             return
         }
         // Без protect() пакеты туннеля попадут в сам туннель — трафик замкнётся по кругу.
         val protected = runCatching { protect(socket) }.getOrDefault(false)
         if (!protected) {
             runCatching { socket.close() }
-            fail("protect() отказал — туннель не поднят во избежание петли", startId)
+            fail("protect() отказал — туннель не поднят во избежание петли", startId, myEpoch)
             return
         }
         runCatching { socket.connect(InetSocketAddress(cfg.endpoint.host, cfg.endpoint.port)) }
-            .onFailure { runCatching { socket.close() }; fail("connect(): ${it.message}", startId); return }
+            .onFailure { runCatching { socket.close() }; fail("connect(): ${it.message}", startId, myEpoch); return }
         TunnelDebug.stage("UDP-сокет создан и защищён")
         if (!alive()) {
             // Пока поднимались, пользователь нажал «Отключить» (или пошла следующая попытка).
@@ -298,12 +339,12 @@ class WarpVpnService : VpnService() {
             builder.establish()
         } catch (e: Exception) {
             runCatching { socket.close() }
-            fail("tun: ${e.javaClass.simpleName} ${e.message?.take(140)}", startId)
+            fail("tun: ${e.javaClass.simpleName} ${e.message?.take(140)}", startId, myEpoch)
             return
         }
         if (pfd == null) {
             runCatching { socket.close() }
-            fail("VpnService не выдал tun (обычно уже работает другой VPN)", startId)
+            fail("VpnService не выдал tun (обычно уже работает другой VPN)", startId, myEpoch)
             return
         }
         if (!alive()) {
@@ -382,6 +423,9 @@ class WarpVpnService : VpnService() {
                     line.startsWith("попытка") -> {
                         TunnelDebug.noteAttempt(line)
                     }
+                    // Сводку с числом инициаций и причиной даёт fail() ниже — эта строка ядра
+                    // только фиксирует этап, иначе на один отказ в журнале приходится три ошибки.
+                    line.startsWith("handshake не прошёл —") -> TunnelDebug.stage(line)
                     line.contains("не прошёл") -> TunnelDebug.error(line, "endpoint молчит или ключи не подошли")
                     else -> TunnelDebug.stage(line)
                 }
@@ -391,6 +435,15 @@ class WarpVpnService : VpnService() {
         this.plane = plane
         worker = Thread {
             val ok = runCatching { plane.run() }.getOrDefault(false)
+            // Пока этот data plane работал, попытку могли уже заменить следующей (перебор точек,
+            // «Отключить → Подключить», смена сети). Тогда всё, что ниже, — не новость о живом
+            // туннеле, а эхо прошлого: без этой проверки старая сессия снимала up/phase у новой и
+            // могла её же и погасить через stopSelf — ровно то, что видно в журнале как «туннель
+            // закрыт» сразу после успешного подъёма на другой точке.
+            if (myEpoch != epoch.get()) {
+                TunnelDebug.stage("старая сессия освободилась (эпоха $myEpoch) — не трогаю текущую")
+                return@Thread
+            }
             TunnelDebug.bytesUp = plane.bytesUp
             TunnelDebug.bytesDown = plane.bytesDown
             TunnelState.up = false
@@ -401,8 +454,9 @@ class WarpVpnService : VpnService() {
                     val why = plane.failureReason ?: "endpoint молчит"
                     fail(
                         if (plane.handshakeOk) "туннель закрылся во время работы"
-                        else "handshake не прошёл (${plane.attemptCount} попыток): $why",
-                        startId
+                        else "handshake не прошёл (инициаций: ${plane.attemptCount}): $why",
+                        startId,
+                        myEpoch
                     )
                 }
                 else -> {
@@ -456,9 +510,9 @@ class WarpVpnService : VpnService() {
         Thread {
             val waited = runCatching { handshake.await(25, TimeUnit.SECONDS) }.getOrDefault(false)
             if (!waited && !stopped.get() && !TunnelState.up) {
-                fail("таймаут: за 25 с handshake не завершился", startId)
+                fail("таймаут: за 25 с handshake не завершился", startId, myEpoch)
             } else if (waited) {
-                watchTraffic(startId)
+                watchTraffic(startId, myEpoch)
             }
         }.apply { isDaemon = true; name = "warpscout-vpn-watch"; start() }
     }
@@ -467,7 +521,7 @@ class WarpVpnService : VpnService() {
      * «Туннель поднят, а интернета нет» — отдельный диагноз: if up, но счётчики нулевые, значит
      * маршруты не совпали (split-tunnel) или пира не шлёт трафик. Молча это оставлять нельзя.
      */
-    private fun watchTraffic(startId: Int) {
+    private fun watchTraffic(startId: Int, myEpoch: Int) {
         val deadline = System.currentTimeMillis() + 8000
         while (System.currentTimeMillis() < deadline && !stopped.get()) {
             val p = plane
@@ -536,7 +590,15 @@ class WarpVpnService : VpnService() {
     private fun planeBytesUp(): Long = plane?.bytesUp ?: 0L
 
     /** Единственная точка «мы сдались»: статус + журнал + аккуратная остановка. */
-    private fun fail(reason: String, startId: Int) {
+    private fun fail(reason: String, startId: Int, myEpoch: Int = -1) {
+        // Попытку могли уже заменить следующей (перебор точек, повторное нажатие, смена сети).
+        // Тогда её отказ — не новость о текущем туннеле: без этой проверки старая попытка
+        // объявляла «сдался» и снимала сервис, пока новый подъём ещё шёл. Именно так выглядело
+        // «ни одна точка не поднялась», хотя следующая поднималась через секунду.
+        if (myEpoch >= 0 && myEpoch != epoch.get()) {
+            TunnelDebug.stage("устаревшая попытка: $reason — текущую не трогаю")
+            return
+        }
         if (autoRebind) {
             // После смены сети сервис не снимаем: сеть может появиться снова, а пользователь —
             // не нажать «Подключить». Просто честно говорим, что не вышло.

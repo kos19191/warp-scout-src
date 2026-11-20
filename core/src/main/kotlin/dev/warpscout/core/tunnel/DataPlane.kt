@@ -285,6 +285,16 @@ class DataPlane(
             // Закрытие сокета при stop() — штатный выход, а не ошибка: ловим и уходим.
             val pkt = try {
                 udp.receive()
+            } catch (e: java.net.PortUnreachableException) {
+                // ICMP port unreachable — сервер явно сказал «на этом порту WARP нет». Это не
+                // потеря пакета и не «сеть пропала»: точка мертва прямо сейчас, и ждать остальные
+                // инициации (ещё две секунды и пять датаграмм) незачем — переходим к следующей.
+                if (!stopped) {
+                    failureReason = "порт закрыт: ICMP port unreachable"
+                    log("точка мертва: порт закрыт (ICMP port unreachable)")
+                }
+                stopped = true
+                return
             } catch (e: Exception) {
                 if (!stopped) log("чтение сокета: ${e.javaClass.simpleName}: ${e.message}")
                 return
@@ -346,6 +356,12 @@ class DataPlane(
             tunOutput.flush()
             bytesDown += plain.size
             lastUserTrafficAt = System.currentTimeMillis()
+        } catch (e: java.io.IOException) {
+            // EIO/EBADF на запись в tun — это закрытый файловый дескриптор, а не сбой данных:
+            // так выглядит смена сессии (старый tun закрыли, новый уже поднимают) и обычная
+            // остановка. Пишем в журнал нейтрально, чтобы это не читалось как падение.
+            if (!stopped) log("туннель закрыт (${e.message ?: e.javaClass.simpleName})")
+            stop()
         } catch (e: Exception) {
             if (!stopped) log("в tun: ${e.javaClass.simpleName}: ${e.message}")
             stop()
@@ -442,9 +458,17 @@ class DataPlane(
             }
         }
 
-        failureReason = "сервер молчит: $sent ${if (sent == 1) "инициация" else "инициаций"} за " +
-            "${System.currentTimeMillis() - startedAt} мс без ответа"
-        log("ответа нет: $failureReason")
+        // Причина могла быть названа точнее прямо по ходу (ICMP port unreachable). Общее «сервер
+        // молчит» на этом месте её перекрывало, и в журнале вместо «порт закрыт» появлялось
+        // «сервер молчит» — то есть подсказка вела не туда.
+        val known = failureReason
+        if (known == null) {
+            failureReason = "сервер молчит: $sent ${if (sent == 1) "инициация" else "инициаций"} за " +
+                "${System.currentTimeMillis() - startedAt} мс без ответа"
+            log("ответа нет: $failureReason")
+        } else {
+            log("ответа нет: $known")
+        }
         return false
     }
 
@@ -546,6 +570,13 @@ class DataPlane(
                 sendKeepalive()
             }
 
+            // Сюда попадаем, когда ближайшее событие уже наступило, но выполнять его нельзя:
+            // например, rekey только что провалился и до повтора ещё несколько секунд. Без этой
+            // паузы цикл крутится без сна и держит процессор занятым всё окно повтора — а это
+            // ровно те моменты, когда сессия восстанавливается после сбоя.
+            val untilRetry = (lastAttemptAt + settings.rekeyRetryMs) - System.currentTimeMillis()
+            if (untilRetry > 0) runCatching { Thread.sleep(untilRetry.coerceAtMost(1_000L)) }
+
             // Раз в полчаса — честные цифры в журнал: сколько было пробуждений радио и рукопожатий.
             // Без этого «батарея садится» обсуждается догадками, а не фактами.
             if (now >= nextStatsAt) {
@@ -605,7 +636,12 @@ class DataPlane(
                 -1
             }
             if (n < 0) break
-            if (n == 0) continue
+            if (n == 0) {
+                // Пустое чтение на неблокирующем дескрипторе — не повод крутить цикл: 20 мс паузы
+                // стоят дешевле, чем поток, который жжёт процессор вхолостую.
+                runCatching { Thread.sleep(20) }
+                continue
+            }
             // Без копии: буфер tun переиспользуется, а длина передаётся отдельно. Раньше под
             // каждый пакет делался ByteArray(n) только ради того, чтобы «подрезать» буфер.
             val packet: ByteArray? = synchronized(lock) {

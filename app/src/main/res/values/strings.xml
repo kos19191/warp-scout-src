@@ -162,6 +162,8 @@
     <string name="endpoint_switch_hint">WARP — anycast: страну выхода выбирает Cloudflare по вашей сети, назначить её нельзя. Зато можно сменить точку входа (адрес и порт) — если текущая блокируется, следующая обычно проходит.</string>
     <string name="tunnel_reconnect_settings">Настройки изменены — переподключаю туннель</string>
     <string name="tunnel_connecting_busy">Уже подключаюсь — дождись результата</string>
+    <string name="connect_busy_scan">Идёт подбор — подключусь, когда он закончится</string>
+    <string name="scan_busy_connecting">Сейчас подключаюсь — подбор запущу после этого</string>
     <string name="schedule_period_label">Фоновый подбор (авто-сканирование):</string>
     <string name="schedule_period_off">выключен</string>
     <string name="schedule_period_hour">каждый час</string>

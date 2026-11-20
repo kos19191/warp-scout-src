@@ -611,6 +611,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupButtons() {
         binding.btnRun.setOnClickListener {
+            // Подбор и подключение одновременно — не «ускорение», а взаимное уничтожение: подбор
+            // гасит туннель перед замерами, а перебор точек в это время поднимает его снова. В
+            // журнале это выглядело как «ни одна из 5 точек не поднялась» сразу после «сеть чистая»,
+            // и заодно давало падения по таймауту foreground-сервиса (процесс занят сканом).
+            if (connecting) {
+                banner(getString(R.string.scan_busy_connecting))
+                return@setOnClickListener
+            }
             persistUi()
             // Важно: при поднятом туннеле замеры идут через сам туннель (и через WARP), поэтому
             // «живых 0 из 120» — это не сеть, а самообман. Перед подбором туннель гасим.
@@ -1377,6 +1385,13 @@ class MainActivity : AppCompatActivity() {
         if (connecting) {
             // Молча игнорировать нельзя: со стороны это выглядит как «кнопка не работает».
             banner(getString(R.string.tunnel_connecting_busy))
+            return
+        }
+        // Пока идёт подбор, подключаться нельзя: подбор перед замерами гасит туннель, и любая
+        // попытка подъёма в это время обречена — плюс перегруженный процесс не успевает вызвать
+        // startForeground() за отведённые пять секунд, за что система убивает приложение.
+        if (engine.running) {
+            banner(getString(R.string.connect_busy_scan))
             return
         }
         val candidates = tunnelCandidates(base)
