@@ -121,6 +121,19 @@ class WarpVpnService : VpnService() {
             runCatching { stopSelf() }
             return START_NOT_STICKY
         }
+        // ГЛАВНОЕ ПРАВИЛО ANDROID: после startForegroundService() сервис обязан вызвать
+        // startForeground() примерно за 5 секунд, иначе процесс убивают с
+        // ForegroundServiceDidNotStartInTimeException — без записи в журнал, и туннель умирает
+        // вместе с процессом. Поэтому объявляем себя foreground САМЫМ ПЕРВЫМ действием, до любых
+        // проверок и ветвлений: раньше это происходило в потоке подъёма (после создания сокета)
+        // или только в одной из ветвей — и на переподключениях пяти секунд не хватало.
+        val foregroundOk = runCatching { postNotificationNow("Поднимаю туннель…") }.isSuccess
+        if (!foregroundOk) {
+            val why = TunnelState.status
+            TunnelDebug.error("startForeground не удался: $why")
+            dev.warpscout.app.CrashLog.note(this, "startForeground отказал: $why")
+        }
+
         if (starting || plane != null) {
             // Повторное нажатие «Подключить» (кнопка, плитка быстрых настроек) не должно
             // поднимать второй туннель поверх первого — только напомнить, что уже работаем.
@@ -136,13 +149,6 @@ class WarpVpnService : VpnService() {
         }
         lastConfigText = text
         lastStartId = startId
-        // Главное правило Android: после startForegroundService() сервис обязан вызвать
-        // startForeground() в течение ~5 секунд, иначе процесс убивают с
-        // ForegroundServiceDidNotStartInTimeException — без записи в журнал (и туннель падает
-        // вместе с процессом). Раньше это происходило уже в потоке подъёма, после создания
-        // сокета; если поток запаздывал или ждал остановки прошлой сессии — 5 секунд истекали.
-        // Поэтому объявляем себя foreground сразу, ещё до тяжёлой работы.
-        runCatching { postNotificationNow("Поднимаю туннель…") }
         // Подключение по кнопке/плитке — не автопереподъём: при неудаче сервис снимает себя, как
         // и раньше, иначе следующее ручное нажатие упрётся в «уже поднимается».
         autoRebind = false
@@ -580,11 +586,18 @@ class WarpVpnService : VpnService() {
         // тип передаём явно, иначе летит MissingForegroundServiceTypeException.
         val started = if (Build.VERSION.SDK_INT >= 34) {
             runCatching { startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) }
+                .recoverCatching { startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) }
                 .recoverCatching { startForeground(NOTIF_ID, n) }
         } else {
             runCatching { startForeground(NOTIF_ID, n) }
         }
-        if (started.isFailure) TunnelState.status = "startForeground отказал: ${started.exceptionOrNull()?.message}"
+        if (started.isFailure) {
+            // Причина должна остаться в файле: система убьёт процесс через 5 секунд, и без этой
+            // записи в журнале не будет ничего (именно так и выглядело «вылет без логов»).
+            val why = started.exceptionOrNull()?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: "неизвестно"
+            TunnelState.status = "startForeground отказал: $why"
+            dev.warpscout.app.CrashLog.note(this, "startForeground отказал: $why")
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching { notifyManager().notify(NOTIF_ID, n) }
         }
@@ -868,8 +881,19 @@ class WarpVpnService : VpnService() {
                 action = ACTION_START
                 putExtra(EXTRA_CONF, text)
             }
-            runCatching { context.startForegroundService(intent) }
-                .onFailure { TunnelState.status = "сервис не запустился: ${it.message}" }
+            // startForegroundService из фона на Android 12+ может быть запрещён
+            // (ForegroundServiceStartNotAllowedException). Тогда пробуем обычный startService:
+            // он тоже поднимет сервис, а startForeground мы вызываем сами в onStartCommand.
+            val first = runCatching { context.startForegroundService(intent) }
+            if (first.isFailure) {
+                val why = first.exceptionOrNull()
+                TunnelState.status = "сервис не запустился: ${why?.message}"
+                dev.warpscout.app.CrashLog.note(
+                    context, "startForegroundService отказал: ${why?.javaClass?.simpleName}: ${why?.message}"
+                )
+                runCatching { context.startService(intent) }
+                    .onFailure { TunnelState.status = "сервис не запустился: ${it.message}" }
+            }
         }
 
         /** Сервис сдался (ошибка/таймаут) — ждать больше нечего. */

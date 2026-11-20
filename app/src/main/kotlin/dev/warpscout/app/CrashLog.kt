@@ -83,6 +83,17 @@ object CrashLog {
     private fun stamp(): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
 
+    /** Записать в тот же файл событие, которое не является падением (например, отказ startForeground). */
+    fun note(context: Context, text: String) {
+        val app = context.applicationContext
+        val file = File(app.filesDir, FILE)
+        runCatching {
+            val old = file.readText()
+            val merged = ("── " + stamp() + " · " + text + "\n") + old
+            file.writeText(merged.take(12_000))
+        }
+    }
+
     /** Падения не должны переживать «очистить журнал» — иначе старое будет пугать вечно. */
     fun describe(context: Context): String {
         val text = report(context)
