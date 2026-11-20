@@ -220,9 +220,20 @@ class AutoTuner(
                 val ok = results.count { it.ok }
                 progress.log("  ${cand.config.endpoint.render()} · ${cand.junk.name} → ${ok}/${spec.resources.size} ресурсов")
                 val parts = Scoring.evaluate(cand.stats, cand.stats.replies > 0, ok, spec.resources.size, weights)
-                verified.add(cand.copy(parts = parts, config = cand.config.copy(name = "${spec.namePrefix}-${ok}of${spec.resources.size}")))
+                verified.add(
+                    cand.copy(
+                        parts = parts,
+                        resourcesOk = ok,
+                        resourcesTotal = spec.resources.size,
+                        config = cand.config.copy(name = "${spec.namePrefix}-${ok}of${spec.resources.size}")
+                    )
+                )
             }
-            finalList = (verified + ordered.drop(verified.size)).sortedByDescending { it.score }
+            // Проверенные изнутри важнее непроверенных: «открылось 7 из 9 сайтов» — это факт, а
+            // сетевой балл — только догадка. Раньше списки перемешивались по баллу, и победить
+            // мог кандидат, который отвечал на handshake, но не пускал трафик.
+            finalList = verified.sortedByDescending { it.score } +
+                ordered.drop(verified.size).sortedByDescending { it.score }
         } else if (tunnel == null && spec.verifyThroughTunnel) {
             notes += "Сборка без встроенного туннеля: проверка «изнутри» пропущена, отранжировано по сетевым пробам."
         }
@@ -290,12 +301,32 @@ class AutoTuner(
             endpointsTested = endpointsTested,
             notes = notes
         )
-        val best = candidates.maxByOrNull { it.score }
+        // Победитель: сначала «сколько реально открылось», потом балл. Если изнутри ничего не
+        // проверяли — обычный максимум балла.
+        val verifiedAny = candidates.filter { it.resourcesTotal > 0 }
+        val best = if (verifiedAny.any { it.resourcesOk > 0 }) {
+            verifiedAny.sortedWith(
+                compareByDescending<Candidate> { it.resourcesOk }.thenByDescending { it.score }
+            ).firstOrNull()
+        } else {
+            candidates.maxByOrNull { it.score }
+        }
         val text = best?.let { WgConf.render(it.config) }
         progress.log(
             if (best == null) "Готово: ни один кандидат не набрал баллов."
-            else "Лучший: ${best.config.endpoint.render()} · ${best.junk.name} · ${best.score} балла"
+            else buildString {
+                append("Лучший: ${best.config.endpoint.render()} · ${best.junk.name} · ${best.score} балла")
+                if (best.resourcesTotal > 0) append(" · изнутри открылось ${best.resourcesOk}/${best.resourcesTotal}")
+            }
         )
+        // Явно говорим, что профили шума сравнивались: это и есть ответ на «какой метод эффективнее».
+        val profilesSeen = candidates.map { it.junk.name }.distinct()
+        if (profilesSeen.size > 1) {
+            progress.log(
+                "Сравнил профилей шума: ${profilesSeen.size} (${profilesSeen.joinToString(", ")}) — " +
+                    "победил ${best?.junk?.name ?: "—"}"
+            )
+        }
         return TuningResult(report, best?.config, text, account.source)
     }
 }

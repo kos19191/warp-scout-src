@@ -221,7 +221,14 @@ data class Candidate(
     val config: WarpConfig,
     val stats: EndpointStats,
     val parts: ScoreParts,
-    val junkProbes: List<ProbeSample> = emptyList()
+    val junkProbes: List<ProbeSample> = emptyList(),
+    /**
+     * Сколько целевых ресурсов реально открылось из-под ЭТОГО туннеля.
+     * -1 — изнутри не проверяли (сборка без туннеля или не попал в топ проверяемых).
+     */
+    val resourcesOk: Int = -1,
+    /** Сколько ресурсов проверяли (0 — не проверяли). */
+    val resourcesTotal: Int = 0
 ) {
     val score: Int get() = parts.total
     val junk: dev.warpscout.core.model.JunkProfile get() = config.junk
