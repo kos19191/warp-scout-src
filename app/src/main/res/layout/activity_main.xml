@@ -63,6 +63,20 @@
                         android:orientation="vertical"
                         android:padding="@dimen/space_l">
 
+                        <!--
+                          Знак на главной карточке: щит с лисой. Появляется анимацией в момент
+                          старта подключения (см. animateShield в MainActivity) — так видно, что
+                          нажатие принято, ещё до того как обновится текст статуса.
+                        -->
+                        <ImageView
+                            android:id="@+id/imageShield"
+                            android:layout_width="88dp"
+                            android:layout_height="88dp"
+                            android:layout_gravity="center_horizontal"
+                            android:layout_marginBottom="@dimen/space_s"
+                            android:contentDescription="@string/shield_desc"
+                            android:src="@drawable/ic_fox_shield" />
+
                         <TextView
                             android:id="@+id/textStatus"
                             android:layout_width="match_parent"

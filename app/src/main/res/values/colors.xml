@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Иконка запуска -->
-    <color name="ic_launcher_background">#F6821F</color>
+    <color name="ic_launcher_background">#14110F</color>
 
     <!--
       Палитра Material 3. Тёплая нейтраль вместо синеватой: фирменный оранжевый WARP рядом с

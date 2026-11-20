@@ -93,6 +93,9 @@ class MainActivity : AppCompatActivity() {
     /** Когда туннель поднялся (мс, локальные часы): от этой точки считаем расход по приложениям. */
     private var tunnelStartedAtLocal = 0L
     private var connecting = false
+
+    /** Подбор запущен кнопкой подключения: когда закончится — сразу поднимаем туннель. */
+    private var autoConnectAfterScan = false
     private var endpointIndex = 0
     private var exitRegion = ""
     private var settingsReconnect: Runnable? = null
@@ -685,44 +688,78 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun setupButtons() {
-        binding.btnRun.setOnClickListener {
-            // Подбор и подключение одновременно — не «ускорение», а взаимное уничтожение: подбор
-            // гасит туннель перед замерами, а перебор точек в это время поднимает его снова. В
-            // журнале это выглядело как «ни одна из 5 точек не поднялась» сразу после «сеть чистая»,
-            // и заодно давало падения по таймауту foreground-сервиса (процесс занят сканом).
-            if (connecting) {
-                banner(getString(R.string.scan_busy_connecting))
-                return@setOnClickListener
+    /**
+     * Подбор точек. [autoConnect] — после успешного подбора сразу поднять туннель.
+     *
+     * Подбор и подключение **одновременно** не запускаются никогда: подбор гасит туннель перед
+     * замерами, и попытка подъёма в это время обречена (в журнале это выглядело как «ни одна из
+     * 5 точек не поднялась» сразу после «сеть чистая», плюс падения по таймауту foreground).
+     * Подключение идёт строго после того, как движок закончил.
+     */
+    private fun startScan(autoConnect: Boolean) {
+        if (connecting) {
+            banner(getString(R.string.scan_busy_connecting))
+            return
+        }
+        if (engine.running) {
+            // Повторный запуск подбора поверх идущего: молчать нельзя, иначе выглядит как
+            // «кнопка не работает».
+            banner(getString(R.string.scan_busy_scan))
+            return
+        }
+        autoConnectAfterScan = autoConnect
+        persistUi()
+        // Важно: при поднятом туннеле замеры идут через сам туннель (и через WARP), поэтому
+        // «живых 0 из 120» — это не сеть, а самообман. Перед подбором туннель гасим.
+        if (tunnel.supported && tunnel.isUp) {
+            banner(getString(R.string.banner_scan_stops_tunnel))
+            tunnel.stop()
+            runCatching { tunnel.waitStopped(3000) }
+            tunnelStartedAtLocal = 0L
+            exitRegion = ""
+            binding.btnTunnel.setText(R.string.btn_tunnel_on)
+        }
+        runStartedAt = System.currentTimeMillis()
+        endpointBeforeRun = prefs.lastTunedEndpoint
+        log.setLength(0)
+        binding.textLog.text = ""
+        cancelled.set(false)
+        binding.progress.visibility = View.VISIBLE
+        binding.progress.isIndeterminate = true
+        binding.textStatus.setText(R.string.status_running)
+        // Пока идёт подбор, кнопка подключения честно говорит, чем занята: иначе кажется, что
+        // нажатие не сработало.
+        if (autoConnect) {
+            binding.btnTunnel.isEnabled = false
+            binding.btnTunnel.setText(R.string.btn_tunnel_searching)
+        }
+        engine.start(prefs.tuningSpec(), manualConfig(), sink()) { result, error ->
+            binding.progress.visibility = View.GONE
+            when {
+                error != null -> binding.textStatus.text = getString(R.string.status_error, error)
+                result == null -> binding.textStatus.setText(R.string.status_cancelled)
+                else -> showResult(result)
             }
-            persistUi()
-            // Важно: при поднятом туннеле замеры идут через сам туннель (и через WARP), поэтому
-            // «живых 0 из 120» — это не сеть, а самообман. Перед подбором туннель гасим.
-            if (tunnel.supported && tunnel.isUp) {
-                banner(getString(R.string.banner_scan_stops_tunnel))
-                tunnel.stop()
-                runCatching { tunnel.waitStopped(3000) }
-                tunnelStartedAtLocal = 0L
-                exitRegion = ""
-                binding.btnTunnel.setText(R.string.btn_tunnel_on)
-            }
-            runStartedAt = System.currentTimeMillis()
-            endpointBeforeRun = prefs.lastTunedEndpoint
-            log.setLength(0)
-            binding.textLog.text = ""
-            cancelled.set(false)
-            binding.progress.visibility = View.VISIBLE
-            binding.progress.isIndeterminate = true
-            binding.textStatus.setText(R.string.status_running)
-            engine.start(prefs.tuningSpec(), manualConfig(), sink()) { result, error ->
-                binding.progress.visibility = View.GONE
-                when {
-                    error != null -> binding.textStatus.text = getString(R.string.status_error, error)
-                    result == null -> binding.textStatus.setText(R.string.status_cancelled)
-                    else -> showResult(result)
+            binding.btnTunnel.isEnabled = tunnel.supported
+            binding.btnTunnel.setText(if (tunnel.isUp) R.string.btn_tunnel_off else R.string.btn_tunnel_on)
+            val connect = autoConnectAfterScan
+            autoConnectAfterScan = false
+            if (connect && error == null && result != null) {
+                if (result.best == null) {
+                    banner(getString(R.string.scan_no_point))
+                } else {
+                    banner(getString(R.string.scan_found_connecting))
+                    toggleTunnel()
                 }
             }
         }
+    }
+
+    private fun setupButtons() {
+        // «Сканировать и подобрать»: находит точку и, если она есть, сразу поднимает туннель.
+        // Раньше после подбора надо было ещё нажать «Подключить», и это ровно тот шаг, на котором
+        // человек терялся: подбор закончился, на экране цифры, кнопка внизу.
+        binding.btnRun.setOnClickListener { startScan(autoConnect = true) }
 
         binding.btnQuickConfig.setOnClickListener { quickGenerate() }
 
@@ -1139,7 +1176,16 @@ class MainActivity : AppCompatActivity() {
             return
         }
         binding.btnTunnel.isEnabled = true
-        binding.btnTunnel.setText(if (tunnel.isUp) R.string.btn_tunnel_off else R.string.btn_tunnel_on)
+        // Пока конфигурации нет, кнопка называется «Найти и подключить»: иначе «Подключить»
+        // обещает действие, которого без конфига не будет.
+        val hasConfig = engine.last?.best != null || prefs.lastConfigText.isNotBlank() || prefs.manualConf.isNotBlank()
+        binding.btnTunnel.setText(
+            when {
+                tunnel.isUp -> R.string.btn_tunnel_off
+                !hasConfig -> R.string.btn_tunnel_search
+                else -> R.string.btn_tunnel_on
+            }
+        )
     }
 
     private fun poolButtonId(mode: Int): Int = when (mode) {
@@ -1462,7 +1508,20 @@ class MainActivity : AppCompatActivity() {
             banner(getString(R.string.banner_stopped))
             return
         }
-        val cfg = currentConfig() ?: return noConfig()
+        val cfg = currentConfig()
+        if (cfg == null) {
+            // Конфигурации ещё нет — первый запуск или всё стёрли. Раньше кнопка отвечала тостом
+            // «сначала выполните подбор», человек жал её ещё раз и только потом догадывался, что
+            // нужная кнопка ниже. Теперь она делает то, чего от неё ждут: ищет точку и подключается.
+            if (!tunnel.supported) {
+                banner(getString(R.string.tunnel_unavailable), error = true)
+                return
+            }
+            banner(getString(R.string.banner_no_config_scanning))
+            animateShield()
+            startScan(autoConnect = true)
+            return
+        }
         if (!tunnel.ensurePermission(this)) return
         connectWithFallback(cfg)
     }
@@ -1480,6 +1539,7 @@ class MainActivity : AppCompatActivity() {
             banner(getString(R.string.connect_busy_scan))
             return
         }
+        animateShield()
         val candidates = tunnelCandidates(base, preferred)
         if (candidates.isEmpty()) return noConfig()
         // Очередь целиком — в журнал. Вопрос «куда он вообще лезет» должен иметь ответ в тексте, а
@@ -1931,6 +1991,31 @@ class MainActivity : AppCompatActivity() {
 
     private fun noConfig() {
         toast(getString(R.string.err_no_config))
+    }
+
+    /**
+     * Лиса «появляется» на щите, когда начинается подключение.
+     *
+     * Простая и короткая: щит чуть меньше своего размера, прозрачный, за 400 мс проявляется с
+     * лёгким перелётом. Это единственная анимация в приложении — она сообщает «я начал работать»
+     * раньше, чем успевает обновиться текст статуса, и ничего не стоит: длится доли секунды,
+     * при выключенном экране не запускается вовсе (экран в этот момент не рисуется).
+     */
+    private fun animateShield() {
+        runCatching {
+            val v = binding.imageShield
+            v.animate().cancel()
+            v.alpha = 0f
+            v.scaleX = 0.82f
+            v.scaleY = 0.82f
+            v.animate()
+                .alpha(1f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .setDuration(420)
+                .setInterpolator(android.view.animation.OvershootInterpolator(0.9f))
+                .start()
+        }
     }
 
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()

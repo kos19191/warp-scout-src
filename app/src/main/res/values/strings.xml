@@ -84,6 +84,13 @@
     <string name="btn_copy">Скопировать конфиг</string>
     <string name="btn_tunnel_on">Включить туннель</string>
     <string name="btn_tunnel_off">Выключить туннель</string>
+    <!-- Пока конфигурации нет, кнопка не обещает «включить», а честно говорит, что сделает. -->
+    <string name="btn_tunnel_search">Найти точку и подключиться</string>
+    <string name="btn_tunnel_searching">Ищу точку и подключаюсь…</string>
+    <string name="shield_desc">Знак WarpScout: щит с лисой</string>
+    <string name="banner_no_config_scanning">Туннеля ещё нет — подбираю точку и подключусь сам</string>
+    <string name="scan_found_connecting">Точка найдена — подключаюсь</string>
+    <string name="scan_no_point">Живых точек не нашлось — подключение не начато</string>
     <string name="tunnel_unavailable">В этой сборке собственного туннеля нет: используйте «Передать в AmneziaVPN».</string>
 
     <string name="amnezia_hint">AmneziaWG: Профили → ⋮ → Импорт из буфера/файла и вставьте этот текст. Если импорт не открывается — сохраните файл и откройте его через AmneziaWG (кнопка «Сохранить»).</string>
@@ -164,6 +171,7 @@
     <string name="tunnel_connecting_busy">Уже подключаюсь — дождись результата</string>
     <string name="connect_busy_scan">Идёт подбор — подключусь, когда он закончится</string>
     <string name="scan_busy_connecting">Сейчас подключаюсь — подбор запущу после этого</string>
+    <string name="scan_busy_scan">Подбор уже идёт — дождись результата</string>
 
     <!-- аварийный экран: показывается, если интерфейс не удалось построить -->
     <string name="safe_title">Приложение не смогло показать экран</string>

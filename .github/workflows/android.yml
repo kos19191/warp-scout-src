@@ -355,7 +355,7 @@ jobs:
             fi
           fi
           echo "—" >> notes.md
-          echo "Предыдущие сборки не удалены: \`v1.2.1\` и более ранние остаются в релизах." >> notes.md
+          echo "На странице релизов хранятся три последние версии: при выпуске новой самая старая удаляется (вместе с тегом). Откатиться на две версии назад можно всегда." >> notes.md
 
           if gh release view "$TAG" > /dev/null 2>&1; then
             # Описание и заголовок тоже обновляем: иначе у перезалитого релиза остаются
@@ -374,3 +374,33 @@ jobs:
             echo "создал релиз $TAG"
           fi
           gh release view "$TAG" --json url,assets --jq '{url, assets: [.assets[].name]}'
+
+      # На странице релизов остаются только три последние версии.
+      #
+      # Иначе список растёт без конца и нужную сборку приходится искать среди десятков строк.
+      # Три — потому что откатиться на одну-две версии назад бывает нужно, а хранить историю
+      # всех debug-сборок смысла нет: каждая весит по 10 МБ. Тег удаляем вместе с релизом
+      # (`--cleanup-tag`), иначе он остаётся висеть отдельно и путает.
+      - name: "Оставить три последних релиза"
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          KEEP=3
+          # Самые новые сверху; всё, что дальше третьего, — удаляем.
+          # Через API, а не `gh release list --json`: во раннерах встречается gh без --json
+          # у этой команды, и шаг тихо ломался бы.
+          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq "sort_by(.created_at) | reverse | .[$KEEP:] | .[].tag_name" > /tmp/old-releases.txt || exit 0
+          if [ ! -s /tmp/old-releases.txt ]; then
+            echo "удалять нечего: релизов не больше $KEEP"
+            exit 0
+          fi
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            echo "удаляю старый релиз $tag"
+            gh release delete "$tag" --yes --cleanup-tag || echo "::warning title=релизы::не удалось удалить $tag"
+          done < /tmp/old-releases.txt
+          echo "осталось:"
+          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=10" --jq '.[] | .tag_name' 
