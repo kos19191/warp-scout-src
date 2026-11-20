@@ -85,6 +85,36 @@ class WarpVpnService : VpnService() {
     @Volatile
     private var reconnectMark = 0
 
+    // ---------------------------------------------------------------- модем и энергия
+    // «LTE быстро съедает батарею» — вопрос, на который нельзя ответить, глядя только на процент
+    // заряда: непонятно, тратится он на наш туннель, на другие приложения или на сам модем,
+    // который в плохой сети просыпается и перестраивается. Поэтому в строку статистики добавляем
+    // ровно те цифры, по которым это различимо:
+    //   ток          — сколько телефон берёт из батареи прямо сейчас (мА, минус = разряд);
+    //   израсходовано— сколько мА·ч ушло за интервал (по счётчику заряда, если он есть);
+    //   модем        — сколько байт и пакетов реально прошло через мобильный интерфейс;
+    //   смен сети    — сколько раз менялась сеть (для модема это дорогое событие);
+    //   перестройки  — сколько раз система сообщала об изменении параметров сети
+    //                  (полоса, качество): на LTE это след того, что модем переключается.
+
+    /** Отметка счётчика заряда (микроампер-часы) на прошлую строку статистики. */
+    @Volatile
+    private var chargeMark = -1L
+
+    /** Байты и пакеты через мобильный интерфейс на прошлую строку статистики. */
+    @Volatile
+    private var modemBytesMark = -1L
+    @Volatile
+    private var modemPacketsMark = -1L
+
+    /** Сколько раз менялась сеть и её параметры (накопительно). */
+    private val netChanges = java.util.concurrent.atomic.AtomicInteger(0)
+    private val capsChanges = java.util.concurrent.atomic.AtomicInteger(0)
+    @Volatile
+    private var netChangesMark = 0
+    @Volatile
+    private var capsChangesMark = 0
+
     /** Отметки процессорного времени по потокам: разница между строками статистики. */
     private val threadCpuMarks = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
@@ -107,7 +137,8 @@ class WarpVpnService : VpnService() {
         // модема стоит несравнимо дороже, чем на Wi-Fi, и без этих двух слов журнал не объясняет,
         // почему один и тот же час стоит по-разному.
         val env = "сеть ${netKind()}, экран ${if (isScreenOn()) "вкл" else "выкл"}" +
-            batteryText().let { if (it.isEmpty()) "" else ", $it" }
+            batteryText().let { if (it.isEmpty()) "" else ", $it" } +
+            energyText().let { if (it.isEmpty()) "" else ", $it" }
         val threads = threadCpuLine()
         val tail = if (threads.isBlank()) "" else ", $threads"
         return "$base, $env$tail"
@@ -151,6 +182,149 @@ class WarpVpnService : VpnService() {
             "заряд $pct% (${if (diff > 0) "+" else ""}$diff% за интервал)"
         }
     }.getOrDefault("")
+
+    /**
+     * Энергетика и модем за интервал.
+     *
+     * Зачем это в журнале. Пока в строке статистики был только процент заряда, разговор
+     * «LTE быстро есть батарею, может, приложение ни при чём» упирался в догадки. Теперь видно:
+     *   • «ток 380 мА, израсходовано 32 мА·ч, модем 3.1 МБ» — телефон реально жжёт, и через
+     *     модем шли мегабайты: виноват трафик (наш или чужой — видно по «вверх/вниз» туннеля);
+     *   • «ток 380 мА, израсходовано 32 мА·ч, модем 40 КБ, перестройки 12» — трафика нет, а
+     *     модем дёргается: это сеть и модем, а не туннель;
+     *   • «ток 90 мА, модем 0 Б» — туннель в простое почти ничего не стоит.
+     *
+     * Ничего секретного не читаем: только счётчики батареи и сетевых интерфейсов, которые
+     * система и так показывает в настройках. Прав на это не требуется; если прошивка закрывает
+     * `/sys`, остаются системные API и цифры просто будут чуть грубее.
+     */
+    private fun energyText(): String {
+        val parts = StringBuilder()
+        val ma = currentMa()
+        if (ma != 0) parts.append("ток ${kotlin.math.abs(ma)} мА${if (ma < 0) " разряд" else " заряд"}")
+        runCatching { chargeText() }.getOrNull()?.let {
+            if (it.isNotEmpty()) {
+                if (parts.isNotEmpty()) parts.append(", ")
+                parts.append(it)
+            }
+        }
+        runCatching { modemText() }.getOrNull()?.let {
+            if (it.isNotEmpty()) {
+                if (parts.isNotEmpty()) parts.append(", ")
+                parts.append(it)
+            }
+        }
+        val nc = netChanges.get()
+        val dc = nc - netChangesMark
+        netChangesMark = nc
+        val cc = capsChanges.get()
+        val dcc = cc - capsChangesMark
+        capsChangesMark = cc
+        if (parts.isNotEmpty()) parts.append(", ")
+        parts.append("смен сети $dc, перестроек $dcc")
+        return parts.toString()
+    }
+
+    /** Ток батареи в мА (минус — разряд). Система отдаёт микроамперы, часть прошивок — милли. */
+    private fun currentMa(): Int {
+        val raw = runCatching {
+            val bm = getSystemService(android.content.Context.BATTERY_SERVICE) as? android.os.BatteryManager
+            bm?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CURRENT_NOW) ?: 0
+        }.getOrDefault(0)
+        val value = if (raw != 0 && raw != Int.MIN_VALUE) raw else sysfsLong("current_now")?.toInt() ?: 0
+        if (value == 0) return 0
+        val ma = if (kotlin.math.abs(value) > 10_000) value / 1000 else value
+        return ma.coerceIn(-20_000, 20_000)
+    }
+
+    /** Сколько мА·ч ушло с прошлой строки статистики — по счётчику заряда, если он есть. */
+    private fun chargeText(): String {
+        val now = chargeMicroAh()
+        if (now <= 0) return ""
+        val prev = chargeMark
+        chargeMark = now
+        if (prev <= 0 || now > prev) return ""
+        return "израсходовано ${(prev - now) / 1000} мА·ч"
+    }
+
+    private fun chargeMicroAh(): Long {
+        val v = runCatching {
+            val bm = getSystemService(android.content.Context.BATTERY_SERVICE) as? android.os.BatteryManager
+            bm?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER) ?: 0
+        }.getOrDefault(0)
+        if (v > 0) return v.toLong()
+        return sysfsLong("charge_counter") ?: -1L
+    }
+
+    /** Байты и пакеты, прошедшие через мобильный интерфейс, с прошлой строки статистики. */
+    private fun modemText(): String {
+        val counters = modemCounters()
+        val bytesNow = counters?.first ?: mobileTrafficTotal()
+        if (bytesNow < 0) return ""
+        val prevBytes = modemBytesMark
+        modemBytesMark = bytesNow
+        if (prevBytes < 0 || bytesNow < prevBytes) return ""
+        val text = StringBuilder("модем ${humanBytes(bytesNow - prevBytes)}")
+        val packetsNow = counters?.second ?: -1L
+        if (packetsNow >= 0) {
+            val prevPackets = modemPacketsMark
+            modemPacketsMark = packetsNow
+            if (prevPackets >= 0 && packetsNow >= prevPackets) {
+                text.append("/${packetsNow - prevPackets} пакетов")
+            }
+        }
+        return text.toString()
+    }
+
+    /**
+     * Счётчики мобильных интерфейсов из `/sys`. Это единственное место, где видно работу самого
+     * модема: сколько байт и пакетов он реально передал, независимо от того, кто их породил —
+     * наш туннель, чужое приложение или служебный трафик сети.
+     */
+    private fun modemCounters(): Pair<Long, Long>? = runCatching {
+        val dirs = java.io.File("/sys/class/net").listFiles() ?: return@runCatching null
+        var bytes = 0L
+        var packets = 0L
+        var seen = 0
+        for (d in dirs) {
+            val name = d.name
+            val mobile = name.startsWith("rmnet") || name.startsWith("ccmni") ||
+                name.startsWith("pdp") || name.startsWith("wwan") || name.startsWith("v4-rmnet")
+            if (!mobile) continue
+            val rx = readLong(java.io.File(d, "statistics/rx_bytes"))
+            val tx = readLong(java.io.File(d, "statistics/tx_bytes"))
+            val rp = readLong(java.io.File(d, "statistics/rx_packets"))
+            val tp = readLong(java.io.File(d, "statistics/tx_packets"))
+            if (rx == null && tx == null && rp == null && tp == null) continue
+            seen++
+            bytes += (rx ?: 0L) + (tx ?: 0L)
+            packets += (rp ?: 0L) + (tp ?: 0L)
+        }
+        if (seen == 0) null else bytes to packets
+    }.getOrNull()
+
+    private fun readLong(f: java.io.File): Long? = runCatching {
+        if (!f.canRead()) null else f.readText().trim().toLong()
+    }.getOrNull()
+
+    private fun sysfsLong(name: String): Long? = runCatching {
+        java.io.File("/sys/class/power_supply/battery/$name").readText().trim().toLong()
+    }.getOrNull()
+
+    /** Запасной вариант, если `/sys` закрыт: системные счётчики мобильного трафика. */
+    private fun mobileTrafficTotal(): Long {
+        val rx = android.net.TrafficStats.getMobileRxBytes()
+        val tx = android.net.TrafficStats.getMobileTxBytes()
+        if (rx < 0 || tx < 0) return -1
+        return rx + tx
+    }
+
+    private fun humanBytes(b: Long): String = when {
+        b < 1024L -> "$b Б"
+        b < 1024L * 1024 -> "${b / 1024} КБ"
+        b < 1024L * 1024 * 1024 -> String.format(java.util.Locale.US, "%.1f МБ", b / 1048576.0)
+        else -> String.format(java.util.Locale.US, "%.2f ГБ", b / 1073741824.0)
+    }
 
     /** Экран включён? Читается из того же места, что и для keepalive. */
     private fun isScreenOn(): Boolean = runCatching {
@@ -926,7 +1100,17 @@ class WarpVpnService : VpnService() {
                 .build()
         }.getOrNull() ?: return
         val cb = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onCapabilitiesChanged(
+                network: android.net.Network,
+                caps: android.net.NetworkCapabilities,
+            ) {
+                // Модем перестроился: сменилась полоса, качество, набор возможностей. Считаем —
+                // частые перестройки на LTE и есть та работа, которая греет модем в кармане.
+                capsChanges.incrementAndGet()
+            }
+
             override fun onAvailable(network: android.net.Network) {
+                netChanges.incrementAndGet()
                 val base = baselineNetwork
                 if (base == null) {
                     baselineNetwork = network
@@ -944,6 +1128,7 @@ class WarpVpnService : VpnService() {
             }
 
             override fun onLost(network: android.net.Network) {
+                netChanges.incrementAndGet()
                 if (network != baselineNetwork) return
                 baselineNetwork = null
                 networkChanged = true

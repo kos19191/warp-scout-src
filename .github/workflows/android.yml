@@ -202,6 +202,35 @@ jobs:
           set -o pipefail
           ./gradlew --no-daemon :app:assembleScoutDebug :app:assembleTunnelDebug 2>&1 | tee /tmp/apk.log
 
+      # Главная проверка подписи — по готовым APK, а не по файлу ключа: важно, чем подписан
+      # именно тот файл, который человек скачает. Отпечаток закреплён: если он изменится,
+      # обновление «поверх» перестанет ставиться («Пакет конфликтует с существующим пакетом»),
+      # поэтому сборка должна падать здесь, а не на телефоне.
+      - name: "Подпись готовых APK = закреплённый ключ"
+        run: |-
+          set -o pipefail
+          PINNED="76b0e9eb5436d15108a044d8ee4b87b1ea80a5c059acdf59dd5a2dae6428dfb0"
+          APKSIGNER="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/35.0.0/apksigner"
+          [ -x "$APKSIGNER" ] || APKSIGNER=$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" -name apksigner -type f | sort | tail -1)
+          echo "apksigner: $APKSIGNER"
+          fail=0
+          n=0
+          while IFS= read -r apk; do
+            [ -n "$apk" ] || continue
+            n=$((n + 1))
+            echo "== $apk"
+            out=$("$APKSIGNER" verify --print-certs "$apk" 2>&1) || { echo "$out"; echo "::error title=подпись::apksigner не смог проверить $apk"; fail=1; continue; }
+            echo "$out" | grep -iE "Signer #1 certificate (DN|SHA-256 digest)" || true
+            if echo "$out" | grep -qi "$PINNED"; then
+              echo "ok: подпись совпадает с закреплённой"
+            else
+              echo "::error title=подпись::$apk подписан НЕ закреплённым ключом — обновление поверх не встанет"
+              fail=1
+            fi
+          done < <(find app/build/outputs/apk -name '*.apk' | sort)
+          [ "$n" -gt 0 ] || { echo "::error title=подпись::не нашёл ни одного APK"; fail=1; }
+          exit $fail
+
       - uses: actions/upload-artifact@v4
         if: success()
         with:
