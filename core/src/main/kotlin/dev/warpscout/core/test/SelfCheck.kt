@@ -10,6 +10,7 @@ import dev.warpscout.core.lists.ListSide
 import dev.warpscout.core.report.ConfigExport
 import dev.warpscout.core.tunnel.ExitRouter
 import dev.warpscout.core.tunnel.StallDetector
+import dev.warpscout.core.tune.CachedPoint
 import dev.warpscout.core.tunnel.IpPacket
 import dev.warpscout.core.crypto.Blake2s
 import dev.warpscout.core.crypto.Crypto
@@ -79,6 +80,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         }
         section("живость сессии по трафику") {
             stallDetection()
+        }
+        section("быстрый старт подбора") {
+            cachedPoint()
         }
         section("состояние сервиса между процессами") {
             serviceState()
@@ -478,6 +482,21 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             "размер=${explicit.size}"
         )
         expect("роуты обхода белых списков", RoutePresets.BYPASS_WHITELIST.size, 56)
+    }
+
+    /**
+     * Быстрый старт принимает сохранённую точку без полного скана. Ошибка здесь тише и хуже, чем
+     * кажется: подбор отрапортует «готово», а конфиг не работает. Поэтому подтверждение требует
+     * настоящих признаков, а не «кандидат найден».
+     */
+    private fun cachedPoint() {
+        val c = CachedPoint
+        check("быстрый старт: без ответа сервера не подтверждается", !c.confirmed(0, 0, 0))
+        check("быстрый старт: ответ есть, проверок не было — подтверждается", c.confirmed(1, 0, 0))
+        check("быстрый старт: ответ есть, но изнутри ничего не открылось", !c.confirmed(3, 9, 0))
+        check("быстрый старт: открылся хотя бы один ресурс", c.confirmed(3, 9, 1))
+        check("быстрый старт: все ресурсы открылись", c.confirmed(3, 9, 9))
+        check("быстрый старт: отрицательные числа не считаются успехом", !c.confirmed(-1, 9, 9))
     }
 
     // ------------------------------------------------- живость сессии по трафику

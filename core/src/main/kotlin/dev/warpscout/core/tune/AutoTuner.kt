@@ -134,14 +134,17 @@ class AutoTuner(
 
         // Сохранённую конфигурацию пробуем первой: проверить одну точку — секунды, полный
         // скан пула — минуты и заметный расход батареи. Не подтвердилась — честно идём в полный подбор.
-        speculativeStart(spec, progress)?.let { narrow ->
-            // Заметки быстрой попытки — отдельная копия: если она провалится, полный подбор не
-            // должен рассказывать пользователю про точки, которые он даже не проверял.
-            val quickNotes = notes.toMutableList()
-            quickNotes += "Быстрый старт: сохранённая конфигурация проверена заново, полный скан не понадобился."
-            val quick = tuneWith(narrow, progress, started, quickNotes, account, peerPublic)
-            if (quick.best != null) return quick
-            progress.log("сохранённая конфигурация не подтвердилась — полный подбор")
+        val cached = spec.cachedStart
+        if (cached != null) {
+            speculativeStart(spec, cached, progress)?.let { narrow ->
+                // Заметки быстрой попытки — отдельная копия: если она провалится, полный подбор не
+                // должен рассказывать пользователю про точки, которые он даже не проверял.
+                val quickNotes = notes.toMutableList()
+                quickNotes += "Быстрый старт: сохранённая конфигурация проверена заново, полный скан не понадобился."
+                val quick = tuneWith(narrow, progress, started, quickNotes, account, peerPublic)
+                if (quick.best != null && cachedConfirmed(quick, cached)) return quick
+                progress.log("сохранённая конфигурация не подтвердилась — полный подбор")
+            }
         }
 
         return tuneWith(spec, progress, started, notes, account, peerPublic)
@@ -152,8 +155,7 @@ class AutoTuner(
      * изнутри туннеля тоже) остаётся общим с полным подбором: сохранённая конфигурация
      * принимается по тем же правилам, что и свежая, иначе кеш мог бы протащить нерабочее.
      */
-    private fun speculativeStart(spec: TuningSpec, progress: ProgressSink): TuningSpec? {
-        val cached = spec.cachedStart ?: return null
+    private fun speculativeStart(spec: TuningSpec, cached: CachedStart, progress: ProgressSink): TuningSpec? {
         val ep = cached.endpoint
         val profiles = spec.junkProfiles.filter { it.name == cached.junkName }
         // IPv6 в разборе списка пока не поддержан — быстрый старт не для него, полный подбор работает.
@@ -170,6 +172,12 @@ class AutoTuner(
             junkProfiles = profiles.ifEmpty { spec.junkProfiles },
             refineTop = 1
         )
+    }
+
+    /** Есть ли в отчёте сохранённая точка и подтвердилась ли она (см. [CachedPoint]). */
+    private fun cachedConfirmed(result: TuningResult, cached: CachedStart): Boolean {
+        val cand = result.report.candidates.firstOrNull { it.config.endpoint == cached.endpoint } ?: return false
+        return CachedPoint.confirmed(cand.stats.replies, cand.resourcesTotal, cand.resourcesOk)
     }
 
     /**
