@@ -61,9 +61,13 @@ class TunnelTileService : TileService() {
     }
 
     override fun onClick() {
-        if (TunnelState.up) {
+        // Снимок мог устареть, пока шторка была открыта: решаем по свежему.
+        runCatching { TunnelStatusBus.refresh(this) }
+        // Выключаем и работающий туннель, и тот, что сервис держит в ожидании повтора. Это решение
+        // человека: после него сервис сам туннель не включает (см. EXTRA_BY_USER).
+        if (TunnelState.up || TunnelState.wanted) {
             // Состояние обновит сервис: он владелец снимка, плитка только читает.
-            WarpVpnService.stop(this)
+            WarpVpnService.stop(this, byUser = true)
             updateTile()
             return
         }
@@ -88,8 +92,11 @@ class TunnelTileService : TileService() {
         val tile = qsTile ?: return
         runCatching { TunnelStatusBus.snapshot(this) }
         val hasConfig = Prefs(this).lastConfigText.isNotBlank()
+        // Сервис держит туннель (переподключается или ждёт повтора) — плитка активна: нажатие её
+        // выключит. Раньше в этом состоянии плитка была «выключен», и нажатие снова включало.
+        val held = !TunnelState.up && TunnelState.wanted
         tile.state = when {
-            TunnelState.up -> Tile.STATE_ACTIVE
+            TunnelState.up || held -> Tile.STATE_ACTIVE
             !hasConfig -> Tile.STATE_UNAVAILABLE
             else -> Tile.STATE_INACTIVE
         }
@@ -97,6 +104,7 @@ class TunnelTileService : TileService() {
         val subtitle = getString(
             when {
                 TunnelState.up -> R.string.tile_on
+                held -> R.string.tile_reconnecting
                 !hasConfig -> R.string.tile_no_config
                 else -> R.string.tile_off
             }

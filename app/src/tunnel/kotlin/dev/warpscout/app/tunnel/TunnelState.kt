@@ -96,8 +96,33 @@ object TunnelState {
             publishNow(urgent = true)
         }
 
-    /** true — прямо сейчас идёт установка или работа: по нему публикуется «сердцебиение». */
-    fun isAlive(): Boolean = up || busy
+    /**
+     * Туннель нужен: был старт и не было «Выключить». Пока это так, сервис переподключается сам,
+     * даже когда туннель лежит и ждёт повтора, — и кнопка с плиткой предлагают «Выключить».
+     */
+    @Volatile
+    var wanted: Boolean = false
+        set(v) {
+            if (field == v) return
+            field = v
+            publishNow(urgent = true)
+        }
+
+    /** Последним туннель выключил сам человек: после этого ничто не включает его само. */
+    @Volatile
+    var stoppedByUser: Boolean = false
+        set(v) {
+            if (field == v) return
+            field = v
+            publishNow(urgent = true)
+        }
+
+    /**
+     * true — сервис чем-то занят (поднимается, работает или ждёт повтора): по нему публикуется
+     * «сердцебиение». Ожидание повтора — тоже жизнь: без сердцебиения снимок за пару минут
+     * «протухал», и интерфейс шёл проверять, не умер ли сервис.
+     */
+    fun isAlive(): Boolean = up || busy || wanted
 
     /**
      * Снимок для другого процесса: поля состояния плюс то, что интерфейсу нужно для карточки
@@ -112,6 +137,8 @@ object TunnelState {
         busy = busy,
         startedAt = startedAt,
         phase = phase,
+        wanted = wanted,
+        stoppedByUser = stoppedByUser,
         bytesUp = TunnelDebug.bytesUp,
         bytesDown = TunnelDebug.bytesDown,
         handshakeAttempts = TunnelDebug.handshakeAttempts,
@@ -132,6 +159,8 @@ object TunnelState {
             busy = snapshot.busy
             startedAt = snapshot.startedAt
             phase = snapshot.phase
+            wanted = snapshot.wanted
+            stoppedByUser = snapshot.stoppedByUser
         } finally {
             mirroring = false
         }

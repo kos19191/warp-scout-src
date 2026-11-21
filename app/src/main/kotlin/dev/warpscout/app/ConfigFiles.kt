@@ -36,8 +36,14 @@ object ConfigFiles {
     }
 
     /** Кладёт .conf в «Загрузки» через MediaStore (без разрешений) либо в app-specific каталог. */
-    fun saveToDownloads(context: Context, cfg: WarpConfig, text: String, name: String? = null): String {
-        val name2 = name ?: ConfigExport.filename(cfg)
+    fun saveToDownloads(context: Context, cfg: WarpConfig, text: String, name: String? = null): String =
+        saveTextToDownloads(context, name ?: ConfigExport.filename(cfg), text)
+
+    /**
+     * Любой текстовый файл — в «Загрузки» (на Android 10+ через MediaStore, без разрешений), на
+     * старых версиях — в каталог приложения. Возвращает, где файл теперь лежит.
+     */
+    fun saveTextToDownloads(context: Context, name2: String, text: String): String {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, name2)

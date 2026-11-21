@@ -110,12 +110,12 @@ object TunnelStatusBus {
         // файл. Интерфейс опрашивает состояние постоянно, поэтому даже при потерянном
         // уведомлении он не замирает на устаревшей картинке.
         val before = current
-        if ((before.up || before.busy) && System.currentTimeMillis() - before.updatedAt > REREAD_MS) {
+        if ((before.up || before.busy || before.wanted) && System.currentTimeMillis() - before.updatedAt > REREAD_MS) {
             val disk = read(context)
             if (disk != null && disk.updatedAt != before.updatedAt) applySnapshot(context, disk)
         }
         val status = current
-        if (!status.up && !status.busy) return status
+        if (!status.up && !status.busy && !status.wanted) return status
         val fresh = status.updatedAt > 0 && System.currentTimeMillis() - status.updatedAt < STALE_MS
         if (fresh) return status
         val now = System.currentTimeMillis()
@@ -127,6 +127,7 @@ object TunnelStatusBus {
             val dead = status.copy(
                 up = false,
                 busy = false,
+                wanted = false,
                 gaveUp = false,
                 status = "туннель не запущен",
                 // Отметку времени ставим свою: иначе проверка будет повторяться каждые две

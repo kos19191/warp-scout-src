@@ -20,6 +20,8 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -205,25 +207,49 @@ class WgProber(private val settings: NetSettings) {
         return WgProbeResult(EndpointStats(endpoint, samples, best, replies, samples.size), accepted, replyTypes)
     }
 
-    /** Параллельный скан по пулу конечных точек. */
+    /**
+     * Параллельный скан по пулу конечных точек.
+     *
+     * [isCancelled] — «человек нажал «Остановить подбор»». Раньше скан о нём не знал: пул в 120
+     * (а в полном режиме — 1500) точек досчитывался до конца, и «Остановить» срабатывало только
+     * через минуты. Теперь ещё не начатые пробы пропускаются, а результаты собираются мелкими
+     * ожиданиями, чтобы отмена была видна за доли секунды.
+     */
     fun scan(
         endpoints: List<Endpoint>,
         account: WarpAccount,
         peerPublic: ByteArray,
         junk: JunkProfile? = null,
+        isCancelled: () -> Boolean = { false },
         onProgress: ((done: Int, total: Int, EndpointStats) -> Unit)? = null
     ): List<EndpointStats> {
         val pool = Executors.newFixedThreadPool(settings.concurrency.coerceIn(1, 256))
         val done = AtomicInteger(0)
         try {
             val futures = endpoints.map { ep ->
-                pool.submit(Callable {
+                pool.submit(Callable<EndpointStats?> {
+                    if (isCancelled()) return@Callable null
                     val res = probe(ep, account, peerPublic, junk)
                     onProgress?.invoke(done.incrementAndGet(), endpoints.size, res.stats)
                     res.stats
                 })
             }
-            return futures.mapNotNull { runCatching { it.get() }.getOrNull() }
+            val out = ArrayList<EndpointStats>(futures.size)
+            for (future in futures) {
+                while (true) {
+                    if (isCancelled()) return out
+                    val stats = try {
+                        future.get(250, TimeUnit.MILLISECONDS)
+                    } catch (e: TimeoutException) {
+                        continue
+                    } catch (e: Exception) {
+                        null
+                    }
+                    if (stats != null) out.add(stats)
+                    break
+                }
+            }
+            return out
         } finally {
             pool.shutdownNow()
         }

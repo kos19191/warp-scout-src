@@ -65,7 +65,12 @@ class WarpVpnService : VpnService() {
         runCatching { TunnelStatusPublisher.start(this) }
         // Первая строка журнала: по ней видно, что процесс сервиса вообще запустился.
         runCatching {
-            dev.warpscout.app.TunnelDebug.stage("сервис запущен, процесс ${android.os.Process.myPid()}")
+            // Сборка — в той же строке: версия не меняется от правки к правке (1.10.25 пересобирается
+            // поверх), и по журналу иначе не понять, стоит ли уже свежая сборка.
+            dev.warpscout.app.TunnelDebug.stage(
+                "сервис запущен, процесс ${android.os.Process.myPid()}, сборка " +
+                    "${dev.warpscout.app.BuildConfig.VERSION_NAME} · ${dev.warpscout.app.BuildConfig.BUILD_REV}"
+            )
         }
         if (TunnelState.status.isBlank()) {
             TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_STARTING
@@ -651,6 +656,13 @@ class WarpVpnService : VpnService() {
         // (ForegroundServiceDidNotStartInTimeException) — со стороны это выглядит как «вылетает
         // при переключении вкладки».
         if (intent?.action == ACTION_STOP) {
+            // «Выключить» нажал человек (кнопка, плитка, «Отключить» в уведомлении) — запоминаем:
+            // после этого ничто не включает туннель само. Остановки перебора точек и подбора
+            // приходят без этой отметки: за ними сразу следует новый старт.
+            if (intent?.getBooleanExtra(EXTRA_BY_USER, false) == true) {
+                TunnelState.stoppedByUser = true
+                TunnelDebug.stage("туннель выключен вручную — сам больше не включаю, пока не нажмёшь «Включить»")
+            }
             shutdown()
             // Останавливаемся только если после «Отключить» ничего не пришло. Раньше здесь был
             // stopSelf() без номера — он отменял и «Подключить», присланный сразу следом (перебор
@@ -700,6 +712,8 @@ class WarpVpnService : VpnService() {
         netRestartAttempts = 0
         // Ручной старт — новый отсчёт: отложенные повторы отменяются, счётчики циклов — с нуля.
         wanted = true
+        TunnelState.wanted = true
+        TunnelState.stoppedByUser = false
         cancelWaits()
         slowRetries = 0
         cycleSilent.clear()
@@ -1247,6 +1261,7 @@ class WarpVpnService : VpnService() {
         // новое «Подключить», onDestroy не будет вовсе, и мёртвый plane упёр бы новый старт в
         // «уже поднимается». Новая эпоха гасит сторожа этой попытки.
         wanted = false
+        TunnelState.wanted = false
         epoch.incrementAndGet()
         closeAll()
         stopSelfSafely(startId)
@@ -1346,7 +1361,10 @@ class WarpVpnService : VpnService() {
         )
         val stopPi = android.app.PendingIntent.getService(
             this, 1,
-            Intent(this, WarpVpnService::class.java).apply { action = ACTION_STOP },
+            Intent(this, WarpVpnService::class.java).apply {
+                action = ACTION_STOP
+                putExtra(EXTRA_BY_USER, true)
+            },
             android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
         )
         val n = NotificationCompat.Builder(this, CHANNEL)
@@ -1420,6 +1438,7 @@ class WarpVpnService : VpnService() {
         // смену сети своим туннелем. Всё ниже можно повторять сколько угодно раз.
         stopped.set(true)
         wanted = false
+        TunnelState.wanted = false
         cancelWaits()
         starting = false
         autoRebind = false
@@ -2465,6 +2484,9 @@ class WarpVpnService : VpnService() {
         const val ACTION_START = "dev.warpscout.app.tunnel.START"
         const val ACTION_STOP = "dev.warpscout.app.tunnel.STOP"
         const val EXTRA_CONF = "conf"
+
+        /** STOP по просьбе человека: после него автоматика туннель не включает. */
+        const val EXTRA_BY_USER = "byUser"
         private const val CHANNEL = "warpscout.tunnel.quiet"
         private const val LEGACY_CHANNEL = "warpscout.tunnel"
         private const val NOTIF_ID = 4200
@@ -2508,9 +2530,14 @@ class WarpVpnService : VpnService() {
         /** Причина, по которой сдался. */
         fun failureReason(): String? = TunnelState.error
 
-        fun stop(context: Context) {
+        fun stop(context: Context, byUser: Boolean = false) {
             runCatching {
-                context.startService(Intent(context, WarpVpnService::class.java).apply { action = ACTION_STOP })
+                context.startService(
+                    Intent(context, WarpVpnService::class.java).apply {
+                        action = ACTION_STOP
+                        putExtra(EXTRA_BY_USER, byUser)
+                    }
+                )
             }
         }
 
@@ -2524,11 +2551,19 @@ class WarpVpnService : VpnService() {
             return !TunnelState.busy
         }
 
-        /** Поднять и дождаться handshake (для проверки ресурсов из-под туннеля). */
-        fun startAndWait(context: Context, config: WarpConfig, timeoutMs: Int): Boolean {
+        /**
+         * Поднять и дождаться handshake (для проверки ресурсов из-под туннеля). [isCancelled] —
+         * «Остановить подбор»: ожидание прерывается сразу, а не по истечении всего окна.
+         */
+        fun startAndWait(
+            context: Context,
+            config: WarpConfig,
+            timeoutMs: Int,
+            isCancelled: () -> Boolean = { false }
+        ): Boolean {
             start(context, config)
             val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(2000)
-            while (System.currentTimeMillis() < deadline) {
+            while (System.currentTimeMillis() < deadline && !isCancelled()) {
                 if (TunnelState.up) return true
                 Thread.sleep(200)
             }

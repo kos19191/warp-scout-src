@@ -21,6 +21,7 @@ class VpnTunnelController(private val context: Context) : TunnelController {
 
     override val supported: Boolean get() = true
     override val isUp: Boolean get() = TunnelState.up
+    override val active: Boolean get() = TunnelState.up || TunnelState.wanted
     override val status: String get() = TunnelState.status
 
     override fun ensurePermission(activity: Activity): Boolean {
@@ -119,6 +120,8 @@ class VpnTunnelController(private val context: Context) : TunnelController {
 
     override fun stop() = WarpVpnService.stop(context)
 
+    override fun stopByUser() = WarpVpnService.stop(context, byUser = true)
+
     override fun waitStopped(timeoutMs: Int): Boolean = WarpVpnService.waitDown(timeoutMs)
 
     // Причину отказа называет сервис, а живёт она в снимке его состояния: в процессе интерфейса
@@ -145,18 +148,37 @@ class VpnTunnelVerifier(private val context: Context) : TunnelVerifier {
 
     override val title: String get() = "собственный туннель WarpScout"
 
-    override fun verify(config: WarpConfig, checks: List<ResourceCheck>, settleMs: Int): List<ResourceResult> {
-        if (checks.isEmpty()) return emptyList()
+    override fun verify(config: WarpConfig, checks: List<ResourceCheck>, settleMs: Int): List<ResourceResult> =
+        verify(config, checks, settleMs) { false }
+
+    /**
+     * Проверка изнутри с отменой: «Остановить подбор» прерывает и ожидание подъёма, и очередь
+     * запросов к сайтам. Туннель проверки гасится в любом случае (finally).
+     */
+    override fun verify(
+        config: WarpConfig,
+        checks: List<ResourceCheck>,
+        settleMs: Int,
+        isCancelled: () -> Boolean
+    ): List<ResourceResult> {
+        if (checks.isEmpty() || isCancelled()) return emptyList()
         // Проверка «из-под туннеля» должна идти ЧЕРЕЗ туннель: снимаем привязку к non-VPN сети,
         // иначе CleanNetwork вернул бы нам ту же самую чистую сеть и смысл проверки пропал.
         CleanNetwork.unbind(context)
-        if (!WarpVpnService.startAndWait(context, config, settleMs)) {
+        if (!WarpVpnService.startAndWait(context, config, settleMs, isCancelled)) {
+            CleanNetwork.bind(context)
+            if (isCancelled()) return emptyList()
             return checks.map {
                 ResourceResult(check = it, ok = false, errorClass = "tunnel_not_started")
             }
         }
         return try {
-            checks.map { prober.check(it, "tunnel") }
+            val out = ArrayList<ResourceResult>(checks.size)
+            for (check in checks) {
+                if (isCancelled()) break
+                out.add(prober.check(check, "tunnel"))
+            }
+            out
         } finally {
             WarpVpnService.stop(context)
             CleanNetwork.bind(context)   // возвращаем «чистую» привязку для остатка подбора

@@ -1203,6 +1203,17 @@
                             android:layout_weight="1"
                             android:text="@string/btn_tunnel_copy" />
                     </LinearLayout>
+
+                    <!--
+                      Журнал файлом .txt: в буфер обмена идёт только хвост, а файл несёт журнал
+                      целиком — его удобнее отправить.
+                    -->
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnTunnelExport"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/btn_log_export" />
                 </LinearLayout>
 
                 <TextView

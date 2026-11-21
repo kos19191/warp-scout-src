@@ -67,6 +67,8 @@
     <string name="home_scan_title">Подбор сервера</string>
     <string name="home_backup_title">Резервная копия</string>
     <string name="btn_stop">Остановить подбор</string>
+    <string name="btn_stopping">Останавливаю подбор…</string>
+    <string name="status_stopping">Останавливаю подбор — доделываю начатые пробы…</string>
     <string name="btn_schedule">Включить фоновый подбор</string>
     <string name="btn_schedule_off">Выключить авто-обновление</string>
     <string name="schedule_on">Фоновый подбор включён: %1$s, при любой доступной сети</string>
@@ -155,6 +157,9 @@
     <string name="tunnel_state_idle">туннель не запущен</string>
     <string name="btn_tunnel_refresh">Обновить журнал</string>
     <string name="btn_tunnel_copy">Скопировать журнал</string>
+    <string name="btn_log_export">Выгрузить журнал в .txt</string>
+    <string name="log_export_saved">Журнал сохранён: %1$s</string>
+    <string name="log_export_failed">Не удалось сохранить журнал</string>
     <string name="btn_log_clear">Очистить журнал</string>
     <string name="banner_log_cleared">Журнал очищен — дальше пишется только новое</string>
     <string name="journal_cleared_hint">Журнал очищен. Подключитесь на вкладке «Главная» или запустите подбор — новые строки появятся здесь.</string>
@@ -167,6 +172,7 @@
     <string name="tile_label">Туннель</string>
     <string name="tile_on">WarpScout: включён</string>
     <string name="tile_off">WarpScout: выключен</string>
+    <string name="tile_reconnecting">WarpScout: переподключается</string>
     <string name="tile_no_config">Сначала проверь сеть в приложении</string>
     <string name="notif_channel">Туннель (тихий)</string>
     <string name="notif_stop">Отключить</string>
@@ -270,6 +276,7 @@
     <string name="status_reconnect_silent">сервер не отвечает — переподключаюсь</string>
     <string name="conn_no_network">● Нет сети — жду подключения</string>
     <string name="conn_failed">● Не удалось подключиться: %1$s</string>
+    <string name="conn_waiting">● Переподключусь сам: %1$s</string>
     <string name="journal_empty">Журнал пуст: туннель ещё не запускался. Подключитесь на вкладке «Главная» — здесь появится каждый шаг с временем.</string>
     <string name="version_footer">WarpScout %1$s · %2$s</string>
     <string name="variant_tunnel">полная сборка с туннелем</string>

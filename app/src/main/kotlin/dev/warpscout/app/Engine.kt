@@ -30,6 +30,22 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class Engine(private val context: Context) {
 
+    companion object {
+        @Volatile
+        private var shared: Engine? = null
+
+        /**
+         * Один движок на процесс. Раньше у каждого экрана был свой: после поворота, смены темы или
+         * возврата в приложение экран создавался заново вместе с новым — пустым — движком, а прежний
+         * подбор продолжал идти в старом. «Остановить подбор» останавливало пустой движок, и подбор
+         * «не останавливался». Контекст — приложения, чтобы не держать закрытый экран.
+         */
+        fun shared(context: Context): Engine =
+            shared ?: synchronized(this) {
+                shared ?: Engine(context.applicationContext).also { shared = it }
+            }
+    }
+
     private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "warpscout-engine") }
     private val cancelled = AtomicBoolean(false)
 
@@ -57,10 +73,16 @@ class Engine(private val context: Context) {
         cancelled.set(true)
     }
 
+    /**
+     * [allowAutoApply] — можно ли поднять туннель по галочке «авто-применение». Фоновый подбор
+     * передаёт false, если туннель последним выключил сам человек: «выключил руками» значит, что
+     * ничто не включает его само, и подбор по расписанию тоже.
+     */
     fun start(
         spec: TuningSpec,
         manual: WarpConfig?,
         sink: ProgressSink,
+        allowAutoApply: Boolean = true,
         onDone: (TuningResult?, String?) -> Unit
     ) {
         if (running) {
@@ -99,7 +121,7 @@ class Engine(private val context: Context) {
             val wasUp = runCatching { before.supported && before.isUp }.getOrDefault(false)
             val previousText = if (wasUp) previousTunnelText(guard) else ""
             tunnelBackUp = false
-            val outcome = runCatching { runOnce(spec, manual, watched) }
+            val outcome = runCatching { runOnce(spec, manual, watched, allowAutoApply) }
             if (wasUp && !tunnelBackUp) restoreTunnel(before, previousText, watched)
             ScanGuard.stop(guard)
             main.post {
@@ -110,15 +132,26 @@ class Engine(private val context: Context) {
     }
 
     /** Для WorkManager: тот же цикл, но синхронно. */
-    fun runBlocking(spec: TuningSpec, manual: WarpConfig?, sink: ProgressSink, limitMs: Long): TuningResult? {
+    fun runBlocking(
+        spec: TuningSpec,
+        manual: WarpConfig?,
+        sink: ProgressSink,
+        limitMs: Long,
+        allowAutoApply: Boolean = true
+    ): TuningResult? {
         val latch = CountDownLatch(1)
         var result: TuningResult? = null
-        start(spec, manual, sink, { r, _ -> result = r; latch.countDown() })
+        start(spec, manual, sink, allowAutoApply, { r, _ -> result = r; latch.countDown() })
         latch.await(limitMs, TimeUnit.MILLISECONDS)
         return result
     }
 
-    private fun runOnce(spec: TuningSpec, manual: WarpConfig?, sink: ProgressSink): TuningResult {
+    private fun runOnce(
+        spec: TuningSpec,
+        manual: WarpConfig?,
+        sink: ProgressSink,
+        allowAutoApply: Boolean
+    ): TuningResult? {
         val prefs = Prefs(context)
         val tunnel = TunnelFactory.create(context)
 
@@ -163,6 +196,14 @@ class Engine(private val context: Context) {
             tuner.run(withCache, sink)
         } finally {
             CleanNetwork.unbind(context)
+        }
+        // Остановленный подбор — это не результат. Раньше недосчитанный прогон шёл дальше как
+        // обычный: записывал отчёт и тройку замен из случайного куска пула и по галочке даже
+        // поднимал туннель на «лучшей» точке — после «Остановить подбор» человек видел, что
+        // подбор продолжает работать. Прежний туннель вернёт вызывающий (см. start).
+        if (sink.isCancelled()) {
+            sink.log("подбор остановлен — результат не сохраняю и не применяю")
+            return null
         }
         last = result
         runCatching { Report.writeAll(result.report, ConfigFiles.dir(context, "reports"), "warpscout") }
@@ -238,10 +279,14 @@ class Engine(private val context: Context) {
         val best = result.best
         if (best != null && tunnel.supported) {
             val allowed = runCatching { android.net.VpnService.prepare(context) == null }.getOrDefault(false)
+            val autoApply = prefs.autoApply && allowAutoApply
+            if (prefs.autoApply && !allowAutoApply && !wasUp) {
+                sink.log("авто-применение пропущено: туннель выключен вручную — сам его не включаю")
+            }
             when {
-                prefs.autoApply && !allowed ->
+                autoApply && !allowed ->
                     sink.log("авто-применение пропущено: нет разрешения на VPN — открой приложение и нажми «Туннель»")
-                prefs.autoApply || wasUp -> {
+                autoApply || wasUp -> {
                     val withRoutes = ConfigComposer.applyPrefs(best, prefs, prefs.junkPool)
                     val up = runCatching { tunnel.startAndAwait(withRoutes, 25000) }.getOrDefault(false)
                     if (up) {

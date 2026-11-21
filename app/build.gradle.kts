@@ -13,6 +13,14 @@ android {
         targetSdk = 35
         versionCode = 52
         versionName = "1.10.25"
+        // Номер сборки (короткий хеш коммита из CI). Версия от правки к правке не меняется —
+        // 1.10.25 пересобирается поверх, — и только по этой метке в журнале видно, какая именно
+        // сборка стоит на телефоне. Локально — «local».
+        buildConfigField(
+            "String",
+            "BUILD_REV",
+            "\"" + (System.getenv("GITHUB_SHA")?.take(7) ?: "local") + "\""
+        )
     }
 
     flavorDimensions += "mode"

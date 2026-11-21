@@ -100,6 +100,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("пул endpoint'ов") {
             endpointPool()
         }
+        section("отмена подбора") {
+            scanCancel()
+        }
         section("скоринг и отчёт") {
             scoring()
             reportRendering()
@@ -699,6 +702,23 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
      * Снимок состояния — единственный способ узнать что-либо о туннеле из другого процесса,
      * поэтому сериализация проверяется отдельно: битый снимок = «туннель работает, а UI молчит».
      */
+    /**
+     * «Остановить подбор» должно останавливать: скан с поднятым флагом отмены не шлёт ни одной
+     * пробы и возвращается сразу, а не через весь пул (раньше пул досчитывался до конца).
+     */
+    private fun scanCancel() {
+        val priv = ByteArray(32) { (it + 5).toByte() }.also { it[31] = 0 }
+        val account = WarpAccount(Crypto.base64(priv), Crypto.base64(Crypto.publicOf(priv)))
+        // TEST-NET-1 (192.0.2.0/24) никуда не ведёт: без отмены каждая проба ждала бы до трёх секунд.
+        val pool = (1..40).map { Endpoint("192.0.2.$it", 2408) }
+        val prober = WgProber(NetSettings(attempts = 3, timeoutMs = 1000, concurrency = 4))
+        val t0 = System.currentTimeMillis()
+        val res = prober.scan(pool, account, Crypto.publicOf(priv), isCancelled = { true })
+        val took = System.currentTimeMillis() - t0
+        expect("отмена: скан после «Остановить» не возвращает проб", res.size, 0)
+        check("отмена: скан возвращается сразу, а не через весь пул", took < 1500, "заняло $took мс")
+    }
+
     private fun serviceState() {
         val full = TunnelStatus(
             up = true,
@@ -731,6 +751,16 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         expect("снимок: последняя ошибка", back?.lastError, "endpoint молчит")
         expect("снимок: время этапа", back?.lastStageMs, 1_758_000_004_000L)
         expect("снимок: журнал трогали", back?.touched, true)
+
+        // «Туннель нужен» и «выключил сам человек»: по ним кнопка и плитка решают, что предлагать,
+        // а фоновый подбор — включать ли туннель. Потерять их при сериализации — значит снова
+        // «выключил руками, а он включился сам».
+        val held = TunnelStatus.fromJson(TunnelStatus(wanted = true, stoppedByUser = true).toJson())
+        expect("снимок: туннель нужен", held?.wanted, true)
+        expect("снимок: выключен вручную", held?.stoppedByUser, true)
+        val legacy = TunnelStatus.fromJson("{\"up\": false, \"phase\": 5}")
+        expect("снимок: старый формат — туннель не нужен", legacy?.wanted, false)
+        expect("снимок: старый формат — не выключался вручную", legacy?.stoppedByUser, false)
 
         // Русский текст с кавычками и переводами строк — иначе журнал превратится в кашу.
         val tricky = TunnelStatus(

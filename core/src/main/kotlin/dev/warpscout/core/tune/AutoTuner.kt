@@ -52,6 +52,19 @@ interface TunnelVerifier {
     val title: String
     /** Поднять туннель по конфигу, дождаться handshake, прогнать проверки, вернуть результаты, остановить. */
     fun verify(config: WarpConfig, checks: List<ResourceCheck>, settleMs: Int): List<ResourceResult>
+
+    /**
+     * То же, но с отменой: одна проверка изнутри — это подъём туннеля и до десятка запросов, то есть
+     * десятки секунд. Без отмены «Остановить подбор» ждало их до конца. Реализация, которая умеет
+     * прерываться, переопределяет этот вариант; остальные работают как раньше.
+     */
+    fun verify(
+        config: WarpConfig,
+        checks: List<ResourceCheck>,
+        settleMs: Int,
+        isCancelled: () -> Boolean
+    ): List<ResourceResult> = verify(config, checks, settleMs)
+
     fun stop() {}
 }
 
@@ -143,6 +156,10 @@ class AutoTuner(
                 quickNotes += "Быстрый старт: сохранённая конфигурация проверена заново, полный скан не понадобился."
                 val quick = tuneWith(narrow, progress, started, quickNotes, account, peerPublic)
                 if (quick.best != null && cachedConfirmed(quick, cached)) return quick
+                // Остановили во время быстрого старта — полный подбор не начинаем. Раньше он
+                // начинался именно здесь: быстрая проверка «не подтвердилась» (её прервали), и
+                // «Остановить подбор» запускало полный скан пула вместо остановки.
+                if (progress.isCancelled()) return quick
                 progress.log("сохранённая конфигурация не подтвердилась — полный подбор")
             }
         }
@@ -199,7 +216,7 @@ class AutoTuner(
     progress.log("Ключи: ${account.source}; кандидатов: ${endpoints.size}")
 
     // --- фаза 1: быстрый скан -------------------------------------------------------
-    val coarse = wgProber.scan(endpoints, account, peerPublic, junk = null) { d, t, _ ->
+    val coarse = wgProber.scan(endpoints, account, peerPublic, junk = null, isCancelled = { progress.isCancelled() }) { d, t, _ ->
         if (d % 25 == 0 || d == t) progress.progress(d, t, "первичный UDP-скан")
     }
     if (progress.isCancelled()) return finish(spec, started, notes, emptyList(), emptyList(), account, progress, endpoints.size)
@@ -230,7 +247,8 @@ class AutoTuner(
     }
 
     // --- фаза 3: MASQUE/TLS, если подсеть задана ------------------------------------
-    val tlsResults: Map<Endpoint, ProbeSample> = if (spec.endpointSpec.ports.contains(443) &&
+    val tlsResults: Map<Endpoint, ProbeSample> = if (!progress.isCancelled() &&
+        spec.endpointSpec.ports.contains(443) &&
         spec.endpointSpec.subnets.any { it.startsWith("162.159.19") }
     ) {
         refineCandidates.take(4).associate { it.endpoint to tlsProber.probe(it.endpoint) }
@@ -272,19 +290,22 @@ class AutoTuner(
     val ordered = candidates.sortedByDescending { it.score }
 
     // --- ресурсы ---------------------------------------------------------------------
-    val resourceResults = if (spec.checkBaselineResources && spec.resources.isNotEmpty()) {
+    // После «Остановить подбор» ни замеров ресурсов, ни проверки изнутри: это ещё минута работы.
+    val resourceResults = if (!progress.isCancelled() && spec.checkBaselineResources && spec.resources.isNotEmpty()) {
         progress.log("Проверяю доступность ресурсов без туннеля (это база сравнения)…")
         resources.checkAll(spec.resources)
     } else emptyList()
 
     var finalList = ordered
-    if (spec.verifyThroughTunnel && tunnel != null && ordered.isNotEmpty() && spec.resources.isNotEmpty()) {
+    if (!progress.isCancelled() && spec.verifyThroughTunnel && tunnel != null && ordered.isNotEmpty() && spec.resources.isNotEmpty()) {
         progress.log("Проверяю топ-${minOf(3, ordered.size)} кандидатов внутри туннеля…")
         val verified = ArrayList<Candidate>()
         val tv: TunnelVerifier = tunnel
         for (cand in ordered.take(minOf(3, ordered.size))) {
             if (progress.isCancelled()) break
-            val results = runCatching { tv.verify(cand.config, spec.resources, spec.tunnelSettleMs) }
+            val results = runCatching {
+                tv.verify(cand.config, spec.resources, spec.tunnelSettleMs) { progress.isCancelled() }
+            }
                 .getOrElse {
                     notes += "Туннель не поднялся (${it.javaClass.simpleName}) — пропускаю проверку изнутри."
                     emptyList()
@@ -323,7 +344,9 @@ class AutoTuner(
     ): TuningResult {
         val endpoints = EndpointPool.build(spec.endpointSpec).take(60)
         progress.log("Эвристический режим: ${endpoints.size} endpoint'ов, TLS+UDP")
-        val results = endpoints.map { ep ->
+        // По одной точке за раз, поэтому отмену проверяем перед каждой: иначе 60 точек по TLS+UDP
+        // досчитывались бы минуты после «Остановить подбор».
+        val results = endpoints.asSequence().takeWhile { !progress.isCancelled() }.map { ep ->
             val tls = tlsProber.probe(ep)
             val peerPub = runCatching { Crypto.unBase64(account.peerPublicB64) }.getOrElse { ByteArray(32) }
             val udp = wgProber.probe(ep, account, peerPub, null).stats
@@ -331,7 +354,7 @@ class AutoTuner(
                 udp.replies + (if (tls.verdict == Verdict.TLS_OK) 1 else 0), udp.attempts + 1)
             val parts = Scoring.evaluate(stats, null, 0, 0, weights)
             Candidate(buildConfig(spec, account, ep, JunkLibrary.tlsFixed(), parts.total), stats, parts)
-        }.sortedByDescending { it.score }
+        }.toList().sortedByDescending { it.score }
         return finish(spec, started, notes, results, emptyList(), account, progress, endpoints.size)
     }
 

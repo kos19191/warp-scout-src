@@ -19,10 +19,18 @@ class TuneWorker(appContext: Context, params: WorkerParameters) : Worker(appCont
         // Если туннель сейчас работает, это означало бы «сам себя выключил»: именно так выглядело
         // «нажал галочку каждый час — и соединение отвалилось». Не мешаем и заходим позже.
         // `TunnelState` живёт во flavor'е `tunnel`, поэтому смотрим через общий мост сборки.
-        if (runCatching { TunnelFactory.create(context).isUp }.getOrDefault(false)) {
+        // То же, если туннель не поднят, но сервис его держит (переподключается или ждёт повтора):
+        // повтор посреди подбора поднял бы туннель, и замеры пошли бы через WARP.
+        val tunnel = TunnelFactory.create(context)
+        if (runCatching { tunnel.isUp || tunnel.active }.getOrDefault(false)) {
             notify(context, context.getString(R.string.tune_delayed))
             return Result.retry()
         }
+        // Туннель последним выключил сам человек — фоновый подбор его не включает (даже с галочкой
+        // «авто-применение»): «выключил руками» значит «не включай сам».
+        val userOff = runCatching {
+            dev.warpscout.app.status.TunnelStatusBus.read(context)?.stoppedByUser == true
+        }.getOrDefault(false)
         val manual = prefs.manualConf.takeIf { it.isNotBlank() }
             ?.let { runCatching { dev.warpscout.core.config.WgConf.toWarpConfig("импорт", it) }.getOrNull() }
         val sink = object : ProgressSink {
@@ -53,8 +61,9 @@ class TuneWorker(appContext: Context, params: WorkerParameters) : Worker(appCont
                 }
             }
         }
-        val result = Engine(context).runBlocking(prefs.tuningSpec(), manual, sink, 15 * 60_000L)
-            ?: return Result.retry()
+        val result = Engine(context).runBlocking(
+            prefs.tuningSpec(), manual, sink, 15 * 60_000L, allowAutoApply = !userOff
+        ) ?: return Result.retry()
         val best = result.best
         // Бекап и после фонового подбора: настройки меняются и без участия человека.
         runCatching { Backup.save(context, "фоновый подбор") }

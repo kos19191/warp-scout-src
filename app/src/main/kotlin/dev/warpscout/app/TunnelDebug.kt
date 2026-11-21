@@ -243,6 +243,22 @@ object TunnelDebug {
         }
     }
 
+    /**
+     * Журнал целиком — для выгрузки в файл. В буфер обмена идёт только хвост ([dump], 24 КБ):
+     * длинный текст режут и буфер, и мессенджеры, поэтому присланные журналы начинались с
+     * середины строки и без начала аварии. Файлу этот предел не нужен: весь журнал — до
+     * четверти мегабайта.
+     */
+    fun fullDump(): String {
+        val file = journal
+        val text = runCatching {
+            if (file != null && file.exists()) file.readText(Charsets.UTF_8) else ""
+        }.getOrDefault("")
+        // Нули в журнале — след совпавшей ротации из двух процессов; показывать их незачем.
+        val clean = text.replace("\u0000", "").trimEnd()
+        return clean.ifEmpty { dump() }
+    }
+
     /** Короткая «что не так»-строка для Toast/плашки: последняя ошибка или последний этап. */
     fun brief(): String {
         lastError?.let { return it }

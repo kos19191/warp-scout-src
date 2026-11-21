@@ -47,10 +47,11 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var prefs: Prefs
-    private val engine by lazy { Engine(this) }
+    private val engine by lazy { Engine.shared(this) }
     private val tunnel by lazy { TunnelFactory.create(this) }
-    private val log = StringBuilder()
-    private val cancelled = AtomicBoolean(false)
+    /** Журнал подбора и флаг «Остановить» — общие для всех экранов (см. [scanLog]). */
+    private val log: StringBuilder get() = scanLog
+    private val cancelled: AtomicBoolean get() = scanCancelled
     private val junkChecks = mutableListOf<MaterialCheckBox>()
     private var runStartedAt = 0L
     private var endpointBeforeRun = ""
@@ -167,11 +168,16 @@ class MainActivity : AppCompatActivity() {
                 sink().log("   подробности: Journal → «Скопировать журнал» (раздел «Падения»)")
             }
             binding.textStatus.setText(R.string.status_idle)
+            // Номер сборки рядом с версией: 1.10.25 пересобирается поверх, и только так видно,
+            // какая именно сборка стоит.
             binding.textVersion.text = getString(
                 R.string.version_footer,
-                BuildConfig.VERSION_NAME,
+                BuildConfig.VERSION_NAME + " · " + BuildConfig.BUILD_REV,
                 getString(if (BuildConfig.TUNNEL_SUPPORTED) R.string.variant_tunnel else R.string.variant_scout)
             )
+            shown = this
+            // Подбор мог идти, пока экран создавался заново: показываем его и даём остановить.
+            syncScanUi(fresh = true)
         } catch (t: Throwable) {
             SafeMode.show(this, t, "запуск интерфейса")
         }
@@ -179,6 +185,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         stopTunnelPolling()
+        if (shown === this) shown = null
         super.onDestroy()
     }
 
@@ -208,6 +215,7 @@ class MainActivity : AppCompatActivity() {
         // приложение, и исключение здесь раньше снимало приложение целиком (системное «закрыто
         // из-за ошибки»). Ошибка обновления — не повод терять экран.
         runCatching {
+            shown = this
             startTunnelPolling()
             refreshInstalledApps()
             updateAppsState()
@@ -216,6 +224,7 @@ class MainActivity : AppCompatActivity() {
             refreshLogBox()
             renderShortlist()
             showKeys()
+            syncScanUi(fresh = false)
         }.onFailure { t ->
             TunnelDebug.error("обновление экрана: " + SafeMode.describe(t))
             runCatching { banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true) }
@@ -776,13 +785,15 @@ class MainActivity : AppCompatActivity() {
             return
         }
         autoConnectAfterScan = autoConnect
+        scanAutoConnect = autoConnect
         persistUi()
         // Туннель, который мы сейчас погасим ради замеров, вернём в конце подбора — чем бы тот ни
         // кончился (см. restoreTunnelAfterScan). Запоминаем до остановки: после неё isUp уже false.
-        val tunnelWasUp = tunnel.supported && tunnel.isUp
+        // «Держит» — тоже считается: туннель, который ждёт повтора, поднялся бы посреди замеров.
+        val tunnelWasUp = tunnel.supported && (tunnel.isUp || tunnel.active)
         // Важно: при поднятом туннеле замеры идут через сам туннель (и через WARP), поэтому
         // «живых 0 из 120» — это не сеть, а самообман. Перед подбором туннель гасим.
-        if (tunnel.supported && tunnel.isUp) {
+        if (tunnelWasUp) {
             banner(getString(R.string.banner_scan_stops_tunnel))
             tunnel.stop()
             runCatching { tunnel.waitStopped(3000) }
@@ -799,6 +810,9 @@ class MainActivity : AppCompatActivity() {
         binding.progress.visibility = View.VISIBLE
         binding.progress.isIndeterminate = true
         binding.textStatus.setText(R.string.status_running)
+        binding.btnStop.visibility = View.VISIBLE
+        binding.btnStop.isEnabled = true
+        binding.btnStop.setText(R.string.btn_stop)
         // Пока идёт подбор, кнопка подключения честно говорит, чем занята: иначе кажется, что
         // нажатие не сработало.
         if (autoConnect) {
@@ -806,33 +820,53 @@ class MainActivity : AppCompatActivity() {
             binding.btnTunnel.setText(R.string.btn_tunnel_searching)
         }
         engine.start(prefs.tuningSpec(), manualConfig(), sink()) { result, error ->
-            binding.progress.visibility = View.GONE
-            when {
-                error != null -> binding.textStatus.text = getString(R.string.status_error, error)
-                result == null -> binding.textStatus.setText(R.string.status_cancelled)
-                else -> showResult(result)
-            }
-            binding.btnTunnel.isEnabled = tunnel.supported
-            binding.btnTunnel.setText(if (tunnel.isUp) R.string.btn_tunnel_off else R.string.btn_tunnel_on)
-            val connect = autoConnectAfterScan
             autoConnectAfterScan = false
-            val found = error == null && result?.best != null
-            val target = result?.best?.endpoint?.render().orEmpty()
-            when {
-                // Подбор уже поднял туннель сам (авто-применение). toggleTunnel() на поднятом
-                // туннеле его ВЫКЛЮЧАЕТ — раньше «подобрать и подключиться» так и гасило только что
-                // поднятое подключение.
-                connect && found && tunnel.isUp -> banner(getString(R.string.top3_now, target))
-                connect && found -> {
-                    banner(getString(R.string.scan_found_connecting_to, target))
-                    toggleTunnel()
-                }
-                // До подбора туннель работал — возвращаем его при любом исходе: ошибка, отмена,
-                // «живых точек нет». Раньше в этих случаях человек оставался без туннеля.
-                tunnelWasUp && !tunnel.isUp -> runCatching { restoreTunnelAfterScan(found, target) }
-                connect && error == null && result != null -> banner(getString(R.string.scan_no_point))
-            }
+            // Итог — на тот экран, что сейчас на виду: подбор переживает поворот и возврат в
+            // приложение, а экран, который его запускал, к этому времени мог быть уже закрыт.
+            val ui = shown?.takeIf { it.uiReady() } ?: this
+            ui.onScanDone(result, error, autoConnect, tunnelWasUp)
         }
+    }
+
+    /** Подбор закончился (или его остановили): показать итог и сделать то, что было обещано. */
+    private fun onScanDone(result: TuningResult?, error: String?, connect: Boolean, tunnelWasUp: Boolean) {
+        scanAutoConnect = false
+        if (!::binding.isInitialized) return
+        binding.progress.visibility = View.GONE
+        binding.btnStop.visibility = View.GONE
+        when {
+            error != null -> binding.textStatus.text = getString(R.string.status_error, error)
+            result == null -> binding.textStatus.setText(R.string.status_cancelled)
+            else -> showResult(result)
+        }
+        binding.btnTunnel.isEnabled = tunnel.supported
+        binding.btnTunnel.setText(if (tunnel.isUp) R.string.btn_tunnel_off else R.string.btn_tunnel_on)
+        val found = error == null && result?.best != null
+        val target = result?.best?.endpoint?.render().orEmpty()
+        when {
+            // Подбор уже поднял туннель сам (авто-применение). Переключатель на поднятом
+            // туннеле его ВЫКЛЮЧАЕТ — раньше «подобрать и подключиться» так и гасило только что
+            // поднятое подключение.
+            connect && found && tunnel.isUp -> banner(getString(R.string.top3_now, target))
+            connect && found -> {
+                banner(getString(R.string.scan_found_connecting_to, target))
+                connectAfterScan()
+            }
+            // До подбора туннель работал — возвращаем его при любом исходе: ошибка, отмена,
+            // «живых точек нет». Раньше в этих случаях человек оставался без туннеля.
+            tunnelWasUp && !tunnel.isUp -> runCatching { restoreTunnelAfterScan(found, target) }
+            connect && error == null && result != null -> banner(getString(R.string.scan_no_point))
+        }
+    }
+
+    /**
+     * Подключиться по итогам подбора — то же, что «Включить» на выключенном туннеле, но без
+     * переключателя: он теперь выключает и туннель, который сервис держит в ожидании повтора.
+     */
+    private fun connectAfterScan() {
+        val cfg = currentConfig() ?: return noConfig()
+        if (!tunnel.ensurePermission(this)) return
+        connectWithFallback(cfg)
     }
 
     /**
@@ -843,7 +877,7 @@ class MainActivity : AppCompatActivity() {
      * точку, поднимаемся на ней (она только что проверена на этой сети), иначе — на прежней.
      */
     private fun restoreTunnelAfterScan(found: Boolean, target: String) {
-        if (!tunnel.supported || tunnel.isUp || connecting) return
+        if (!tunnel.supported || tunnel.active || connecting) return
         // Без новой точки поднимаем ровно то, что работало до подбора (сохранённый текст), а не
         // лучшую точку какого-нибудь прошлого подбора: та могла давно умереть.
         val cfg = if (found) {
@@ -960,11 +994,21 @@ class MainActivity : AppCompatActivity() {
             ConfigFiles.copyToClipboard(this, TunnelDebug.dump() + "\n\n" + CrashLog.describe(this))
             toast(getString(R.string.copied_ok))
         }
+        binding.btnTunnelExport.setOnClickListener { exportJournal() }
 
         binding.btnStop.setOnClickListener {
             cancelled.set(true)
             engine.cancel()
-            binding.textStatus.setText(R.string.status_cancelled)
+            if (engine.running) {
+                // Подбор доделывает уже начатые пробы (секунда-две) и только потом сообщает итог —
+                // показываем, что остановка идёт, а не делаем вид, что нажатие не сработало.
+                binding.btnStop.isEnabled = false
+                binding.btnStop.setText(R.string.btn_stopping)
+                binding.textStatus.setText(R.string.status_stopping)
+            } else {
+                binding.btnStop.visibility = View.GONE
+                binding.textStatus.setText(R.string.status_cancelled)
+            }
         }
 
         binding.poolGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
@@ -1134,6 +1178,78 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Журнал — файлом .txt: копия в «Загрузки» и сразу окно «Поделиться».
+     *
+     * Зачем, если есть «Скопировать журнал»: буфер обмена несёт только хвост (24 КБ), и длинный
+     * текст ещё режут мессенджеры — присланные журналы начинались с середины строки, без начала
+     * аварии. В файл идёт весь журнал туннеля, последний подбор, падения и шапка: версия с номером
+     * сборки, телефон и состояние сервиса прямо сейчас.
+     */
+    private fun exportJournal() {
+        // Журнал подбора и состояние читаем здесь, на главном потоке, — файл собираем в фоне.
+        val scanText = log.toString()
+        val snapshot = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
+        val app = applicationContext
+        Thread({
+            val now = java.util.Date()
+            val text = buildString {
+                appendLine(
+                    "WarpScout ${BuildConfig.VERSION_NAME} · сборка ${BuildConfig.BUILD_REV} · " +
+                        app.getString(if (BuildConfig.TUNNEL_SUPPORTED) R.string.variant_tunnel else R.string.variant_scout)
+                )
+                appendLine(
+                    "выгружено: " +
+                        java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(now)
+                )
+                appendLine(
+                    "телефон: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} " +
+                        "(API ${Build.VERSION.SDK_INT})"
+                )
+                if (snapshot != null) {
+                    appendLine(
+                        "состояние: " + (if (snapshot.up) "туннель работает" else "туннель не поднят") +
+                            (if (snapshot.wanted) ", сервис держит туннель" else "") +
+                            (if (snapshot.stoppedByUser) ", выключен вручную" else "") +
+                            ", фаза ${snapshot.phase}" +
+                            snapshot.endpoint.takeIf { it.isNotBlank() }?.let { ", точка $it" }.orEmpty() +
+                            snapshot.status.takeIf { it.isNotBlank() }?.let { ", «$it»" }.orEmpty()
+                    )
+                }
+                appendLine()
+                appendLine("── журнал туннеля ──")
+                appendLine(TunnelDebug.fullDump())
+                if (scanText.isNotBlank()) {
+                    appendLine()
+                    appendLine("── последний подбор ──")
+                    appendLine(scanText)
+                }
+                appendLine()
+                appendLine(CrashLog.describe(app))
+            }
+            val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(now)
+            val name = "WarpScout-log-$stamp.txt"
+            // Для «Поделиться» — копия во временном каталоге (его отдаёт FileProvider); прежние
+            // выгрузки удаляем, чтобы они не копились.
+            val shareFile = runCatching {
+                val dir = java.io.File(app.cacheDir, "share").apply { mkdirs() }
+                dir.listFiles()?.filter { it.name.startsWith("WarpScout-log-") }?.forEach { it.delete() }
+                java.io.File(dir, name).apply { writeText(text) }
+            }.getOrNull()
+            val saved = runCatching { ConfigFiles.saveTextToDownloads(app, name, text) }.getOrNull()
+            runOnUiThread {
+                if (shareFile == null && saved == null) {
+                    toast(getString(R.string.log_export_failed))
+                    return@runOnUiThread
+                }
+                if (saved != null) toast(getString(R.string.log_export_saved, saved))
+                if (shareFile != null) {
+                    runCatching { startActivity(ConfigFiles.shareIntent(this, shareFile)) }
+                }
+            }
+        }, "warpscout-log-export").apply { isDaemon = true }.start()
+    }
+
+    /**
      * «Очистить журнал»: стирает и журнал подбора (этот экран), и журнал туннеля (его пишет
      * процесс сервиса в общий файл, поэтому удаления памяти мало — файл тоже).
      *
@@ -1212,29 +1328,69 @@ class MainActivity : AppCompatActivity() {
         override fun log(message: String) = runOnUiThread {
             if (log.isNotEmpty()) log.append('\n')
             log.append(message)
-            // После очистки подсказка другая; как только пошли строки, возвращаем обычную —
-            // иначе она всплывёт при следующем пустом журнале и снова соврёт.
-            if (!hintRestored) {
-                hintRestored = true
-                binding.textLogHint.setText(R.string.journal_empty)
-            }
-            binding.textLogHint.visibility = android.view.View.GONE
             if (log.length > 30000) log.delete(0, log.length - 30000)
-            binding.textLog.text = log.toString()
-            refreshLogBox()
-            // Новые строки дописываются в конец: окно должно оставаться у них, пока человек сам не
-            // отлистал вверх почитать — иначе текст выдёргивался бы из-под пальца.
-            logTail.toEnd()
+            // Строки — на экран, который сейчас на виду: подбор мог запустить прежний экран, уже
+            // пересозданный (поворот, смена темы, возврат в приложение).
+            (shown ?: this@MainActivity).showScanLog()
         }
 
         override fun progress(done: Int, total: Int, current: String) = runOnUiThread {
-            binding.progress.isIndeterminate = total <= 0
-            if (total > 0) {
-                binding.progress.max = total
-                binding.progress.progress = done
-            }
-            binding.textStatus.text = "[$done/$total] $current"
+            (shown ?: this@MainActivity).showScanProgress(done, total, current)
         }
+    }
+
+    private fun showScanLog() {
+        if (!::binding.isInitialized) return
+        // После очистки подсказка другая; как только пошли строки, возвращаем обычную —
+        // иначе она всплывёт при следующем пустом журнале и снова соврёт.
+        if (!hintRestored) {
+            hintRestored = true
+            binding.textLogHint.setText(R.string.journal_empty)
+        }
+        binding.textLogHint.visibility = View.GONE
+        binding.textLog.text = log.toString()
+        refreshLogBox()
+        // Новые строки дописываются в конец: окно должно оставаться у них, пока человек сам не
+        // отлистал вверх почитать — иначе текст выдёргивался бы из-под пальца.
+        logTail.toEnd()
+    }
+
+    private fun showScanProgress(done: Int, total: Int, current: String) {
+        if (!::binding.isInitialized) return
+        binding.progress.visibility = View.VISIBLE
+        binding.progress.isIndeterminate = total <= 0
+        if (total > 0) {
+            binding.progress.max = total
+            binding.progress.progress = done
+        }
+        // После «Остановить» ещё приходят строки доделываемых проб: статус «останавливаю» не перетираем.
+        if (!cancelled.get()) binding.textStatus.text = "[$done/$total] $current"
+    }
+
+    /**
+     * Подбор на этом экране. Экран мог создаться заново посреди подбора (поворот, смена темы,
+     * возврат в приложение): тогда он обязан показать, что подбор идёт, и дать его остановить.
+     * Раньше новый экран показывал «Готово», а кнопка «Остановить подбор» висела всегда — и
+     * останавливала уже не тот подбор. Теперь кнопка видна только пока подбор идёт.
+     */
+    private fun syncScanUi(fresh: Boolean) {
+        if (!::binding.isInitialized) return
+        val running = engine.running
+        binding.btnStop.visibility = if (running) View.VISIBLE else View.GONE
+        if (!running) return
+        val stopping = cancelled.get()
+        binding.btnStop.isEnabled = !stopping
+        binding.btnStop.setText(if (stopping) R.string.btn_stopping else R.string.btn_stop)
+        binding.progress.visibility = View.VISIBLE
+        when {
+            stopping -> binding.textStatus.setText(R.string.status_stopping)
+            fresh -> binding.textStatus.setText(R.string.status_running)
+        }
+        if (scanAutoConnect) {
+            binding.btnTunnel.isEnabled = false
+            binding.btnTunnel.setText(R.string.btn_tunnel_searching)
+        }
+        if (fresh && log.isNotEmpty()) showScanLog()
     }
 
     // ----------------------------------------------------------------- итог
@@ -1410,16 +1566,29 @@ class MainActivity : AppCompatActivity() {
             return
         }
         binding.btnTunnel.isEnabled = true
+        refreshTunnelButtonLabel()
+    }
+
+    /**
+     * Подпись главной кнопки по состоянию сервиса. Зовётся и из опроса: туннель меняет состояние
+     * сам (переподключился, выключен из плитки или уведомления), и кнопка не должна звать
+     * «Включить», когда он работает, — как на снимке экрана с «выключен» при живом туннеле.
+     */
+    private fun refreshTunnelButtonLabel() {
+        if (!tunnel.supported) return
         // Пока конфигурации нет, кнопка называется «Найти и подключить»: иначе «Подключить»
         // обещает действие, которого без конфига не будет.
         val hasConfig = engine.last?.best != null || prefs.lastConfigText.isNotBlank() || prefs.manualConf.isNotBlank()
-        binding.btnTunnel.setText(
+        val text = getString(
             when {
-                tunnel.isUp -> R.string.btn_tunnel_off
+                tunnel.isUp || tunnel.active -> R.string.btn_tunnel_off
                 !hasConfig -> R.string.btn_tunnel_search
                 else -> R.string.btn_tunnel_on
             }
         )
+        // Опрос идёт раз в 0,7–3 с: одинаковый текст заново не ставим, иначе кнопка
+        // переверстывается на каждом тике.
+        if (binding.btnTunnel.text.toString() != text) binding.btnTunnel.text = text
     }
 
     private fun poolButtonId(mode: Int): Int = when (mode) {
@@ -1772,8 +1941,11 @@ class MainActivity : AppCompatActivity() {
             banner(getString(R.string.tunnel_unavailable), error = true)
             return
         }
-        if (tunnel.isUp) {
-            tunnel.stop()
+        // «Выключить» — и когда туннель работает, и когда сервис его держит в ожидании повтора:
+        // раньше в ожидании кнопка звала «Включить», и выключить переподключения было нечем.
+        if (tunnel.isUp || tunnel.active) {
+            // Выключает человек: сервис запомнит это и сам туннель больше не включит.
+            tunnel.stopByUser()
             tunnelStartedAtLocal = 0L
             binding.btnTunnel.setText(R.string.btn_tunnel_on)
             renderShortlist()
@@ -1831,7 +2003,7 @@ class MainActivity : AppCompatActivity() {
         Thread {
             // Если туннель уже поднят (переподключение по «Сохранить и применить»), сначала гасим
             // текущую сессию: иначе сервис ответит «уже поднимается» и попытки пройдут впустую.
-            if (tunnel.isUp) {
+            if (tunnel.isUp || tunnel.active) {
                 runCatching { tunnel.stop() }
                 runCatching { tunnel.waitStopped(3000) }
             }
@@ -1932,7 +2104,7 @@ class MainActivity : AppCompatActivity() {
         updateServerNote()
         refreshRoutesState()
         binding.textConfig.text = runCatching { currentConfig()?.let { currentConfigText(it) } }.getOrNull().orEmpty()
-        if (tunnel.supported && tunnel.isUp) {
+        if (tunnel.supported && (tunnel.isUp || tunnel.active)) {
             val cfg = currentConfig()
             if (cfg == null) {
                 banner(getString(R.string.banner_saved_only))
@@ -2209,6 +2381,8 @@ class MainActivity : AppCompatActivity() {
             if (!tunnel.supported) return
             // Отметка «сейчас подключён» в списке трёх должна появляться сразу после подъёма
             // (и сниматься после падения), а не при следующем случайном обновлении экрана.
+            // Кнопка свободна (не идёт подключение и подбор) — держим её подпись в согласии с сервисом.
+            if (!connecting && !engine.running) runCatching { refreshTunnelButtonLabel() }
             val upNow = runCatching { tunnel.isUp }.getOrDefault(false)
             if (upNow != lastShortlistUp) {
                 lastShortlistUp = upNow
@@ -2265,6 +2439,9 @@ class MainActivity : AppCompatActivity() {
         val phase = snapshot?.phase ?: TunnelStatus.PHASE_IDLE
         val starting = connecting || phase == TunnelStatus.PHASE_STARTING || phase == TunnelStatus.PHASE_RECONNECTING
         val noNet = phase == TunnelStatus.PHASE_NO_NETWORK
+        // Туннель лежит, но сервис его держит и переподключится сам (медленный повтор, ожидание
+        // сети). Это не «не удалось» и не «выключен» — так и говорим, с причиной от сервиса.
+        val waiting = snapshot?.wanted == true
         val failed = TunnelDebug.lastError
         val text: String
         val color: Int
@@ -2292,6 +2469,17 @@ class MainActivity : AppCompatActivity() {
             starting -> {
                 text = getString(R.string.conn_starting_plain)
                 color = androidx.core.content.ContextCompat.getColor(this, R.color.state_warn)
+            }
+            waiting -> {
+                val why = snapshot?.status.orEmpty().ifBlank { getString(R.string.status_reconnect_net) }
+                text = getString(R.string.conn_waiting, why.take(90))
+                color = androidx.core.content.ContextCompat.getColor(this, R.color.state_warn)
+            }
+            // Выключил сам человек — это «выключен», а не красное «не удалось» от прошлой ошибки,
+            // которая в журнале ещё висит последней.
+            snapshot?.stoppedByUser == true -> {
+                text = getString(R.string.conn_off)
+                color = androidx.core.content.ContextCompat.getColor(this, R.color.state_off)
             }
             failed != null -> {
                 text = getString(R.string.conn_failed, failed.take(90))
@@ -2386,6 +2574,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private companion object {
+        /**
+         * Журнал подбора и флаг «Остановить» живут дольше экрана: подбор идёт в своём потоке и
+         * переживает пересоздание активности (поворот, смена темы, возврат в приложение).
+         * Пишут и читают их только с главного потока.
+         */
+        val scanLog = StringBuilder()
+        val scanCancelled = AtomicBoolean(false)
+
+        /** Подбор запущен с «подключить после»: кнопка подключения в это время занята. */
+        @Volatile
+        var scanAutoConnect = false
+
+        /** Экран, который сейчас на виду: туда идут строки и итог подбора, кто бы его ни запускал. */
+        @Volatile
+        var shown: MainActivity? = null
+
         /** Индекс выбранной вкладки переживает поворот экрана. */
         /** Сколько приложений рисуем сразу: остальные — через поиск (иначе экран «залипает»). */
         const val APP_ROWS_LIMIT = 60

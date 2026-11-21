@@ -49,6 +49,18 @@ data class TunnelStatus(
      * сервисе молча ломала оформление кнопки, а перевод на другой язык сломал бы его целиком.
      */
     val phase: Int = PHASE_IDLE,
+    /**
+     * Туннель нужен: был старт, и не было ни «Отключить», ни окончательного отказа. Пока это так,
+     * сервис переподключается сам — даже если прямо сейчас туннель лежит и ждёт повтора. По этому
+     * полю кнопка и плитка предлагают «Выключить», а не «Включить»: иначе выключить туннель,
+     * который ждёт повтора, было просто нечем.
+     */
+    val wanted: Boolean = false,
+    /**
+     * Последним туннель выключил сам человек (кнопка, плитка, «Отключить» в уведомлении). После
+     * этого ничто не поднимает туннель само — ни переподключение, ни фоновый подбор.
+     */
+    val stoppedByUser: Boolean = false,
 ) {
 
     val isStarting: Boolean get() = phase == PHASE_STARTING || phase == PHASE_RECONNECTING
@@ -71,6 +83,8 @@ data class TunnelStatus(
         "lastStageMs" to JsonVal.num(lastStageMs),
         "touched" to JsonVal.bool(touched),
         "phase" to JsonVal.num(phase),
+        "wanted" to JsonVal.bool(wanted),
+        "stoppedByUser" to JsonVal.bool(stoppedByUser),
     ).render()
 
     companion object {
@@ -113,6 +127,8 @@ data class TunnelStatus(
                 lastStageMs = obj.lng("lastStageMs"),
                 touched = obj.bool("touched") ?: false,
                 phase = obj.lng("phase").toInt(),
+                wanted = obj.bool("wanted") ?: false,
+                stoppedByUser = obj.bool("stoppedByUser") ?: false,
             )
         }
     }
