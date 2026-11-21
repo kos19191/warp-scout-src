@@ -1664,6 +1664,10 @@ class MainActivity : AppCompatActivity() {
             "перебор ${candidates.size}: " +
                 candidates.joinToString(", ") { it.endpoint.render() + "/" + it.junk.name }
         )
+        // Очередь отдаём и процессу туннеля: если после смены сети точка перестанет отвечать,
+        // сервис сам возьмёт следующую, а не будет трижды стучаться в мёртвую и сдаваться.
+        prefs.failoverQueue = candidates.map { it.endpoint.render() }
+        runCatching { ServiceSettingsStore.syncFromPrefs(this) }
         val savedFirst = savedConfig()?.takeIf { it.endpoint == candidates.first().endpoint }
         connecting = true
         binding.btnTunnel.isEnabled = false
@@ -2026,10 +2030,41 @@ class MainActivity : AppCompatActivity() {
             if (upNow != lastShortlistUp) {
                 lastShortlistUp = upNow
                 renderShortlist()
+                if (upNow) learnLiveEndpoint()
             }
             // Пока туннель не поднят — часто (видно этапы подъёма), когда работает — редко.
             tunnelHandler.postDelayed(this, if (tunnel.isUp) 3000L else 700L)
         }
+    }
+
+    /**
+     * Сервис мог сам сменить точку (прежняя замолчала — см. `restartAfterNetworkChange`), и тогда
+     * сохранённый текст конфига описывает уже мёртвый адрес: плитка быстрого доступа и следующий
+     * запуск взяли бы его. Как только туннель поднялся, подставляем фактический endpoint в
+     * сохранённый конфиг — ровно ту строку, которая сейчас работает.
+     */
+    private fun learnLiveEndpoint() {
+        val live = TunnelDebug.endpoint.trim()
+        if (live.isEmpty() || ':' !in live) return
+        if (prefs.lastEndpoint == live) return
+        val saved = prefs.lastConfigText
+        if (saved.isBlank()) {
+            prefs.lastEndpoint = live
+            return
+        }
+        val current = saved.lineSequence()
+            .firstOrNull { it.trimStart().startsWith("Endpoint") && '=' in it }
+            ?.substringAfter('=')?.trim()
+        if (current == live) {
+            prefs.lastEndpoint = live
+            return
+        }
+        val swapped = saved.lineSequence().joinToString("\n") { line ->
+            if (line.trimStart().startsWith("Endpoint") && '=' in line) "Endpoint = $live" else line
+        }
+        prefs.lastConfigText = swapped
+        prefs.lastEndpoint = live
+        TunnelDebug.stage("конфиг обновлён на работающую точку: $live")
     }
 
     /**

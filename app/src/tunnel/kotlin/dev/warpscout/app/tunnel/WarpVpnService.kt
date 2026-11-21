@@ -448,6 +448,23 @@ class WarpVpnService : VpnService() {
     private val SLOW_RETRY_EVERY_MS = 5 * 60_000L
     private val SLOW_RETRY_LIMIT = 12
 
+    /**
+     * Сколько раз подряд меняли точку входа, так и не подняв туннель.
+     *
+     * Считать надо отдельно от [netRestartAttempts]: смена точки — это не «ещё одна попытка того
+     * же», а новая информация (эта точка мертва). Но и бесконечно бегать по кругу нельзя: если
+     * сеть не пропускает WARP вообще, каждая точка будет молчать, и перебор съест батарею.
+     */
+    private var rotationsSinceUp = 0
+    private val MAX_ROTATIONS = 6
+
+    /** Переход на другую точку получает свежий бюджет быстрых попыток, иначе сработает «10 мин». */
+    @Volatile
+    private var forceFastRetry = false
+
+    /** Номер точки в очереди, на которой стоим сейчас (-1 — ещё не выбирали). */
+    private var failoverIndex = -1
+
     /** Сколько медленных попыток уже сделано (сбрасывается при успехе). */
     @Volatile
     private var slowRetries = 0
@@ -1208,6 +1225,13 @@ class WarpVpnService : VpnService() {
             while (autoRestartTimes.isNotEmpty() && autoRestartTimes.first() < cut) {
                 autoRestartTimes.removeFirst()
             }
+            // Меняем точку — значит, прежние неудачи были про мёртвый адрес, а не про сеть.
+            // Копить их в бюджете незачем: иначе после трёх-четырёх таких попыток сервис уходил
+            // в «медленный режим» и ждал пять минут, хотя рядом лежала живая точка.
+            if (forceFastRetry) {
+                forceFastRetry = false
+                autoRestartTimes.clear()
+            }
             if (autoRestartTimes.size >= AUTO_RESTART_LIMIT) {
                 // Быстрые попытки кончились — но это не повод остаться выключенным навсегда.
                 // Раньше сервис просто сдавался: «сама отключила и обратно не включила», и человек
@@ -1274,6 +1298,9 @@ class WarpVpnService : VpnService() {
             stopped.set(false)
             networkChanged = false
             baselineNetwork = null
+            // Чистим причину прошлой попытки: иначе «сервер молчит» от прежней точки будет
+            // выдавать себя за диагноз новой, и сервис сменит живую точку зря.
+            TunnelState.error = null
             startVpn(text, lastStartId)
 
             // Проверяем, что переподъём действительно состоялся: «сервис запущен» и «туннель
@@ -1283,17 +1310,45 @@ class WarpVpnService : VpnService() {
                 netRestartAttempts = 0
                 autoRebind = false
                 slowRetries = 0
+                rotationsSinceUp = 0
                 TunnelDebug.ok("туннель переподнят после смены сети")
                 return@Thread
             }
+            // «Сервер молчит» — это не «сеть не пускает», а «эта точка умерла»: пять инициаций
+            // подряд, ни одного ответа. Повторять её ещё два раза бессмысленно (минута тишины и
+            // лишние пробуждения модема), поэтому такую точку меняем сразу.
+            val deadPoint = isSilentPoint(TunnelState.error)
             netRestartAttempts += 1
-            if (netRestartAttempts < 3 && !stopped.get()) {
+            if (netRestartAttempts < 3 && !stopped.get() && !deadPoint) {
                 TunnelDebug.stage(
                     "переподъём не удался (попытка $netRestartAttempts из 3) — повторю через 8 с"
                 )
                 runCatching { Thread.sleep(8_000) }
                 if (!stopped.get()) restartAfterNetworkChange("повтор после неудачи")
             } else {
+                // Три раза стучались в одну точку и не достучались — она мертва (в журнале это
+                // «сервер молчит: 5 инициаций без ответа»). Раньше сервис на этом сдавался и
+                // писал «нажми «Подключить»»; человек в этот момент мог спать, а интернет шёл
+                // мимо туннеля. Теперь берём следующую точку из очереди последнего подключения.
+                val next = nextFailoverEndpoint()
+                if (next != null) {
+                    lastConfigText = next.second
+                    rotationsSinceUp += 1
+                    netRestartAttempts = 0
+                    forceFastRetry = true
+                    TunnelDebug.stage(
+                        "прежняя точка молчит — перехожу на ${next.first} " +
+                            "(смена $rotationsSinceUp из $MAX_ROTATIONS, без ручного нажатия)"
+                    )
+                    TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_RECONNECTING
+                    TunnelState.status = "переключаюсь на ${next.first}"
+                    postNotification(TunnelState.status)
+                    runCatching { Thread.sleep(1_000) }
+                    if (!stopped.get()) {
+                        restartAfterNetworkChange("переход на ${next.first}")
+                    }
+                    return@Thread
+                }
                 TunnelDebug.error(
                     "не удалось поднять туннель после смены сети",
                     "точка могла стать недоступной: нажми «Подключить» — сработает перебор точек"
@@ -1303,9 +1358,69 @@ class WarpVpnService : VpnService() {
                 postNotification(TunnelState.status)
                 netRestartAttempts = 0
                 autoRebind = false
+                // Страховочный сторож этой же попытки ещё спит (25 с). Он объявит «таймаут» и
+                // снимет сервис уже ПОСЛЕ того, как мы всё объяснили — в журнале появлялись два
+                // разных «✗» подряд. Поднимаем эпоху: его сообщение станет устаревшим.
+                epoch.incrementAndGet()
             }
         }, "warpscout-net-restart").apply { isDaemon = true }.start()
     }
+
+    /**
+     * Причина отказа говорит «точка не ответила», а не «сеть не пропускает».
+     *
+     * Разница важна: в первом случае помогает смена адреса (и ждать незачем), во втором — смена
+     * адреса ничего не даст, и лучше вернуться к медленным повторам той же точки.
+     */
+    private fun isSilentPoint(reason: String?): Boolean {
+        val r = reason.orEmpty()
+        return r.contains("молчит") || r.contains("ответа не было") ||
+            r.contains("порт закрыт") || r.contains("port unreachable")
+    }
+
+    /** Точка, которой поднят туннель сейчас: берём строку из текста конфига, а не из настроек. */
+    private fun currentEndpointLine(): String? =
+        lastConfigText?.lineSequence()
+            ?.firstOrNull { it.trimStart().startsWith("Endpoint") && '=' in it }
+            ?.substringAfter('=')
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+
+    /**
+     * Следующая точка из очереди последнего подключения: (адрес, готовый текст конфига).
+     *
+     * Меняем ровно одну строку — `Endpoint = host:port`. Ключи, профиль шума и маршруты остаются
+     * теми же: это тот же туннель, просто на другой anycast-адрес Cloudflare. Порядок очереди —
+     * тот же, что был в «переборе» (победитель подбора первым), то есть следующая точка обычно
+     * тоже проверенная.
+     *
+     * null — менять некуда: очередь пуста (плитка/автозапуск без подбора), в ней одна точка или
+     * мы уже перебрали всё, что разрешено (MAX_ROTATIONS).
+     */
+    private fun nextFailoverEndpoint(): Pair<String, String>? {
+        if (rotationsSinceUp >= MAX_ROTATIONS) return null
+        val text = lastConfigText ?: return null
+        val queue = serviceSettings().failover.filter { it.isNotBlank() }
+        if (queue.size < 2) return null
+        val current = currentEndpointLine()
+        val from = failoverIndex.takeIf { it in queue.indices }
+            ?: current?.let { queue.indexOf(it) }
+            ?: -1
+        for (step in 1..queue.size) {
+            val idx = (from + step).mod(queue.size)
+            val host = queue[idx]
+            if (host == current) continue
+            failoverIndex = idx
+            return host to swapEndpointLine(text, host)
+        }
+        return null
+    }
+
+    /** Текст конфига с другой строкой `Endpoint =`. Всё остальное байт в байт прежнее. */
+    private fun swapEndpointLine(text: String, endpoint: String): String =
+        text.lineSequence().joinToString("\n") { line ->
+            if (line.trimStart().startsWith("Endpoint") && '=' in line) "Endpoint = $endpoint" else line
+        }
 
     /** Ждём фактического подъёма туннеля (handshake), а не просто «сервис запущен». */
     private fun awaitUp(timeoutMs: Int): Boolean {

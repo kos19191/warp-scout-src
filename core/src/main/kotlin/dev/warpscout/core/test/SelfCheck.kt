@@ -781,6 +781,25 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         )
         expect("настройки сервиса: мусор → null", ServiceSettings.fromJson("<xml/>"), null)
 
+        // Очередь точек: по ней процесс туннеля сам меняет точку, когда прежняя замолчала.
+        val queue = listOf("162.159.192.10:864", "162.159.192.7:500", "188.114.97.1:500")
+        expect(
+            "настройки сервиса: очередь точек сохраняется",
+            ServiceSettings.fromJson(ServiceSettings(failover = queue).toJson())?.failover,
+            queue
+        )
+        expect(
+            "настройки сервиса: пустая очередь",
+            ServiceSettings.fromJson(ServiceSettings().toJson())?.failover,
+            emptyList<String>()
+        )
+        // Старый снимок без поля обязан читаться: обновление не должно ломать уже поднятый туннель.
+        expect(
+            "настройки сервиса: снимок без очереди читается",
+            ServiceSettings.fromJson("""{"ver":1,"appsMode":2}""")?.failover,
+            emptyList<String>()
+        )
+
         // Фаза: машинный код вместо поиска подстрок в русском статусе.
         expect("фаза: по умолчанию простаивает", TunnelStatus().phase, TunnelStatus.PHASE_IDLE)
         expect(

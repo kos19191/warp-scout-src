@@ -265,6 +265,9 @@ class DataPlane(
     @Volatile
     private var lastRekeyAttemptAt = 0L
 
+    /** Когда написана прошлая строка статистики: по ней считается настоящая длина интервала. */
+    private var statsMarkAt = 0L
+
     /** @return true, если handshake удался и передача шла (поток завершается при stop()). */
     fun run(): Boolean {
         if (localPriv == null || localPub == null) return fail("PrivateKey не разбирается как base64 или короче ${Wg.KEY_LEN} байт")
@@ -428,13 +431,22 @@ class DataPlane(
 
         sendOne()
         nextSendAt = startedAt + spacing
-        val deadline = startedAt + spacing * (attempts - 1) + settings.timeoutMs
+        var deadline = startedAt + spacing * (attempts - 1) + settings.timeoutMs
         while (!stopped && System.currentTimeMillis() < deadline) {
             val now = System.currentTimeMillis()
             if (sent < attempts && now >= nextSendAt) {
                 sendOne()
                 nextSendAt = now + spacing
                 log("повтор инициации №${sent} — ответа не было ${spacing} мс")
+                if (sent >= attempts) {
+                    // Все инициации уже ушли. Ждать полный timeout нечего: пять датаграмм подряд
+                    // без единого ответа — это молчащая точка, а не «медленная сеть». В ночном
+                    // журнале здесь стояло «5 инициаций за 17946 мс без ответа» — 15 секунд
+                    // тишины на ровном месте, и всё это время сессия не годилась для трафика.
+                    // Три секунды сверх последней отправки — запас на самый медленный RTT.
+                    val tail = System.currentTimeMillis() + maxOf(3_000L, spacing * 2)
+                    if (tail < deadline) deadline = tail
+                }
             }
             val waitMs = minOf(deadline - now, (nextSendAt - now).coerceAtLeast(20))
             // Прерывание — это штатная остановка (closeAll() будит ожидающие потоки), а не сбой.
@@ -644,6 +656,12 @@ class DataPlane(
             // Без этого «батарея садится» обсуждается догадками, а не фактами.
             if (now >= nextStatsAt) {
                 nextStatsAt = now + STATS_EVERY_MS
+                // «за 5 мин» было неправдой: в глубоком сне система не даёт потоку проснуться
+                // вовремя, и между строками проходило по 19 минут — а подпись оставалась прежней.
+                // Человек читал «cpu 17 с за 5 мин» и делал вывод в шесть раз строже реального.
+                val spanMin = if (statsMarkAt == 0L) (STATS_EVERY_MS / 60_000).toInt()
+                else ((now - statsMarkAt) / 60_000).toInt().coerceAtLeast(1)
+                statsMarkAt = now
                 val idle = if (lastUserTrafficAt == 0L) now - startedAt else now - lastUserTrafficAt
                 val extra = vitals?.invoke().orEmpty()
                 // Цифры за интервал, а не накопленные: «keepalive 30» за час ничего не говорит о
@@ -657,7 +675,7 @@ class DataPlane(
                 bytesUpMark = bytesUp
                 bytesDownMark = bytesDown
                 log(
-                    "$STATS_PREFIX за ${STATS_EVERY_MS / 60_000} мин: keepalive $ka, " +
+                    "$STATS_PREFIX за $spanMin мин: keepalive $ka, " +
                         "рукопожатий $hs, вверх $upKb КБ, вниз $downKb КБ, " +
                         "трафика нет ${idle / 1000} с, " +
                         Keepalive.describe(keepaliveIntervalMs(now), screenOn(), idle) +

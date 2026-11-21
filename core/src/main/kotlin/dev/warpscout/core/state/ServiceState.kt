@@ -137,6 +137,15 @@ data class ServiceSettings(
     val appsMode: Int = 0,
     /** Выбранные приложения. */
     val appsSelected: List<String> = emptyList(),
+    /**
+     * Очередь точек входа из последнего подключения (host:port, лучшая первой).
+     *
+     * Зачем сервису: когда после смены сети точка перестаёт отвечать, переподъём шёл на неё же
+     * три раза подряд и сдавался — «нажми «Подключить»». Человек в этот момент спит. Теперь
+     * сервис сам берёт следующую точку из этой очереди и поднимает туннель на ней, а не ждёт
+     * нажатия.
+     */
+    val failover: List<String> = emptyList(),
 ) {
 
     fun toJson(): String = JsonVal.obj(
@@ -146,6 +155,7 @@ data class ServiceSettings(
         "secondCidrs" to JsonVal.str(secondCidrs),
         "appsMode" to JsonVal.num(appsMode),
         "appsSelected" to JsonVal.arr(appsSelected.map { JsonVal.str(it) }),
+        "failover" to JsonVal.arr(failover.map { JsonVal.str(it) }),
     ).render()
 
     companion object {
@@ -167,6 +177,9 @@ data class ServiceSettings(
                 secondCidrs = obj.str("secondCidrs").orEmpty(),
                 appsMode = obj.lng("appsMode").toInt(),
                 appsSelected = apps,
+                failover = (obj.fields["failover"] as? JsonVal.Arr)?.items.orEmpty()
+                    .mapNotNull { (it as? JsonVal.Str)?.v }
+                    .filter { it.isNotBlank() },
             )
         }
     }

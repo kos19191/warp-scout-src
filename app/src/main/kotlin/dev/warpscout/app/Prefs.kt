@@ -246,6 +246,17 @@ class Prefs(private val context: Context) {
         set(v) = sp.edit().putLong("lastTunedAt", v).apply()
 
     /** Последняя точка входа, которая реально поднялась: её пробуем раньше «сегодняшней». */
+    /**
+     * Очередь точек входа из последнего подключения — её читает процесс туннеля, чтобы после
+     * смены сети перейти на следующую точку самому, не ожидая нажатия «Подключить».
+     */
+    var failoverQueue: List<String>
+        get() = (sp.getString("failoverQueue", "") ?: "")
+            .split('\n')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        set(v) = sp.edit().putString("failoverQueue", v.distinct().take(12).joinToString("\n")).apply()
+
     var lastEndpoint: String
         get() = sp.getString("lastEndpoint", "").orEmpty()
         set(v) = sp.edit().putString("lastEndpoint", v).apply()
@@ -397,6 +408,7 @@ class Prefs(private val context: Context) {
                 secondCidrs = secondCidrs,
                 appsMode = appsMode,
                 appsSelected = appsSelected.toList().sorted(),
+                failover = failoverQueue,
             )
         )
     }

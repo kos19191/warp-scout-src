@@ -59,6 +59,7 @@ object ServiceSettingsStore {
                 secondCidrs = prefs.secondCidrs,
                 appsMode = prefs.appsMode,
                 appsSelected = prefs.appsSelected.toList().sorted(),
+                failover = prefs.failoverQueue,
             )
         )
     }
