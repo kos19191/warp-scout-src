@@ -1039,7 +1039,25 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnTunnel.setOnClickListener { toggleTunnel() }
+        binding.btnLogClear.setOnClickListener { clearJournal() }
         binding.btnNextEndpoint.setOnClickListener { nextEndpoint() }
+    }
+
+    /**
+     * «Очистить журнал»: стирает и журнал подбора (этот экран), и журнал туннеля (его пишет
+     * процесс сервиса в общий файл, поэтому удаления памяти мало — файл тоже).
+     *
+     * Ничего не спрашиваем: действие обратимое в том смысле, что журнал и так собирается заново
+     * с первой же строки, а лишний диалог на вкладке «Журнал» только мешает.
+     */
+    private fun clearJournal() {
+        log.setLength(0)
+        TunnelDebug.clear()
+        lastDiagDump = null
+        binding.textLog.text = ""
+        refreshLogBox()
+        updateTunnelDiagnostics()
+        banner(getString(R.string.banner_log_cleared))
     }
 
     /**

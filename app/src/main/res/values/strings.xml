@@ -152,6 +152,8 @@
     <string name="tunnel_state_idle">туннель не запущен</string>
     <string name="btn_tunnel_refresh">Обновить журнал</string>
     <string name="btn_tunnel_copy">Скопировать журнал</string>
+    <string name="btn_log_clear">Очистить журнал</string>
+    <string name="banner_log_cleared">Журнал очищен — дальше пишется только новое</string>
     <string name="tunnel_starting">Поднимаю туннель: %1$s</string>
     <string name="tunnel_up">Туннель работает: %1$s</string>
     <string name="tunnel_failed">Туннель не поднялся: %1$s</string>

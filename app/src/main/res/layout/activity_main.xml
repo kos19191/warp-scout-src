@@ -1116,6 +1116,26 @@
                         android:textIsSelectable="true" />
                 </ScrollView>
 
+                <!--
+                  Очистка журнала. Нужна не «для чистоты»: после обновления человек собирает
+                  свежий журнал, и хвост прошлой версии в нём только мешает — в разборе
+                  смешиваются два разных поведения. Кнопка рядом с самим журналом, а не в
+                  настройках: её ищут там, где читают строки.
+                -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnLogClear"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/btn_log_clear" />
+                </LinearLayout>
+
                 <!-- ── диагностика туннеля (flavor tunnel) ───────────────── -->
                 <LinearLayout
                     android:id="@+id/tunnelDiagBox"

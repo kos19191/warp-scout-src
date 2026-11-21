@@ -101,6 +101,25 @@ object TunnelDebug {
         touched = true
     }
 
+    /**
+     * Стереть журнал целиком: кольцевой буфер, общий файл и счётчики этой сессии.
+     *
+     * Зачем кнопка: после обновления нужен чистый журнал за новый период, а не хвост прошлой
+     * ночи — иначе в разборе смешиваются два разных поведения. Файл удаляем (а не обнуляем
+     * содержимое): его заново создаст первая же запись, и в нём не останется пустых строк,
+     * из-за которых «журнал пуст» выглядел бы как «строки потерялись».
+     */
+    fun clear() = synchronized(lock) {
+        lines.clear()
+        lastError = null
+        bytesUp = 0L
+        bytesDown = 0L
+        handshakeAttempts = 0
+        lastStageAt = 0L
+        lastStageMs = 0L
+        runCatching { journal?.delete() }
+    }
+
     fun stage(message: String) {
         touched = true
         val took = synchronized(lock) {
