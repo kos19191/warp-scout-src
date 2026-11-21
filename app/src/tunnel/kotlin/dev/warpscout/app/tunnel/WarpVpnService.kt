@@ -16,8 +16,13 @@ import dev.warpscout.app.R
 import dev.warpscout.app.TunnelDebug
 import dev.warpscout.core.config.SplitRoutes
 import dev.warpscout.core.config.WgConf
+import dev.warpscout.core.crypto.Crypto
+import dev.warpscout.core.model.Endpoint
+import dev.warpscout.core.model.Verdict
 import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.net.NetSettings
+import dev.warpscout.core.net.UdpSocketFactory
+import dev.warpscout.core.net.WgProber
 import dev.warpscout.core.tunnel.DataPlane
 import dev.warpscout.core.tunnel.ExitRouter
 import dev.warpscout.core.tunnel.PacketQueueIn
@@ -500,6 +505,64 @@ class WarpVpnService : VpnService() {
     @Volatile
     private var slowRetries = 0
 
+    /** Вид сети, под который построен [failoverOrder]: другая сеть — повод построить его заново. */
+    private var failoverNet: String = ""
+
+    // ── дозор: пробы соседних точек, пока туннель работает ─────────────────────
+    //
+    // Зачем. Очередь перебора собирается при подключении и дальше не обновляется. Если точка из
+    // неё успела умереть, при аварии сервис тратит на неё целую попытку — в журнале это «порт
+    // закрыт (ICMP port unreachable)» или «сервер молчит» и 12–20 секунд без интернета. Дозор
+    // узнаёт заранее: живую точку ставит в перебор сразу за текущей, мёртвую — в конец.
+    //
+    // Почему сессия не страдает. Проба — одна инициация handshake с отдельного UDP-сокета,
+    // выведенного из туннеля через protect(). Транспортных пакетов проба не шлёт, а сервер
+    // WireGuard переходит на новую сессию только по первому такому пакету — текущая остаётся
+    // текущей. Если сервер всё же перенёс наш адрес на сокет пробы, его сразу возвращает
+    // внеочередной keepalive (DataPlane.keepaliveNow). И страховка: если сессия оборвётся вскоре
+    // после пробы, дозор выключается до перезапуска сервиса (см. [sentryBanned]).
+
+    /** Период обхода. Радио и так просыпается на keepalive каждые 60–120 с — это капля. */
+    private val SENTRY_EVERY_MS = 12 * 60_000L
+
+    /** Первый обход — не сразу: в первые минуты после подъёма приложения переподключаются сами. */
+    private val SENTRY_FIRST_MS = 3 * 60_000L
+
+    /** Сколько считать точку живой после удачной пробы. */
+    private val SENTRY_FRESH_MS = 30 * 60_000L
+
+    /** Сколько помнить, что точка мертва; потом она снова «неизвестна» и идёт в свою очередь. */
+    private val SENTRY_DEAD_MS = 60 * 60_000L
+
+    /** Итог обхода: проверять нечего / что-то узнали / одни ошибки сокета. */
+    private val SENTRY_IDLE = 0
+    private val SENTRY_INFO = 1
+    private val SENTRY_ERRORS = 2
+
+    @Volatile
+    private var sentryThread: Thread? = null
+
+    /** Пробы этой сессии упираются в ошибки сокета — дозор молчит до следующего подъёма. */
+    @Volatile
+    private var sentryOff = false
+
+    /** Сессия оборвалась вскоре после пробы — дозор выключен до перезапуска сервиса. */
+    @Volatile
+    private var sentryBanned = false
+
+    /** Когда ушла последняя проба: по ней видно, не совпала ли с ней смерть сессии. */
+    @Volatile
+    private var lastSentryProbeAt = 0L
+
+    /** Позиция «второй» пробы: по кругу, чтобы со временем проверить всю очередь. */
+    private var sentryPos = 0
+
+    /** Что дозор знает о точке: когда отвечала, сколько раз подряд не ответила и когда. */
+    private data class SentryMark(val okAt: Long = 0L, val fails: Int = 0, val failAt: Long = 0L)
+
+    /** Ключ — «вид сети|адрес:порт»: точка, живая на Wi-Fi, может молчать на мобильной. */
+    private val sentryMarks = java.util.concurrent.ConcurrentHashMap<String, SentryMark>()
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // ГЛАВНОЕ ПРАВИЛО ANDROID: после startForegroundService() сервис обязан вызвать
         // startForeground() примерно за 5 секунд, иначе процесс убивают с
@@ -708,6 +771,13 @@ class WarpVpnService : VpnService() {
             vitals = { vitalsLine() },
             // Сокет перестал отправлять — сеть ушла без уведомления от системы. Переподнимаем.
             onFatal = { reason ->
+                // Дозор — гость в чужой сессии: если она оборвалась вскоре после его пробы, считаем
+                // это его виной и выключаем до перезапуска сервиса. Дозор можно потерять, подключение — нет.
+                val sinceProbe = System.currentTimeMillis() - lastSentryProbeAt
+                if (lastSentryProbeAt > 0 && sinceProbe < 30_000 && !sentryBanned) {
+                    sentryBanned = true
+                    TunnelDebug.stage("дозор выключен: сессия оборвалась через ${sinceProbe / 1000} с после пробы")
+                }
                 // Сессия умерла (нет ответов/rekey не проходит) — говорим об этом прямо, а не
                 // «после смены сети»: сеть могла и не меняться.
                 restartAfterNetworkChange(reason, R.string.status_reconnect_silent)
@@ -718,6 +788,10 @@ class WarpVpnService : VpnService() {
                 TunnelState.up = true
                 TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_UP
                 handshake.countDown()
+                // Туннель поднят — цикл перебора закончен, следующая авария начнёт новый. Раньше
+                // счётчик сбрасывался только при переподъёме самим сервисом: после ручного
+                // «Подключить» он оставался исчерпанным, и сервис больше не менял точку сам.
+                rotationsSinceUp = 0
                 // Память «на такой сети работает такая точка»: следующая смена сети начнётся
                 // сразу с неё, без неудачной попытки на адресе из другой сети.
                 runCatching {
@@ -725,6 +799,8 @@ class WarpVpnService : VpnService() {
                 }
                 TunnelDebug.ok("туннель поднят: ${cfg.endpoint.render()}")
                 postNotification(getString(R.string.notif_active, cfg.endpoint.render()))
+                // Тихая проверка соседних точек: сессию не трогает, очередь держит свежей.
+                startSentry(cfg, myEpoch)
             },
             log = { line ->
                 // Статистика расхода — для журнала, в уведомлении ей не место.
@@ -1113,6 +1189,9 @@ class WarpVpnService : VpnService() {
 
     /** Закрыть сокеты, tun и оба data plane — без решения «останавливаемся навсегда». */
     private fun closeAll() {
+        runCatching { sentryThread?.interrupt() }
+        sentryThread = null
+        sentryOff = false
         runCatching { dispatcher?.stop() }
         dispatcher = null
         runCatching { plane2?.stop() }
@@ -1353,6 +1432,7 @@ class WarpVpnService : VpnService() {
             // выдавать себя за диагноз новой, и сервис сменит живую точку зря.
             TunnelState.error = null
             // Порядок перебора — под эту сеть: первой пойдёт точка, работавшая на такой же сети.
+            val netMoved = memoryNetKind() != failoverNet
             rebuildFailoverOrder()
             // И не тратим инициации на сеть, которая ещё не готова: сразу после включения Wi-Fi
             // адрес раздаётся, портал проверки доступа не пройден — handshake уходит в никуда.
@@ -1360,7 +1440,9 @@ class WarpVpnService : VpnService() {
                 TunnelDebug.stage("сеть ещё не признана рабочей — пробую как есть")
             }
             // Текст конфига только на одну строку — Endpoint: та, что работала на такой сети.
-            val startText = preferredStartText(text)
+            // Посреди перебора к ней не возвращаемся: её уже пробовали в этом цикле. Раньше каждая
+            // смена точки здесь откатывалась назад — «перехожу на B», а поднимался снова мёртвый A.
+            val startText = if (rotationsSinceUp == 0 || netMoved) preferredStartText(text) else text
             if (startText != text) lastConfigText = startText
             startVpn(startText, lastStartId)
 
@@ -1392,6 +1474,9 @@ class WarpVpnService : VpnService() {
                 // писал «нажми «Подключить»»; человек в этот момент мог спать, а интернет шёл
                 // мимо туннеля. Теперь берём следующую точку из очереди последнего подключения.
                 val oldPoint = currentEndpointLine().orEmpty()
+                // Точка не ответила при переподключении — это знание и для следующих циклов: без
+                // отметки следующая авария снова начинала бы с неё.
+                if (deadPoint && oldPoint.isNotEmpty()) sentryMarkDead(oldPoint)
                 val next = nextFailoverEndpoint()
                 if (next != null) {
                     lastConfigText = next.second
@@ -1488,20 +1573,230 @@ class WarpVpnService : VpnService() {
      * начинал с «чужой» точки, тратил на неё попытку и только потом доходил до рабочей.
      */
     private fun rebuildFailoverOrder() {
-        val queue = runCatching { serviceSettings().failover }.getOrDefault(emptyList())
-            .filter { it.isNotBlank() }
+        val kind = memoryNetKind()
+        // Посреди перебора порядок не трогаем. Раньше он строился заново на каждой попытке:
+        // только что выбранной точкой вперёд, прежней (мёртвой) — второй, и следующий шаг вёл
+        // обратно на неё. Перебор ходил между двумя мёртвыми точками и до остальных не доходил.
+        // Новый порядок — в начале цикла, на другой сети или если его ещё нет.
+        if (rotationsSinceUp > 0 && failoverOrder.isNotEmpty() && kind == failoverNet) return
         val current = currentEndpointLine()
-        val remembered = runCatching { EndpointMemory.goodFor(this, memoryNetKind()) }.getOrNull()
-        failoverOrder = buildList {
-            if (current != null) add(current)
-            if (remembered != null) add(remembered)
-            addAll(queue)
-        }.distinct()
+        val remembered = runCatching { EndpointMemory.goodFor(this, kind) }.getOrNull()
+        failoverOrder = orderedCandidates()
+        failoverNet = kind
         failoverPos = current?.let { failoverOrder.indexOf(it) } ?: -1
-        if (remembered != null && remembered != current) {
-            TunnelDebug.stage("на сети «${memoryNetKind()}» работала $remembered — она в переборе вторая")
+        if (remembered != null && remembered != current && !sentryDead(kind, remembered)) {
+            TunnelDebug.stage("на сети «$kind» работала $remembered — она в переборе вторая")
+        }
+        // Если порядок поправил дозор — показываем его в журнале: иначе не понять, почему сервис
+        // пошёл не на следующую точку очереди, а через одну.
+        if (failoverOrder.size > 1 && failoverOrder.any { it != current && sentryMarks.containsKey("$kind|$it") }) {
+            TunnelDebug.stage("перебор с учётом дозора: " + failoverOrder.take(6).joinToString(", "))
         }
     }
+
+    /**
+     * Точки в порядке перебора для текущей сети. Состояние не меняет: им пользуются и перебор,
+     * и дозор.
+     *
+     * Текущая → работавшая на такой же сети → живые по дозору (свежие первыми) → очередь
+     * последнего подключения. Те, кого дозор дважды подряд застал мёртвыми, — в конец, но не вон:
+     * точка может ожить, а мёртвыми могут оказаться и все сразу.
+     */
+    private fun orderedCandidates(): List<String> {
+        val kind = memoryNetKind()
+        val now = System.currentTimeMillis()
+        val queue = runCatching { serviceSettings().failover }.getOrDefault(emptyList())
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        val current = currentEndpointLine()
+        val remembered = runCatching { EndpointMemory.goodFor(this, kind) }.getOrNull()
+        val prefix = "$kind|"
+        val fresh = sentryMarks.entries
+            .filter { (key, mark) ->
+                key.startsWith(prefix) && mark.fails == 0 && mark.okAt > 0 && now - mark.okAt < SENTRY_FRESH_MS
+            }
+            .sortedByDescending { it.value.okAt }
+            .map { it.key.removePrefix(prefix) }
+        val all = buildList {
+            if (current != null) add(current)
+            if (remembered != null) add(remembered)
+            addAll(fresh)
+            addAll(queue)
+        }.distinct()
+        val (dead, alive) = all.partition { it != current && sentryDead(kind, it, now) }
+        return alive + dead
+    }
+
+    /** Точка не поднялась при переподключении: для перебора это то же, что две неудачные пробы. */
+    private fun sentryMarkDead(endpoint: String) {
+        val key = "${memoryNetKind()}|$endpoint"
+        val before = sentryMarks[key] ?: SentryMark()
+        sentryMarks[key] = SentryMark(okAt = before.okAt, fails = 2, failAt = System.currentTimeMillis())
+    }
+
+    /** Дозор дважды подряд не достучался до точки на этой сети, и было это недавно. */
+    private fun sentryDead(kind: String, endpoint: String, now: Long = System.currentTimeMillis()): Boolean {
+        val mark = sentryMarks["$kind|$endpoint"] ?: return false
+        return mark.fails >= 2 && now - mark.failAt < SENTRY_DEAD_MS
+    }
+
+    // ------------------------------------------------------------ дозор
+
+    /**
+     * Дозор для только что поднятой сессии. Прежний поток гасим: у каждой сессии свой дозор, и
+     * живёт он ровно столько, сколько её эпоха.
+     */
+    private fun startSentry(cfg: WarpConfig, myEpoch: Int) {
+        runCatching { sentryThread?.interrupt() }
+        sentryThread = null
+        if (sentryBanned) return
+        // Ключ сервера — 32 байта; без него проба ничего не докажет.
+        val peerPublic = runCatching { Crypto.unBase64(cfg.account.peerPublicB64) }.getOrNull()
+            ?.takeIf { it.size == 32 } ?: return
+        val thread = Thread({
+            try {
+                sentryLoop(cfg, peerPublic, myEpoch)
+            } catch (e: InterruptedException) {
+                // штатная остановка вместе с сессией
+            } catch (e: Throwable) {
+                runCatching {
+                    TunnelDebug.stage("дозор остановлен: ${e.javaClass.simpleName} ${e.message.orEmpty().take(80)}")
+                }
+            }
+        }, "warpscout-sentry")
+        thread.isDaemon = true
+        thread.priority = Thread.MIN_PRIORITY
+        sentryThread = thread
+        thread.start()
+    }
+
+    private fun sentryLoop(cfg: WarpConfig, peerPublic: ByteArray, myEpoch: Int) {
+        fun alive() = myEpoch == epoch.get() && !stopped.get() && !sentryOff && !sentryBanned
+        var errorPasses = 0
+        Thread.sleep(SENTRY_FIRST_MS)
+        while (alive()) {
+            // Только при живом туннеле и настоящей сети: во время переподъёма пробы бессмысленны.
+            if (TunnelState.up && hasUsableNetwork()) {
+                errorPasses = if (sentryPass(cfg, peerPublic, myEpoch) == SENTRY_ERRORS) errorPasses + 1 else 0
+                if (errorPasses >= 3) {
+                    sentryOff = true
+                    TunnelDebug.stage("дозор: пробы не уходят (ошибки сокета) — выключен до переподключения")
+                    return
+                }
+            }
+            Thread.sleep(SENTRY_EVERY_MS)
+        }
+    }
+
+    /**
+     * Один обход: ближайшая по очереди точка и ещё одна по кругу.
+     *
+     * Ближайшая — та, на которую сервис перейдёт при аварии: знать про неё важнее всего. Вторая
+     * перебирает остальные, чтобы со временем была проверена вся очередь.
+     */
+    private fun sentryPass(cfg: WarpConfig, peerPublic: ByteArray, myEpoch: Int): Int {
+        val kind = memoryNetKind()
+        val current = currentEndpointLine()
+        val candidates = orderedCandidates().filter { it != current }
+        if (candidates.isEmpty()) return SENTRY_IDLE
+        val picks = buildList {
+            add(candidates.first())
+            val rest = candidates.drop(1)
+            if (rest.isNotEmpty()) add(rest[(sentryPos++).mod(rest.size)])
+        }
+        val prober = WgProber(
+            NetSettings(
+                attempts = 1,
+                timeoutMs = 1500,
+                betweenAttemptsMs = 0,
+                junkPacketsBeforeHandshake = 1,
+                udpFactory = protectedUdp()
+            )
+        )
+        val notes = ArrayList<String>()
+        var learned = false
+        for (line in picks) {
+            if (myEpoch != epoch.get() || stopped.get() || !TunnelState.up) return SENTRY_IDLE
+            val endpoint = parseEndpoint(line) ?: continue
+            val (verdict, rtt) = sentryProbe(prober, endpoint, cfg, peerPublic)
+            val key = "$kind|$line"
+            val before = sentryMarks[key] ?: SentryMark()
+            val now = System.currentTimeMillis()
+            when (verdict) {
+                Verdict.HANDSHAKE_OK, Verdict.COOKIE_REPLY -> {
+                    learned = true
+                    sentryMarks[key] = SentryMark(okAt = now)
+                    notes += "$line ✓" + (rtt?.let { " ${it.toLong()} мс" } ?: "")
+                }
+                Verdict.UDP_CLOSED -> {
+                    // ICMP «порт закрыт» — ответ сети, а не потеря пакета: мертва сразу.
+                    learned = true
+                    sentryMarks[key] = SentryMark(okAt = before.okAt, fails = 2, failAt = now)
+                    notes += "$line ✗ порт закрыт — в конец перебора"
+                }
+                Verdict.UDP_SILENT -> {
+                    learned = true
+                    val fails = before.fails + 1
+                    sentryMarks[key] = SentryMark(okAt = before.okAt, fails = fails, failAt = now)
+                    notes += "$line ✗ молчит" + if (fails >= 2) " ($fails-й раз — в конец перебора)" else ""
+                }
+                else -> notes += "$line ? не проверена (${verdict.name.lowercase()})"
+            }
+        }
+        if (myEpoch != epoch.get() || stopped.get()) return SENTRY_IDLE
+        if (notes.isNotEmpty()) TunnelDebug.stage("дозор: " + notes.joinToString("; "))
+        return if (learned) SENTRY_INFO else if (notes.isEmpty()) SENTRY_IDLE else SENTRY_ERRORS
+    }
+
+    /**
+     * До двух инициаций на точку. Ответ на любую — точка жива. «Порт закрыт» (ICMP) — мертва,
+     * второй пакет не нужен. Молчание повторяем один раз: UDP теряется и на живой точке.
+     * Возвращает вердикт и время ответа.
+     */
+    private fun sentryProbe(
+        prober: WgProber,
+        endpoint: Endpoint,
+        cfg: WarpConfig,
+        peerPublic: ByteArray
+    ): Pair<Verdict, Double?> {
+        var verdict = Verdict.ERROR
+        var rtt: Double? = null
+        for (attempt in 0 until 2) {
+            val result = prober.probe(endpoint, cfg.account, peerPublic, cfg.junk)
+            lastSentryProbeAt = System.currentTimeMillis()
+            // Если сервер принял пробу за роуминг — один пакет текущей сессии возвращает адрес назад.
+            runCatching { plane?.keepaliveNow() }
+            verdict = result.stats.bestVerdict
+            rtt = result.stats.minRtt
+            if (result.accepted || verdict != Verdict.UDP_SILENT) break
+        }
+        return verdict to rtt
+    }
+
+    /** UDP-сокет пробы мимо туннеля: без protect() проба ушла бы внутрь WARP («WARP через WARP»). */
+    private fun protectedUdp(): UdpSocketFactory = UdpSocketFactory { _ ->
+        val socket = DatagramSocket(null).apply { reuseAddress = true }
+        if (!runCatching { protect(socket) }.getOrDefault(false)) {
+            runCatching { socket.close() }
+            throw java.io.IOException("protect() отказал")
+        }
+        socket
+    }
+
+    /** «host:port» или «[v6]:port» → [Endpoint]; всё прочее (имена записей, мусор) — null. */
+    private fun parseEndpoint(text: String): Endpoint? = runCatching {
+        val t = text.trim()
+        val host: String
+        val port: Int
+        if (t.startsWith("[")) {
+            host = t.substring(1, t.indexOf(']'))
+            port = t.substringAfterLast("]:").toInt()
+        } else {
+            host = t.substringBeforeLast(':')
+            port = t.substringAfterLast(':').toInt()
+        }
+        if (host.isBlank() || host.any { it.isWhitespace() }) null else Endpoint(host, port)
+    }.getOrNull()
 
     /**
      * С чего начинать подъём после смены сети: если на такой же сети уже работала конкретная
@@ -1513,6 +1808,8 @@ class WarpVpnService : VpnService() {
         val kind = memoryNetKind()
         val remembered = runCatching { EndpointMemory.goodFor(this, kind) }.getOrNull() ?: return text
         if (remembered == current) return text
+        // Дозор недавно дважды не достучался до неё — начинать с неё значит потерять попытку.
+        if (sentryDead(kind, remembered)) return text
         TunnelDebug.stage("на «$kind» работала $remembered — начинаю с неё, а не с $current")
         return swapEndpointLine(text, remembered)
     }

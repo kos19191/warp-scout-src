@@ -3,6 +3,7 @@ package dev.warpscout.app
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import dev.warpscout.app.status.TunnelStatusBus
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.keys.KeySource
 import dev.warpscout.core.keys.KeySourceConfig
@@ -39,6 +40,13 @@ class Engine(private val context: Context) {
     @Volatile
     var last: TuningResult? = null
         private set
+
+    /**
+     * Подбор сам поднял туннель на найденной точке (авто-применение). Тогда возвращать прежний
+     * не нужно: работает более свежий, только что проверенный.
+     */
+    @Volatile
+    private var tunnelBackUp = false
 
     /** Файл конфига, который Engine записал последним (UI отдаёт его по «Поделиться»). */
     @Volatile
@@ -81,7 +89,18 @@ class Engine(private val context: Context) {
             override fun isCancelled(): Boolean = cancelled.get() || sink.isCancelled()
         }
         executor.execute {
+            // Туннель, который подбор погасил сам (см. runOnce, шаг 1), обязан вернуться к концу
+            // подбора — чем бы тот ни кончился. Раньше runOnce поднимал его только при найденной
+            // лучшей точке, поэтому при ошибке (нет сети, все зеркала недоступны), отмене или
+            // «живых точек нет» человек оставался без интернета до ручного нажатия.
+            // Подбор из интерфейса гасит туннель ещё до старта — тот случай возвращает MainActivity.
+            val before = TunnelFactory.create(guard)
+            runCatching { TunnelStatusBus.refresh(guard) }
+            val wasUp = runCatching { before.supported && before.isUp }.getOrDefault(false)
+            val previousText = if (wasUp) previousTunnelText(guard) else ""
+            tunnelBackUp = false
             val outcome = runCatching { runOnce(spec, manual, watched) }
+            if (wasUp && !tunnelBackUp) restoreTunnel(before, previousText, watched)
             ScanGuard.stop(guard)
             main.post {
                 running = false
@@ -226,6 +245,7 @@ class Engine(private val context: Context) {
                     val withRoutes = ConfigComposer.applyPrefs(best, prefs, prefs.junkPool)
                     val up = runCatching { tunnel.startAndAwait(withRoutes, 25000) }.getOrDefault(false)
                     if (up) {
+                        tunnelBackUp = true
                         // «Подключить последнее» должно поднимать именно то, что работает сейчас.
                         prefs.lastConfigText = runCatching { WgConf.render(withRoutes) }
                             .getOrDefault(prefs.lastConfigText)
@@ -243,6 +263,56 @@ class Engine(private val context: Context) {
             }
         }
         return result
+    }
+
+    /**
+     * Текст конфига, которым туннель работает прямо сейчас.
+     *
+     * Ключи, маршруты и профиль шума — из сохранённого текста. Точку берём из снимка сервиса:
+     * после аварии он сам переходит на следующую, и в сохранённом тексте остаётся уже мёртвый
+     * адрес. Вернуть «прежний туннель» на мёртвую точку — значит не вернуть его вовсе.
+     */
+    private fun previousTunnelText(ctx: Context): String {
+        val text = runCatching { Prefs(ctx).lastConfigText }.getOrDefault("")
+        if (text.isBlank()) return text
+        val live = runCatching { TunnelStatusBus.snapshot(ctx).endpoint }.getOrDefault("").trim()
+        if (live.isEmpty() || live.any { it.isWhitespace() }) return text
+        return text.lineSequence().joinToString("\n") { line ->
+            if (line.trimStart().startsWith("Endpoint") && '=' in line) "Endpoint = $live" else line
+        }
+    }
+
+    /**
+     * Вернуть туннель, который работал до подбора.
+     *
+     * Вызывается, когда подбор закончился, а сам туннель не поднял (ошибка, отмена, «живых
+     * точек нет»).
+     */
+    private fun restoreTunnel(tunnel: TunnelController, previousText: String, sink: ProgressSink) {
+        runCatching {
+            // Снимок состояния пишет процесс туннеля — перечитываем сами. Сессия, которую проверка
+            // «изнутри» только что попросила закрыться, ещё может числиться живой: ждём её конца.
+            // Если же туннель и правда работает (человек нажал «Подключить» сам) — не трогаем.
+            runCatching { TunnelStatusBus.refresh(context) }
+            if (tunnel.isUp && !tunnel.waitStopped(3000)) return
+            if (previousText.isBlank()) {
+                sink.log("вернуть туннель нечем: сохранённого конфига нет")
+                return
+            }
+            val cfg = WgConf.toWarpConfig("возврат", previousText)
+            if (cfg == null) {
+                sink.log("вернуть туннель нечем: сохранённый конфиг не разбирается")
+                return
+            }
+            sink.log("подбор не оставил туннель — возвращаю прежний: ${cfg.endpoint.render()}")
+            if (tunnel.startAndAwait(cfg, 25000)) {
+                TunnelDebug.ok("туннель снова поднят после подбора: ${cfg.endpoint.render()}")
+            } else {
+                val why = tunnel.lastError() ?: tunnel.status
+                TunnelDebug.error("туннель не вернулся после подбора: $why")
+                sink.log("туннель не вернулся: $why")
+            }
+        }.onFailure { t -> sink.log("возврат туннеля: " + describe(t)) }
     }
 
     private fun describe(e: Throwable): String {

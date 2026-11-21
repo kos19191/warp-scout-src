@@ -777,6 +777,9 @@ class MainActivity : AppCompatActivity() {
         }
         autoConnectAfterScan = autoConnect
         persistUi()
+        // Туннель, который мы сейчас погасим ради замеров, вернём в конце подбора — чем бы тот ни
+        // кончился (см. restoreTunnelAfterScan). Запоминаем до остановки: после неё isUp уже false.
+        val tunnelWasUp = tunnel.supported && tunnel.isUp
         // Важно: при поднятом туннеле замеры идут через сам туннель (и через WARP), поэтому
         // «живых 0 из 120» — это не сеть, а самообман. Перед подбором туннель гасим.
         if (tunnel.supported && tunnel.isUp) {
@@ -813,16 +816,51 @@ class MainActivity : AppCompatActivity() {
             binding.btnTunnel.setText(if (tunnel.isUp) R.string.btn_tunnel_off else R.string.btn_tunnel_on)
             val connect = autoConnectAfterScan
             autoConnectAfterScan = false
-            if (connect && error == null && result != null) {
-                if (result.best == null) {
-                    banner(getString(R.string.scan_no_point))
-                } else {
-                    val target = result.best?.endpoint?.render().orEmpty()
+            val found = error == null && result?.best != null
+            val target = result?.best?.endpoint?.render().orEmpty()
+            when {
+                // Подбор уже поднял туннель сам (авто-применение). toggleTunnel() на поднятом
+                // туннеле его ВЫКЛЮЧАЕТ — раньше «подобрать и подключиться» так и гасило только что
+                // поднятое подключение.
+                connect && found && tunnel.isUp -> banner(getString(R.string.top3_now, target))
+                connect && found -> {
                     banner(getString(R.string.scan_found_connecting_to, target))
                     toggleTunnel()
                 }
+                // До подбора туннель работал — возвращаем его при любом исходе: ошибка, отмена,
+                // «живых точек нет». Раньше в этих случаях человек оставался без туннеля.
+                tunnelWasUp && !tunnel.isUp -> runCatching { restoreTunnelAfterScan(found, target) }
+                connect && error == null && result != null -> banner(getString(R.string.scan_no_point))
             }
         }
+    }
+
+    /**
+     * Вернуть подключение, которое подбор погасил перед замерами.
+     *
+     * Подключаемся обычным путём — как будто нажата «Подключить»: с перебором точек и с очередью
+     * для сервиса, по которой он сам переходит на соседнюю точку после аварии. Если подбор нашёл
+     * точку, поднимаемся на ней (она только что проверена на этой сети), иначе — на прежней.
+     */
+    private fun restoreTunnelAfterScan(found: Boolean, target: String) {
+        if (!tunnel.supported || tunnel.isUp || connecting) return
+        // Без новой точки поднимаем ровно то, что работало до подбора (сохранённый текст), а не
+        // лучшую точку какого-нибудь прошлого подбора: та могла давно умереть.
+        val cfg = if (found) {
+            currentConfig()
+        } else {
+            savedConfig()?.let { ConfigComposer.applyPrefs(it, prefs, prefs.junkPool) } ?: currentConfig()
+        }
+        if (cfg == null) {
+            banner(getString(R.string.scan_restore_nothing), error = true)
+            return
+        }
+        banner(
+            if (found) getString(R.string.scan_restore_found, target)
+            else getString(R.string.scan_restore_previous)
+        )
+        if (!tunnel.ensurePermission(this)) return
+        connectWithFallback(cfg)
     }
 
     private fun setupButtons() {
