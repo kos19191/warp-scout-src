@@ -1881,6 +1881,20 @@ class MainActivity : AppCompatActivity() {
         if (::binding.isInitialized) binding.cardBanner.visibility = View.GONE
     }
 
+    /** Wi-Fi / мобильная / Ethernet по активной сети — ключ для памяти рабочих точек. */
+    private fun netKindNow(): String = runCatching {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java)
+            ?: return@runCatching ""
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork ?: return@runCatching "")
+            ?: return@runCatching ""
+        when {
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "мобильная"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+            else -> ""
+        }
+    }.getOrDefault("")
+
     /**
      * Очередь точек входа для перебора.
      *
@@ -1909,6 +1923,19 @@ class MainActivity : AppCompatActivity() {
         // 0) Выбор человека: нажатая строка топ-3. Она идёт первой и не сдвигается никакой
         //    статистикой — если человек показал пальцем, спорить не о чем.
         add(preferred)
+
+        // 0.5) Точка, которая уже работала на такой же сети. Адреса Cloudflare не универсальны:
+        //    адрес, живой на домашнем Wi-Fi, может закрывать порт на мобильной сети. В журнале с
+        //    улицы это стоило лишней попытки и секунд тишины при каждом переключении.
+        runCatching {
+            val remembered = EndpointMemory.goodFor(this, netKindNow())
+            if (!remembered.isNullOrBlank()) {
+                val ep = WgConf.parseEndpoint(
+                    if (remembered.contains(':')) remembered else "$remembered:2408"
+                )
+                add(base.copy(endpoint = ep))
+            }
+        }
 
         val head = mutableListOf<WarpConfig?>()
         // 1) конфиг, который работал последним

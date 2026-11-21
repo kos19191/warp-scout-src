@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import dev.warpscout.app.EndpointMemory
 import dev.warpscout.app.R
 import dev.warpscout.app.TunnelDebug
 import dev.warpscout.core.config.SplitRoutes
@@ -449,6 +450,21 @@ class WarpVpnService : VpnService() {
     private val SLOW_RETRY_LIMIT = 12
 
     /**
+     * Сколько ждём тишины после события сети, прежде чем перезапускаться.
+     *
+     * Переключение Wi-Fi ↔ LTE приходит пачкой из трёх-четырёх событий, и склеить их надо — но не
+     * четырьмя секундами, как было раньше: событие «сеть появилась» внутри паузы отодвигало старт
+     * на всю паузу, и переподключение занимало 5–8 секунд вместо одной. 700 мс хватает, чтобы не
+     * перезапуститься дважды и не потерять ни одного события.
+     */
+    private val NET_QUIET_MS = 700L
+
+    /** Исходы ожидания попытки: поднялся / провалился / не дождались. */
+    private val ATTEMPT_UP = 1
+    private val ATTEMPT_FAILED = 0
+    private val ATTEMPT_TIMEOUT = -1
+
+    /**
      * Сколько раз подряд меняли точку входа, так и не подняв туннель.
      *
      * Считать надо отдельно от [netRestartAttempts]: смена точки — это не «ещё одна попытка того
@@ -462,8 +478,23 @@ class WarpVpnService : VpnService() {
     @Volatile
     private var forceFastRetry = false
 
-    /** Номер точки в очереди, на которой стоим сейчас (-1 — ещё не выбирали). */
-    private var failoverIndex = -1
+    /**
+     * Порядок перебора точек на текущий цикл переподключения и позиция в нём.
+     *
+     * Не просто очередь из настроек: первой идёт текущая точка, второй — та, что работала на
+     * такой же сети (см. [EndpointMemory]). Адреса WARP не универсальны: на Wi-Fi живёт один,
+     * на мобильной — другой, и без этого порядка сервис каждый раз тратил попытку на «чужую».
+     */
+    private var failoverOrder: List<String> = emptyList()
+    private var failoverPos = -1
+
+    /** Вид сети, на которой мы поднимались: Wi-Fi / мобильная / Ethernet. Для памяти точек. */
+    @Volatile
+    private var lastNetKind: String = ""
+
+    /** Уже ждём возвращения сети, чтобы поднять туннель самой (см. [scheduleRevive]). */
+    @Volatile
+    private var reviving = false
 
     /** Сколько медленных попыток уже сделано (сбрасывается при успехе). */
     @Volatile
@@ -687,6 +718,11 @@ class WarpVpnService : VpnService() {
                 TunnelState.up = true
                 TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_UP
                 handshake.countDown()
+                // Память «на такой сети работает такая точка»: следующая смена сети начнётся
+                // сразу с неё, без неудачной попытки на адресе из другой сети.
+                runCatching {
+                    EndpointMemory.remember(this, memoryNetKind(), cfg.endpoint.render())
+                }
                 TunnelDebug.ok("туннель поднят: ${cfg.endpoint.render()}")
                 postNotification(getString(R.string.notif_active, cfg.endpoint.render()))
             },
@@ -1124,10 +1160,13 @@ class WarpVpnService : VpnService() {
                 // Модем перестроился: сменилась полоса, качество, набор возможностей. Считаем —
                 // частые перестройки на LTE и есть та работа, которая греет модем в кармане.
                 capsChanges.incrementAndGet()
+                val kind = kindOf(caps)
+                if (kind.isNotEmpty()) lastNetKind = kind
             }
 
             override fun onAvailable(network: android.net.Network) {
                 netChanges.incrementAndGet()
+                rememberNetKind(network)
                 val base = baselineNetwork
                 if (base == null) {
                     baselineNetwork = network
@@ -1158,7 +1197,13 @@ class WarpVpnService : VpnService() {
                 // трафик в туннель, из которого ничего не выходит (чёрная дыра, «интернета нет»).
                 Thread({
                     runCatching { Thread.sleep(45_000) }
-                    if (stopped.get() || baselineNetwork != null) return@Thread
+                    if (stopped.get()) return@Thread
+                    // Сеть спрашиваем у системы, а не у своего поля baselineNetwork: переподъём
+                    // это поле обнуляет и не восстанавливает (watchNetwork() второй раз не
+                    // регистрируется, onAvailable больше не приходит). Из-за этого сторож снимал
+                    // только что поднятый туннель через 45 секунд после потери Wi-Fi — в журнале
+                    // человек видел «подключился и сразу потерял сеть», хотя LTE работал всё время.
+                    if (TunnelState.up || hasUsableNetwork()) return@Thread
                     TunnelDebug.stage("45 секунд без сети — снимаю туннель, чтобы трафик не уходил в пустоту")
                     TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_NO_NETWORK
                     TunnelState.status = "нет сети — туннель снят"
@@ -1170,6 +1215,11 @@ class WarpVpnService : VpnService() {
                     TunnelState.busy = false
                     closeAll()
                     stopped.set(false)
+                    // Сами себя выключили — сами и включаемся: раз в 15 секунд смотрим, не
+                    // появилась ли сеть. Раньше надеялись только на событие от системы, а если
+                    // сеть не менялась (LTE был всё время), события не было — и приложение стояло
+                    // выключенным, пока человек не зайдёт и не нажмёт «Подключить».
+                    scheduleRevive()
                 }, "warpscout-net-watchdog").apply { isDaemon = true }.start()
             }
         }
@@ -1206,14 +1256,15 @@ class WarpVpnService : VpnService() {
     private fun restartAfterNetworkChange(why: String, statusRes: Int = R.string.status_reconnect_net) {
         val now = System.currentTimeMillis()
         synchronized(this) {
-            // Переключение сети приходит пачкой событий: перезапускаемся не чаще раза в 4 секунды.
+            // Переключение сети приходит пачкой событий: перезапускаемся не чаще раза в тихое окно.
             // ВАЖНО: событие внутри паузы нельзя просто терять — именно на нём и терялся туннель,
             // поэтому откладываем один перезапуск, а не выбрасываем его.
-            if (now - lastNetRestartAt < 4_000L) {
+            val waitLeft = NET_QUIET_MS - (now - lastNetRestartAt)
+            if (waitLeft > 0) {
                 if (netRestartPending) return
                 netRestartPending = true
                 Thread({
-                    runCatching { Thread.sleep(4_500) }
+                    runCatching { Thread.sleep(waitLeft.coerceAtLeast(120L)) }
                     netRestartPending = false
                     if (!stopped.get()) restartAfterNetworkChange("$why (после паузы)", statusRes)
                 }, "warpscout-net-defer").apply { isDaemon = true }.start()
@@ -1290,9 +1341,9 @@ class WarpVpnService : VpnService() {
             starting = false
             TunnelState.busy = false
             closeAll()
-            // Небольшая пауза: системе нужно поднять маршрут по новой сети, иначе сокет снова
-            // привяжется к несуществующему пути.
-            runCatching { Thread.sleep(400) }
+            // Пауза короткая: маршрут по новой сети обычно уже поднят к моменту события, а лишние
+            // 400 мс раньше складывались с другими задержками в те самые «5–8 секунд».
+            runCatching { Thread.sleep(120) }
             // Пока спали, пользователь мог нажать «Отключить»: тогда переподнимать нечего.
             if (epoch.get() != myEpoch) return@Thread
             stopped.set(false)
@@ -1301,12 +1352,22 @@ class WarpVpnService : VpnService() {
             // Чистим причину прошлой попытки: иначе «сервер молчит» от прежней точки будет
             // выдавать себя за диагноз новой, и сервис сменит живую точку зря.
             TunnelState.error = null
-            startVpn(text, lastStartId)
+            // Порядок перебора — под эту сеть: первой пойдёт точка, работавшая на такой же сети.
+            rebuildFailoverOrder()
+            // И не тратим инициации на сеть, которая ещё не готова: сразу после включения Wi-Fi
+            // адрес раздаётся, портал проверки доступа не пройден — handshake уходит в никуда.
+            if (!awaitNetworkReady(3_000)) {
+                TunnelDebug.stage("сеть ещё не признана рабочей — пробую как есть")
+            }
+            // Текст конфига только на одну строку — Endpoint: та, что работала на такой сети.
+            val startText = preferredStartText(text)
+            if (startText != text) lastConfigText = startText
+            startVpn(startText, lastStartId)
 
             // Проверяем, что переподъём действительно состоялся: «сервис запущен» и «туннель
             // работает» — разные вещи. Если handshake не прошёл, пробуем ещё раз (до трёх),
             // а не оставляем пользователя с молчащим туннелем.
-            if (awaitUp(15_000)) {
+            if (awaitAttempt(15_000) == ATTEMPT_UP) {
                 netRestartAttempts = 0
                 autoRebind = false
                 slowRetries = 0
@@ -1330,6 +1391,7 @@ class WarpVpnService : VpnService() {
                 // «сервер молчит: 5 инициаций без ответа»). Раньше сервис на этом сдавался и
                 // писал «нажми «Подключить»»; человек в этот момент мог спать, а интернет шёл
                 // мимо туннеля. Теперь берём следующую точку из очереди последнего подключения.
+                val oldPoint = currentEndpointLine().orEmpty()
                 val next = nextFailoverEndpoint()
                 if (next != null) {
                     lastConfigText = next.second
@@ -1337,13 +1399,14 @@ class WarpVpnService : VpnService() {
                     netRestartAttempts = 0
                     forceFastRetry = true
                     TunnelDebug.stage(
-                        "прежняя точка молчит — перехожу на ${next.first} " +
-                            "(смена $rotationsSinceUp из $MAX_ROTATIONS, без ручного нажатия)"
+                        "$oldPoint не поднялась — перехожу на ${next.first} " +
+                            "(смена $rotationsSinceUp из $MAX_ROTATIONS, без ручного нажатия; " +
+                            "причина: ${(TunnelState.error ?: "нет ответа").take(80)})"
                     )
                     TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_RECONNECTING
                     TunnelState.status = "переключаюсь на ${next.first}"
                     postNotification(TunnelState.status)
-                    runCatching { Thread.sleep(1_000) }
+                    runCatching { Thread.sleep(120) }
                     if (!stopped.get()) {
                         restartAfterNetworkChange("переход на ${next.first}")
                     }
@@ -1400,21 +1463,65 @@ class WarpVpnService : VpnService() {
     private fun nextFailoverEndpoint(): Pair<String, String>? {
         if (rotationsSinceUp >= MAX_ROTATIONS) return null
         val text = lastConfigText ?: return null
-        val queue = serviceSettings().failover.filter { it.isNotBlank() }
-        if (queue.size < 2) return null
+        if (failoverOrder.isEmpty()) rebuildFailoverOrder()
+        if (failoverOrder.size < 2) return null
         val current = currentEndpointLine()
-        val from = failoverIndex.takeIf { it in queue.indices }
-            ?: current?.let { queue.indexOf(it) }
+        val from = failoverPos.takeIf { it in failoverOrder.indices }
+            ?: current?.let { failoverOrder.indexOf(it) }
             ?: -1
-        for (step in 1..queue.size) {
-            val idx = (from + step).mod(queue.size)
-            val host = queue[idx]
+        for (step in 1..failoverOrder.size) {
+            val idx = (from + step).mod(failoverOrder.size)
+            val host = failoverOrder[idx]
             if (host == current) continue
-            failoverIndex = idx
+            failoverPos = idx
             return host to swapEndpointLine(text, host)
         }
         return null
     }
+
+    /**
+     * Порядок перебора под текущую сеть: текущая точка → точка, работавшая на такой же сети →
+     * очередь последнего подключения.
+     *
+     * Смысл в первых двух: адреса WARP не универсальны. В журнале с улицы на Wi-Fi работал
+     * `162.159.192.10:500`, а на мобильной — `162.159.192.2:500`; без памяти сервис каждый раз
+     * начинал с «чужой» точки, тратил на неё попытку и только потом доходил до рабочей.
+     */
+    private fun rebuildFailoverOrder() {
+        val queue = runCatching { serviceSettings().failover }.getOrDefault(emptyList())
+            .filter { it.isNotBlank() }
+        val current = currentEndpointLine()
+        val remembered = runCatching { EndpointMemory.goodFor(this, memoryNetKind()) }.getOrNull()
+        failoverOrder = buildList {
+            if (current != null) add(current)
+            if (remembered != null) add(remembered)
+            addAll(queue)
+        }.distinct()
+        failoverPos = current?.let { failoverOrder.indexOf(it) } ?: -1
+        if (remembered != null && remembered != current) {
+            TunnelDebug.stage("на сети «${memoryNetKind()}» работала $remembered — она в переборе вторая")
+        }
+    }
+
+    /**
+     * С чего начинать подъём после смены сети: если на такой же сети уже работала конкретная
+     * точка — начинаем сразу с неё. Это и есть «переключается быстро»: без лишней неудачной
+     * попытки на адресе, который в этой сети закрыт.
+     */
+    private fun preferredStartText(text: String): String {
+        val current = endpointOf(text)
+        val kind = memoryNetKind()
+        val remembered = runCatching { EndpointMemory.goodFor(this, kind) }.getOrNull() ?: return text
+        if (remembered == current) return text
+        TunnelDebug.stage("на «$kind» работала $remembered — начинаю с неё, а не с $current")
+        return swapEndpointLine(text, remembered)
+    }
+
+    /** Строка Endpoint из произвольного текста конфига. */
+    private fun endpointOf(text: String): String? =
+        text.lineSequence()
+            .firstOrNull { it.trimStart().startsWith("Endpoint") && '=' in it }
+            ?.substringAfter('=')?.trim()?.takeIf { it.isNotEmpty() }
 
     /** Текст конфига с другой строкой `Endpoint =`. Всё остальное байт в байт прежнее. */
     private fun swapEndpointLine(text: String, endpoint: String): String =
@@ -1422,18 +1529,117 @@ class WarpVpnService : VpnService() {
             if (line.trimStart().startsWith("Endpoint") && '=' in line) "Endpoint = $endpoint" else line
         }
 
-    /** Ждём фактического подъёма туннеля (handshake), а не просто «сервис запущен». */
-    private fun awaitUp(timeoutMs: Int): Boolean {
+    /**
+     * Ждём исход попытки: поднялся / провалился / не дождались.
+     *
+     * Раньше здесь было только «поднялся или нет», и провал выяснялся лишь по концу окна: точка
+     * отвечала «порт закрыт» за 0,5 с, а сервис ещё 14,5 с ждал, прежде чем взять следующую. В
+     * журнале это ровно те паузы между «✗ handshake не прошёл» и «перехожу на …» — две мёртвые
+     * точки стоили полминуты, хотя работы там на две секунды.
+     */
+    private fun awaitAttempt(timeoutMs: Int): Int {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (stopped.get()) return ATTEMPT_FAILED
+            if (TunnelState.up) return ATTEMPT_UP
+            // Сервис уже сказал, что попытка кончилась: handshake не прошёл, ошибка записана.
+            if (TunnelState.phase == dev.warpscout.core.state.TunnelStatus.PHASE_FAILED) return ATTEMPT_FAILED
+            if (TunnelState.error != null && !starting) return ATTEMPT_FAILED
+            runCatching { Thread.sleep(100) }
+        }
+        return if (TunnelState.up) ATTEMPT_UP else ATTEMPT_TIMEOUT
+    }
+
+    /** Wi-Fi / мобильная / Ethernet по возможностям сети — ключ для памяти точек. */
+    private fun kindOf(caps: android.net.NetworkCapabilities?): String = when {
+        caps == null -> ""
+        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "мобильная"
+        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+        else -> ""
+    }
+
+    /** Запомнить вид сети, на которой поднимались: по нему выбирается первая точка. */
+    private fun rememberNetKind(network: android.net.Network) {
+        val kind = runCatching {
+            val cm = getSystemService(android.net.ConnectivityManager::class.java)
+            kindOf(cm?.getNetworkCapabilities(network))
+        }.getOrDefault("")
+        if (kind.isNotEmpty()) lastNetKind = kind
+    }
+
+    /** Вид сети для памяти точек: последний известный, иначе — по активной сети. */
+    private fun memoryNetKind(): String = lastNetKind.ifBlank { netKind() }
+
+    /** Есть ли хоть одна настоящая (не наша VPN) сеть с интернетом. */
+    private fun hasUsableNetwork(): Boolean = runCatching {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return@runCatching true
+        cm.allNetworks.any { n ->
+            val caps = cm.getNetworkCapabilities(n) ?: return@any false
+            caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+        }
+    }.getOrDefault(true)
+
+    /**
+     * Сеть, которую система признала рабочей: есть интернет, это не наш VPN и проверка доступа
+     * пройдена (`NET_CAPABILITY_VALIDATED`).
+     */
+    private fun hasValidatedNetwork(): Boolean = runCatching {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return@runCatching true
+        cm.allNetworks.any { n ->
+            val caps = cm.getNetworkCapabilities(n) ?: return@any false
+            caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN) &&
+                caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        }
+    }.getOrDefault(true)
+
+    /**
+     * Ждём готовности сети перед попыткой: сразу после включения Wi-Fi адрес ещё раздаётся, а
+     * портал проверки доступа не пройден — четыре инициации в это время уходят в никуда и тратят
+     * модем. Ждём не больше трёх секунд: если сеть так и не «подтвердилась», пробуем как есть —
+     * на части прошивок VALIDATED не выставляется вообще.
+     */
+    private fun awaitNetworkReady(timeoutMs: Long): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (stopped.get()) return false
-            if (TunnelState.up) {
-                // Даём секунду на первый трафик: «поднят» без единого пакета — отдельный случай.
-                return true
-            }
-            runCatching { Thread.sleep(200) }
+            if (hasValidatedNetwork()) return true
+            runCatching { Thread.sleep(100) }
         }
-        return TunnelState.up
+        return hasValidatedNetwork()
+    }
+
+    /**
+     * Ждём возвращения сети после вынужденного снятия туннеля и поднимаем его сами.
+     *
+     * Одна проверка раз в 15 секунд — это системный вызов, радио она не будит. Дольше держать
+     * бессмысленно: сеть либо есть, либо нет.
+     */
+    private fun scheduleRevive() {
+        if (reviving) return
+        reviving = true
+        Thread({
+            try {
+                while (!stopped.get() && !TunnelState.up) {
+                    runCatching { Thread.sleep(15_000) }
+                    if (stopped.get() || TunnelState.up) return@Thread
+                    if (!hasUsableNetwork()) continue
+                    if (lastConfigText == null) return@Thread
+                    TunnelDebug.stage("сеть вернулась — поднимаю туннель без нажатия")
+                    // Бюджет быстрых попыток для этого случая не тратим: сеть только что появилась.
+                    forceFastRetry = true
+                    autoRebind = true
+                    netRestartAttempts = 0
+                    rotationsSinceUp = 0
+                    restartAfterNetworkChange("сеть вернулась сама", R.string.status_reconnect_net)
+                    return@Thread
+                }
+            } finally {
+                reviving = false
+            }
+        }, "warpscout-net-revive").apply { isDaemon = true }.start()
     }
 
     companion object {
