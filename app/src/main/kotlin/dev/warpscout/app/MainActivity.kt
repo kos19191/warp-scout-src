@@ -1050,11 +1050,18 @@ class MainActivity : AppCompatActivity() {
      * Ничего не спрашиваем: действие обратимое в том смысле, что журнал и так собирается заново
      * с первой же строки, а лишний диалог на вкладке «Журнал» только мешает.
      */
+    /** Подсказка журнала уже возвращена к обычной после очистки (см. [clearJournal]). */
+    private var hintRestored = true
+
     private fun clearJournal() {
+        hintRestored = false
         log.setLength(0)
         TunnelDebug.clear()
         lastDiagDump = null
         binding.textLog.text = ""
+        // Подсказка «журнал пуст: туннель ещё не запускался» здесь была бы неправдой: он был,
+        // просто его стёрли. Об этом и говорим — иначе экран врёт о состоянии.
+        binding.textLogHint.setText(R.string.journal_cleared_hint)
         refreshLogBox()
         updateTunnelDiagnostics()
         banner(getString(R.string.banner_log_cleared))
@@ -1077,6 +1084,12 @@ class MainActivity : AppCompatActivity() {
         override fun log(message: String) = runOnUiThread {
             if (log.isNotEmpty()) log.append('\n')
             log.append(message)
+            // После очистки подсказка другая; как только пошли строки, возвращаем обычную —
+            // иначе она всплывёт при следующем пустом журнале и снова соврёт.
+            if (!hintRestored) {
+                hintRestored = true
+                binding.textLogHint.setText(R.string.journal_empty)
+            }
             binding.textLogHint.visibility = android.view.View.GONE
             if (log.length > 30000) log.delete(0, log.length - 30000)
             val box = binding.logBox
