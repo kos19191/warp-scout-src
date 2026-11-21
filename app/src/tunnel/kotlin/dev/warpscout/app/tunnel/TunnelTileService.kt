@@ -6,9 +6,13 @@ import android.net.VpnService
 import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
+import dev.warpscout.app.CrashLog
 import dev.warpscout.app.MainActivity
 import dev.warpscout.app.Prefs
 import dev.warpscout.app.R
+import dev.warpscout.app.TunnelDebug
+import dev.warpscout.app.status.ServiceSettingsStore
+import dev.warpscout.app.status.TunnelStatusBus
 
 /**
  * Плитка в «шторке» (быстрые настройки).
@@ -26,8 +30,28 @@ import dev.warpscout.app.R
  */
 class TunnelTileService : TileService() {
 
+    /**
+     * Плитка живёт в процессе интерфейса, а туннель — в своём: состояние приходится читать из
+     * общего снимка. Подключаемся в onCreate, потому что плитку могут нажать и при закрытом
+     * приложении — тогда это единственная точка входа в процесс.
+     */
+    override fun onCreate() {
+        super.onCreate()
+        runCatching {
+            CrashLog.install(this)
+            TunnelDebug.attach(this)
+            // Плитку могут нажать при закрытом приложении — тогда это единственный шанс
+            // переписать снимок настроек для сервиса (после обновления приложения его может
+            // ещё не быть, и туннель поднялся бы по значениям по умолчанию).
+            ServiceSettingsStore.syncFromPrefs(this)
+            TunnelState.installMirror(this)
+        }
+    }
+
     override fun onStartListening() {
         super.onStartListening()
+        // Снимок мог устареть, пока шторка была закрыта: перечитываем перед показом.
+        runCatching { TunnelStatusBus.refresh(this) }
         updateTile()
     }
 
@@ -38,8 +62,8 @@ class TunnelTileService : TileService() {
 
     override fun onClick() {
         if (TunnelState.up) {
+            // Состояние обновит сервис: он владелец снимка, плитка только читает.
             WarpVpnService.stop(this)
-            TunnelState.status = "туннель остановлен из шторки"
             updateTile()
             return
         }
@@ -62,6 +86,7 @@ class TunnelTileService : TileService() {
 
     private fun updateTile() {
         val tile = qsTile ?: return
+        runCatching { TunnelStatusBus.snapshot(this) }
         val hasConfig = Prefs(this).lastConfigText.isNotBlank()
         tile.state = when {
             TunnelState.up -> Tile.STATE_ACTIVE

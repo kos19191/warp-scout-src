@@ -9,6 +9,7 @@ import dev.warpscout.core.net.NetSettings
 import dev.warpscout.core.net.PoolMode
 import dev.warpscout.core.presets.Presets
 import dev.warpscout.core.presets.RoutePresets
+import dev.warpscout.core.state.ServiceSettings
 import dev.warpscout.core.tune.TuningSpec
 
 /**
@@ -86,12 +87,18 @@ class Prefs(private val context: Context) {
     /** Второй выход: свой сервер (WireGuard/AmneziaWG) для выбранных подсетей. */
     var secondExitOn: Boolean
         get() = sp.getBoolean("secondExitOn", false)
-        set(v) = sp.edit().putBoolean("secondExitOn", v).apply()
+        set(v) {
+            sp.edit().putBoolean("secondExitOn", v).apply()
+            pushToService()
+        }
 
     /** Конфиг второго выхода: текст [Interface]/[Peer] от своего сервера. */
     var secondConf: String
         get() = sp.getString("secondConf", "").orEmpty()
-        set(v) = sp.edit().putString("secondConf", v).apply()
+        set(v) {
+            sp.edit().putString("secondConf", v).apply()
+            pushToService()
+        }
 
     /** Домены, которые должны идти через второй выход (для человека и для повторного сбора IP). */
     var secondDomains: String
@@ -101,7 +108,10 @@ class Prefs(private val context: Context) {
     /** Развёрнутые в CIDR адреса этих доменов — ровно их и раскладывает ExitRouter. */
     var secondCidrs: String
         get() = sp.getString("secondCidrs", "").orEmpty()
-        set(v) = sp.edit().putString("secondCidrs", v).apply()
+        set(v) {
+            sp.edit().putString("secondCidrs", v).apply()
+            pushToService()
+        }
 
     /** Период фонового подбора в часах: 0 — выключено. */
     var scheduleHours: Int
@@ -129,6 +139,7 @@ class Prefs(private val context: Context) {
             }
         }
         edit.apply()
+        pushToService()
     }
 
     /** .conf, импортированный вручную: используется, если генератор недоступен. */
@@ -192,12 +203,18 @@ class Prefs(private val context: Context) {
      */
     var appsMode: Int
         get() = sp.getInt("appsMode", APPS_ALL)
-        set(v) = sp.edit().putInt("appsMode", v).apply()
+        set(v) {
+            sp.edit().putInt("appsMode", v).apply()
+            pushToService()
+        }
 
     /** Пакеты, выбранные в режимах «только» и «кроме» (один список на оба режима). */
     var appsSelected: Set<String>
         get() = sp.getStringSet("appsSelected", emptySet()).orEmpty()
-        set(v) = sp.edit().putStringSet("appsSelected", v).apply()
+        set(v) {
+            sp.edit().putStringSet("appsSelected", v).apply()
+            pushToService()
+        }
 
     var allowBlockIds: Set<String>
         get() = sp.getStringSet("allowBlock", null) ?: dev.warpscout.core.lists.AllowLists.DEFAULT_BLOCK_IDS.toSet()
@@ -219,16 +236,6 @@ class Prefs(private val context: Context) {
         get() = sp.getBoolean("checkByLists", false)
         set(v) = sp.edit().putBoolean("checkByLists", v).apply()
 
-    /** Адрес SOCKS5-прокси ByeDPI ('' = не использовать). */
-    var byedpiProxy: String
-        get() = sp.getString("byedpiProxy", "") ?: ""
-        set(v) = sp.edit().putString("byedpiProxy", v.trim()).apply()
-
-    /** true — базовые замеры во время подбора идут через ByeDPI, а не напрямую. */
-    var tuneViaByedpi: Boolean
-        get() = sp.getBoolean("tuneViaByedpi", false)
-        set(v) = sp.edit().putBoolean("tuneViaByedpi", v).apply()
-
     var autoApply: Boolean
         get() = sp.getBoolean("autoApply", false)
         set(v) = sp.edit().putBoolean("autoApply", v).apply()
@@ -238,11 +245,18 @@ class Prefs(private val context: Context) {
         get() = sp.getLong("lastTunedAt", 0L)
         set(v) = sp.edit().putLong("lastTunedAt", v).apply()
 
-    /**
-     * Последний конфиг, которым поднимали туннель (текст WireGuard/AmneziaWG). Нужен плитке
-     * быстрых настроек: она подключает «то же, что в прошлый раз», не собирая конфиг заново.
-     */
     /** Последняя точка входа, которая реально поднялась: её пробуем раньше «сегодняшней». */
+    /**
+     * Очередь точек входа из последнего подключения — её читает процесс туннеля, чтобы после
+     * смены сети перейти на следующую точку самому, не ожидая нажатия «Подключить».
+     */
+    var failoverQueue: List<String>
+        get() = (sp.getString("failoverQueue", "") ?: "")
+            .split('\n')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        set(v) = sp.edit().putString("failoverQueue", v.distinct().take(12).joinToString("\n")).apply()
+
     var lastEndpoint: String
         get() = sp.getString("lastEndpoint", "").orEmpty()
         set(v) = sp.edit().putString("lastEndpoint", v).apply()
@@ -252,6 +266,19 @@ class Prefs(private val context: Context) {
         get() = sp.getString("lastExitRegion", "").orEmpty()
         set(v) = sp.edit().putString("lastExitRegion", v).apply()
 
+    /**
+     * Какой конфиг из тройки сейчас работает (`host:port|шум`). Отдельно от [lastConfigText]:
+     * текст последнего конфига зависит от выбранного клиента (Amnezia/WireGuard/Clash), и сравнивать
+     * его с записью в списке напрямую нельзя — активная строка переставала бы подсвечиваться.
+     */
+    var shortlistActive: String
+        get() = sp.getString("shortlistActive", "").orEmpty()
+        set(v) = sp.edit().putString("shortlistActive", v).apply()
+
+    /**
+     * Последний конфиг, которым поднимали туннель (текст WireGuard/AmneziaWG). Нужен плитке
+     * быстрых настроек: она подключает «то же, что в прошлый раз», не собирая конфиг заново.
+     */
     var lastConfigText: String
         get() = sp.getString("lastConfigText", "").orEmpty()
         set(v) = sp.edit().putString("lastConfigText", v).apply()
@@ -320,12 +347,14 @@ class Prefs(private val context: Context) {
     fun confTargetEnum(): dev.warpscout.core.config.ConfTarget =
         dev.warpscout.core.config.ConfTarget.values()[confTarget.coerceIn(0, 3)]
 
-    fun routesModeName(): String = when (routesMode) {
-        1 -> "whitelist-пресет"
-        2 -> "по спискам allow-domains"
-        3 -> "вручную"
-        else -> "весь трафик"
-    }
+    fun routesModeName(): String = context.getString(
+        when (routesMode) {
+            1 -> R.string.routes_mode_preset
+            2 -> R.string.routes_mode_lists
+            3 -> R.string.routes_mode_manual
+            else -> R.string.routes_mode_all
+        }
+    )
 
     /**
      * Что реально попадёт в `AllowedIPs`.
@@ -365,16 +394,37 @@ class Prefs(private val context: Context) {
         return out
     }
 
+    /**
+     * Донести «сервисные» настройки до процесса туннеля. SharedPreferences между процессами
+     * расходятся (у каждого своя копия в памяти), поэтому сервис читает отдельный снимок в файле,
+     * который переписывается здесь при каждом изменении.
+     */
+    private fun pushToService() {
+        dev.warpscout.app.status.ServiceSettingsStore.write(
+            context,
+            ServiceSettings(
+                secondExitOn = secondExitOn,
+                secondConf = secondConf,
+                secondCidrs = secondCidrs,
+                appsMode = appsMode,
+                appsSelected = appsSelected.toList().sorted(),
+                failover = failoverQueue,
+            )
+        )
+    }
+
     /** Куда класть скачанные списки. */
     fun allowListStore(): dev.warpscout.core.lists.FileListStore =
         dev.warpscout.core.lists.FileListStore(java.io.File(context.filesDir, "allowlists"))
 
     /** Как объяснить пользователю, что он сейчас выбрал. */
-    fun poolModeName(): String = when (poolMode) {
-        POOL_MASQUE -> "Только MASQUE"
-        POOL_FULL -> "Полный перебор"
-        else -> "Пул генератора"
-    }
+    fun poolModeName(): String = context.getString(
+        when (poolMode) {
+            POOL_MASQUE -> R.string.pool_mode_masque
+            POOL_FULL -> R.string.pool_mode_full
+            else -> R.string.pool_mode_default
+        }
+    )
 
     fun tuningSpec(): TuningSpec = TuningSpec(
         endpointSpec = endpointSpec(),
@@ -394,9 +444,10 @@ class Prefs(private val context: Context) {
     companion object {
         const val POOL_DEFAULT = 0
 
-        const val APPS_ALL = 0
-        const val APPS_ONLY = 1
-        const val APPS_EXCEPT = 2
+        // Значения берутся из общей модели: сервис и интерфейс не должны разойтись в нумерации.
+        const val APPS_ALL = ServiceSettings.APPS_ALL
+        const val APPS_ONLY = ServiceSettings.APPS_ONLY
+        const val APPS_EXCEPT = ServiceSettings.APPS_EXCEPT
         const val POOL_MASQUE = 1
         const val POOL_FULL = 2
 

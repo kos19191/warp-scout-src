@@ -22,6 +22,9 @@
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Подбор занимает минуты: пока он идёт, процесс держится foreground-сервисом, иначе
+         сворачивание экрана могло оборвать скан, ничего не сказав пользователю. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:allowBackup="false"
@@ -33,6 +36,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.WarpScout"
         android:usesCleartextTraffic="false">
+
+        <service
+            android:name=".ScanGuardService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <activity
             android:name=".MainActivity"

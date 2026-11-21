@@ -71,7 +71,7 @@ object ConfigFiles {
                 putExtra(Intent.EXTRA_STREAM, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             },
-            "Отправить ${file.name}"
+            context.getString(R.string.share_file, file.name)
         ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
 

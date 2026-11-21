@@ -11,8 +11,8 @@ android {
         applicationId = "dev.warpscout.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 26
-        versionName = "1.9.1"
+        versionCode = 51
+        versionName = "1.10.24"
     }
 
     flavorDimensions += "mode"
@@ -33,9 +33,38 @@ android {
         }
     }
 
+    signingConfigs {
+        /**
+         * Постоянный ключ подписи, лежащий в репозитории (`app/debug.keystore`).
+         *
+         * Android узнаёт приложение по подписи: если новый APK подписан другим ключом, обновление
+         * не ставится — «Приложение не установлено», и человек вынужден удалять старое (теряя
+         * настройки). Раньше ключ пытались фиксировать кешем GitHub Actions; кеш истекает после
+         * недели без обращений, на следующей сборке создавался новый ключ — и обновление ломалось
+         * ровно у того, кто обновляется раз в неделю. Теперь ключ в репозитории: подпись не
+         * зависит ни от кеша, ни от раннера.
+         *
+         * Это тестовый ключ (не для магазина), пароль открыт так же, как он лежит в репозитории.
+         */
+        create("pinned") {
+            val ks = file("debug.keystore")
+            if (ks.exists()) {
+                storeFile = ks
+                storeType = "PKCS12"
+                storePassword = System.getenv("WARPSCOUT_STOREPASS") ?: "warpscout"
+                keyAlias = System.getenv("WARPSCOUT_KEYALIAS") ?: "warpscout"
+                keyPassword = System.getenv("WARPSCOUT_KEYPASS") ?: "warpscout"
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
+            // Один и тот же ключ на всех сборках — иначе обновление «поверх» не ставится.
+            if (file("debug.keystore").exists()) {
+                signingConfig = signingConfigs.getByName("pinned")
+            }
         }
         release {
             isMinifyEnabled = true

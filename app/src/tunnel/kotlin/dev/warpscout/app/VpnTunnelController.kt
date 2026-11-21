@@ -13,6 +13,12 @@ import dev.warpscout.core.tune.TunnelVerifier
 
 class VpnTunnelController(private val context: Context) : TunnelController {
 
+    init {
+        // Туннель живёт в отдельном процессе: подключаемся к его снимку состояния и держим
+        // TunnelState зеркалом (один раз на процесс).
+        TunnelState.installMirror(context)
+    }
+
     override val supported: Boolean get() = true
     override val isUp: Boolean get() = TunnelState.up
     override val status: String get() = TunnelState.status
@@ -30,10 +36,11 @@ class VpnTunnelController(private val context: Context) : TunnelController {
         if (runCatching { VpnService.prepare(context) != null }.getOrDefault(true)) {
             TunnelDebug.error(
                 "нет разрешения на VPN",
-                "открой приложение и нажми «Туннель» ещё раз — система спросит разрешение один раз"
+                "открой приложение и нажми «Включить туннель» ещё раз — система спросит разрешение один раз"
             )
             return false
         }
+        // Сброс прошлого результата делает сам запуск сервиса (WarpVpnService.startWithText).
         WarpVpnService.start(context, config)
         return true
     }
@@ -44,36 +51,79 @@ class VpnTunnelController(private val context: Context) : TunnelController {
      */
     override fun startAndAwait(config: WarpConfig, waitMs: Int): Boolean {
         if (!start(config)) return false
-        val deadline = System.currentTimeMillis() + waitMs.coerceAtLeast(3000)
+        val startMark = System.currentTimeMillis()
+        val deadline = startMark + waitMs.coerceAtLeast(3000)
         var announced = false
+        var lastRead = 0L
         while (System.currentTimeMillis() < deadline) {
+            // Состояние пишет сервис в другом процессе. Читаем снимок сами, не полагаясь только на
+            // уведомление: потерянное уведомление не должно выглядеть как «туннель не поднимается».
+            val now = System.currentTimeMillis()
+            if (now - lastRead >= 500) {
+                lastRead = now
+                runCatching { dev.warpscout.app.status.TunnelStatusBus.refresh(context) }
+            }
             if (TunnelState.up) {
                 TunnelDebug.ok("туннель работает: ${config.endpoint.render()}")
                 return true
             }
-            // Сервис уже сдался (или упал) — ждать дальше смысла нет.
-            if (!announced && WarpVpnService.gaveUp()) {
+            // Сервис уже сдался (или упал) — ждать дальше смысла нет. Но только если это про
+            // НАШУ попытку: «сдался» из снимка прошлой точки раньше обрывало новую через 50 мс
+            // после старта, интерфейс уходил к следующей точке, а прежняя всё равно поднималась —
+            // и в итоге работали два туннеля сразу (двойные рукопожатия, двойной расход).
+            val ours = TunnelState.startedAt >= startMark
+            if (!announced && ours && System.currentTimeMillis() - startMark > 500 && WarpVpnService.gaveUp()) {
                 announced = true
-                TunnelDebug.error(
-                    WarpVpnService.failureReason() ?: "сервис остановился без причины",
-                    "посмотри журнал: там видно, на каком этапе всё встало"
-                )
+                // Причину уже назвал сервис, и она попадает в журнал отдельной строкой. Второй
+                // строкой «посмотри журнал» мы объясняли очевидное — человек и так в нём.
+                val reason = WarpVpnService.failureReason() ?: "сервис остановился без причины"
+                TunnelDebug.error(reason, hintFor(reason))
                 return false
             }
-            Thread.sleep(200)
+            Thread.sleep(150)
         }
+        // Пустой этап — это не объяснение. Если сервис ничего не сказал, показываем последнюю
+        // строку общего журнала (его пишет и сервис), а если и её нет — так и говорим.
+        // «Этап: туннель остановлен» — это не этап, а след уже случившейся остановки: показывать
+        // его вместо причины значит врать в самом важном месте. Такие служебные тексты пропускаем
+        // и берём последнюю содержательную строку журнала.
+        val status = TunnelState.status.trim()
+        val stage = status.takeIf { it.isNotBlank() && !it.isServiceNoise() }
+            ?: TunnelDebug.lastLine().takeIf { it.isNotBlank() && !it.isServiceNoise() }
+            ?: "сервис не написал ни строки — похоже, не запустился"
         TunnelDebug.error(
-            "за ${waitMs} мс handshake не завершился (этап: ${TunnelState.status})",
+            "за ${waitMs} мс handshake не завершился (этап: ${stage.take(160)})",
             "обычно это endpoint, который не отвечает на инициацию: смени профиль шума или порт"
         )
         return false
+    }
+
+    /** Служебные отметки «мы остановились», в которых нет причины. */
+    private fun String.isServiceNoise(): Boolean =
+        startsWith("туннель остановлен") || startsWith("туннель закрыт") ||
+            startsWith("туннель закрыт (") || startsWith("сервис остановлен")
+
+    /**
+     * Подсказка по причине. Общая фраза «посмотри журнал» бесполезна: журнал открыт у человека на
+     * экране. Полезно то, что можно сделать прямо сейчас.
+     */
+    private fun hintFor(reason: String): String = when {
+        reason.contains("port unreachable", ignoreCase = true) || reason.contains("порт закрыт") ->
+            "порт не обслуживает WARP в этой сети — следующая точка поднимется сама"
+        reason.contains("молчит", ignoreCase = true) || reason.contains("ответа нет") ->
+            "endpoint молчит: помогает другой профиль шума или другой порт"
+        reason.contains("ключ", ignoreCase = true) ->
+            "ключи не подошли: нажми «Сканировать и подобрать» — они будут получены заново"
+        else -> "нажми «Включить туннель» ещё раз — перебор точек начнётся с другой пары адрес:порт"
     }
 
     override fun stop() = WarpVpnService.stop(context)
 
     override fun waitStopped(timeoutMs: Int): Boolean = WarpVpnService.waitDown(timeoutMs)
 
-    override fun lastError(): String? = TunnelDebug.lastError
+    // Причину отказа называет сервис, а живёт она в снимке его состояния: в процессе интерфейса
+    // TunnelDebug.lastError почти всегда пуст, и вместо причины показывалось «нет ответа».
+    override fun lastError(): String? = TunnelState.error ?: TunnelDebug.lastError
 
     override fun debugDump(): String = TunnelDebug.dump()
 

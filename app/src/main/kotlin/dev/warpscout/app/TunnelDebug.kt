@@ -1,5 +1,7 @@
 package dev.warpscout.app
 
+import dev.warpscout.core.state.TunnelStatus
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -12,10 +14,39 @@ import java.util.Locale
  * Пишется из flavor'а `tunnel` (main-исходники видит любой flavor, наоборот — нет), читается UI
  * через [TunnelController.debugDump]. Кольцевой буфер + сальное время, чтобы было видно не только
  * «упало», но и «сколько висело на каждом шаге».
+ *
+ * Почему строки журнала остаются в коде, а не в `strings.xml`: журнал пишут три стороны — ядро
+ * (`:core`, там нет Android-ресурсов), сервис и интерфейс, — и он же попадает в issue и в чат при
+ * разборе. Тексты этапов — это фактически протокол обмена, а не подписи на экране. Чтобы перевести
+ * журнал, нужно сначала заменить тексты кодами событий (как это уже сделано для подъёма туннеля:
+ * `DataPlane.onTunnelUp`), и только потом переводить. Подписи интерфейса, уведомления, советы и
+ * баннеры — уже в ресурсах (см. `strings.xml`).
  */
 object TunnelDebug {
 
     private const val MAX_LINES = 220
+
+    /**
+     * Журнал ещё и в файле. Причина простая: туннель живёт в отдельном процессе, и кольцевой
+     * буфер в памяти интерфейса о нём ничего не знает. Файл — единственное место, где сходятся
+     * строки обоих процессов: сервис пишет этапы подъёма и rekey, интерфейс — подбор и ошибки.
+     * Дописывание строки — одна запись в конец (O_APPEND), поэтому два процесса не перемешивают
+     * половины строк; размер ограничен, старое вытесняется.
+     */
+    private const val JOURNAL = "tunnel-journal.log"
+    private const val JOURNAL_MAX_BYTES = 256 * 1024
+    private const val JOURNAL_KEEP_LINES = 120
+    private const val DUMP_LIMIT_BYTES = 24 * 1024
+
+    @Volatile
+    private var journal: File? = null
+
+    /** Подключить журнал к файлу в `filesDir` (зовётся из обоих процессов при старте). */
+    fun attach(context: android.content.Context) {
+        val file = File(context.applicationContext.filesDir, JOURNAL)
+        if (journal?.absolutePath == file.absolutePath) return
+        journal = file
+    }
 
     private val lock = Any()
     private val lines = ArrayDeque<String>()
@@ -60,6 +91,7 @@ object TunnelDebug {
 
     fun reset() = synchronized(lock) {
         lines.clear()
+        appendToJournal("──── новая попытка ────")
         lastStageAt = System.currentTimeMillis()
         lastError = null
         bytesUp = 0L
@@ -67,6 +99,25 @@ object TunnelDebug {
         handshakeAttempts = 0
         lastStageMs = System.currentTimeMillis()
         touched = true
+    }
+
+    /**
+     * Стереть журнал целиком: кольцевой буфер, общий файл и счётчики этой сессии.
+     *
+     * Зачем кнопка: после обновления нужен чистый журнал за новый период, а не хвост прошлой
+     * ночи — иначе в разборе смешиваются два разных поведения. Файл удаляем (а не обнуляем
+     * содержимое): его заново создаст первая же запись, и в нём не останется пустых строк,
+     * из-за которых «журнал пуст» выглядел бы как «строки потерялись».
+     */
+    fun clear() = synchronized(lock) {
+        lines.clear()
+        lastError = null
+        bytesUp = 0L
+        bytesDown = 0L
+        handshakeAttempts = 0
+        lastStageAt = 0L
+        lastStageMs = 0L
+        runCatching { journal?.delete() }
     }
 
     fun stage(message: String) {
@@ -105,19 +156,100 @@ object TunnelDebug {
             lines.addLast(full)
             while (lines.size > MAX_LINES) lines.removeFirst()
         }
+        appendToJournal(full)
         runCatching { android.util.Log.i(TAG, line) }
     }
 
-    fun dump(): String = synchronized(lock) {
-        if (lines.isEmpty()) {
-            return@synchronized if (touched) "журнал пуст" else "туннель ещё не запускался"
+    /** Дописать строку в общий журнал. Ошибки записи не должны влиять на туннель. */
+    private fun appendToJournal(full: String) {
+        val file = journal ?: return
+        runCatching {
+            if (file.length() > JOURNAL_MAX_BYTES) rotate(file)
+            java.io.FileOutputStream(file, true).use { out ->
+                out.write((full + "\n").toByteArray(Charsets.UTF_8))
+            }
         }
-        lines.joinToString("\n")
+    }
+
+    /** Журнал вырос: оставляем хвост, чтобы файл не рос бесконечно. */
+    private fun rotate(file: File) {
+        val tail = runCatching { file.readLines().takeLast(JOURNAL_KEEP_LINES) }.getOrDefault(emptyList())
+        val tmp = File(file.parentFile, file.name + ".tmp")
+        runCatching {
+            tmp.writeText(tail.joinToString("\n", postfix = "\n"))
+            if (!tmp.renameTo(file)) {
+                file.delete()
+                tmp.renameTo(file)
+            }
+        }
+    }
+
+    /** Содержимое общего журнала (хвост ограниченной длины), без обращения к памяти процесса. */
+    /**
+     * Последняя непустая строка журнала. Нужна, когда надо объяснить отказ, а своего текста у
+     * вызывающего нет: пустое «(этап: )» в сообщении — это отсутствие объяснения, а не объяснение.
+     */
+    fun lastLine(): String =
+        readJournal().lineSequence().map { it.trim() }.lastOrNull { it.isNotEmpty() }.orEmpty()
+
+    private fun readJournal(): String {
+        val file = journal ?: return ""
+        // Читаем только хвост файла: журнал открыт на экране и перечитывается часто, а целиком
+        // он может занимать четверть мегабайта — это лишние чтения с флеша на ровном месте.
+        val text = runCatching {
+            if (!file.exists()) return ""
+            val length = file.length()
+            if (length <= 0L) return ""
+            val from = (length - DUMP_LIMIT_BYTES).coerceAtLeast(0L)
+            java.io.RandomAccessFile(file, "r").use { raf ->
+                raf.seek(from)
+                val buffer = ByteArray((length - from).toInt())
+                raf.readFully(buffer)
+                String(buffer, Charsets.UTF_8)
+            }
+        }.getOrNull().orEmpty()
+        if (text.isBlank()) return ""
+        val tail = if (text.length > DUMP_LIMIT_BYTES) {
+            val cut = text.substring(text.length - DUMP_LIMIT_BYTES)
+            cut.substringAfter('\n', cut)   // не показываем половину первой строки
+        } else text
+        // Нули в журнале — след совпавшей ротации из двух процессов; показывать их незачем.
+        return tail.replace("\u0000", "").trimEnd()
+    }
+
+    /**
+     * Отразить состояние, пришедшее из процесса сервиса: счётчики, последняя ошибка и время
+     * последнего этапа живут в журнале сервиса, а интерфейсу они нужны для карточки.
+     */
+    fun mirror(status: TunnelStatus) {
+        bytesUp = status.bytesUp
+        bytesDown = status.bytesDown
+        handshakeAttempts = status.handshakeAttempts
+        lastError = status.lastError
+        if (status.lastStageMs > lastStageMs) lastStageMs = status.lastStageMs
+        if (status.touched) touched = true
+        if (status.endpoint.isNotBlank()) endpoint = status.endpoint
+    }
+
+    fun dump(): String {
+        val fromFile = readJournal()
+        if (fromFile.isNotEmpty()) return fromFile
+        return synchronized(lock) {
+            if (lines.isEmpty()) {
+                if (touched) "журнал пуст" else "туннель ещё не запускался"
+            } else {
+                lines.joinToString("\n")
+            }
+        }
     }
 
     /** Короткая «что не так»-строка для Toast/плашки: последняя ошибка или последний этап. */
     fun brief(): String {
         lastError?.let { return it }
+        val fromFile = readJournal()
+        if (fromFile.isNotEmpty()) {
+            return fromFile.substringAfterLast('\n').substringAfter(' ').ifBlank { "нет журнала" }
+        }
         return synchronized(lock) { lines.lastOrNull()?.substringAfter(' ') ?: "нет журнала" }
     }
 
@@ -145,60 +277,58 @@ object TunnelDebug {
  */
 object TunnelTrouble {
 
-    data class Advice(val matches: List<String>, val title: String, val whatToDo: String)
+    /**
+     * Совет по журналу. Тексты — в ресурсах: это то, что человек читает на экране, и оно должно
+     * переводиться. Сопоставление (`matches`) остаётся по тексту журнала, потому что журнал
+     * пишут и ядро, и сервис, и он же попадает в issue.
+     */
+    data class Advice(
+        val matches: List<String>,
+        @androidx.annotation.StringRes val titleRes: Int,
+        @androidx.annotation.StringRes val whatToDoRes: Int
+    )
 
     private val TABLE = listOf(
         Advice(
             listOf("ноль пакетов за", "туннель есть, интернета нет"),
-            "Туннель поднялся, но трафик не идёт",
-            "Чаще всего это IPv6: приложение выбирает IPv6-адрес сайта, а туннель его не уносит. " +
-                "Отключи переключатель IPv6 во вкладке «Туннель», переподключись и проверь снова. " +
-                "Второй подозреваемый — MTU: поставь 1280 и сравни."
+            R.string.advice_1_title,
+            R.string.advice_1_what
         ),
         Advice(
             listOf("handshake не прошёл", "endpoint молчит", "ответа нет"),
-            "Сервер не ответил на инициацию",
-            "Это не «нет интернета», а «нет ответа от WARP-эндпоинта». Попробуй другой профиль шума " +
-                "(AWG без мусора часто режется) или другой порт; затем «Подобрать конфигурацию» заново — " +
-                "возможно, выбранный endpoint уже умер."
+            R.string.advice_2_title,
+            R.string.advice_2_what
         ),
         Advice(
             listOf("VpnService не выдал tun", "tun:"),
-            "Система не дала tun-интерфейс",
-            "Обычно это значит, что уже работает другой VPN (Amnezia, Orbot, ByeDPI в режиме VPN). " +
-                "Android поднимает только один туннель: выключи его и повтори."
+            R.string.advice_3_title,
+            R.string.advice_3_what
         ),
         Advice(
             listOf("protect()"),
-            "Не удалось вывести сокет из-под туннеля",
-            "Без protect() пакеты туннеля попали бы внутрь туннеля (петля). Такое бывает при включённом " +
-                "Always-on VPN у другого приложения или при ограничителе фоновой работы для WarpScout."
+            R.string.advice_4_title,
+            R.string.advice_4_what
         ),
         Advice(
             listOf("конфиг не разбирается", "нет конфигурации"),
-            "Конфиг не дошёл до сервиса",
-            "Нужен подобранный или импортированный конфиг: нажми «Подобрать конфигурацию» либо " +
-                "«Импортировать .conf» и повтори запуск туннеля."
+            R.string.advice_5_title,
+            R.string.advice_5_what
         ),
         Advice(
             listOf("сокет"),
-            "Не удалось создать UDP-сокет",
-            "Проверь, что у приложения есть сеть (Wi-Fi/данные) и что не включён режим «только белый список " +
-                "приложений» в настройках VPN провайдера."
+            R.string.advice_6_title,
+            R.string.advice_6_what
         ),
         Advice(
             listOf("startForeground отказал"),
-            "Сервис не смог остаться живым",
-            "На Android 14+ нужно разрешение на уведомления и нормальный режим батареи для WarpScout: " +
-                "выключи агрессивную оптимизацию battery saver для приложения."
+            R.string.advice_7_title,
+            R.string.advice_7_what
         ),
         Advice(
             listOf("нулевой трафик", "ноль пакетов"),
-            "Туннель поднят, но трафик через него не идёт",
-            "Смотри AllowedIPs: при split-tunnel в туннель попадают только перечисленные сети. Если ты " +
-                "проверял сайт, которого в списке нет, — он и не должен идти через WARP. Для «всё через " +
-                "туннель» выбери режим «весь трафик»."
-        )
+            R.string.advice_8_title,
+            R.string.advice_8_what
+        ),
     )
 
     /** Подбирает объяснение по журналу. Пустой список — если ничего из известного не узнали. */

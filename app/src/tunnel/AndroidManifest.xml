@@ -7,8 +7,18 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application>
+        <!-- Туннель живёт в СВОЁМ процессе. Причина: интерфейс и VPN были в одном процессе,
+             и любое падение экрана (а он тяжёлый: списки приложений, подбор, экспорт) гасило
+             туннель — «приложение вылетело, а вместе с ним и соединение». Теперь падение
+             интерфейса VPN не трогает, а падение сервиса не закрывает окно.
+
+             Плата — состояние нельзя передать общей переменной: сервис пишет снимок в файл и
+             рассылает уведомление, интерфейс его читает (см. status/TunnelStatusBus.kt).
+             Настройки сервису тоже передаются снимком (status/ServiceSettingsStore.kt), а не
+             через SharedPreferences: у каждого процесса своя копия настроек в памяти. -->
         <service
             android:name=".tunnel.WarpVpnService"
+            android:process=":vpn"
             android:exported="false"
             android:foregroundServiceType="specialUse"
             android:permission="android.permission.BIND_VPN_SERVICE">

@@ -11,11 +11,10 @@
         android:id="@+id/cardConnStatus"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginStart="16dp"
-        android:layout_marginTop="6dp"
-        android:layout_marginEnd="16dp"
-        app:cardCornerRadius="10dp"
-        app:strokeWidth="1dp">
+        style="@style/Card.Section"
+        android:layout_marginStart="@dimen/screen_pad"
+        android:layout_marginTop="@dimen/space_s"
+        android:layout_marginEnd="@dimen/screen_pad">
 
         <TextView
             android:id="@+id/textConnStatus"
@@ -25,14 +24,6 @@
             android:text="@string/conn_off"
             android:textAppearance="?attr/textAppearanceTitleSmall" />
     </com.google.android.material.card.MaterialCardView>
-
-    <com.google.android.material.tabs.TabLayout
-        android:id="@+id/tabs"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        app:tabMode="scrollable"
-        app:tabGravity="center"
-        app:tabIndicatorFullWidth="false" />
 
     <FrameLayout
         android:layout_width="match_parent"
@@ -54,129 +45,255 @@
                 android:paddingEnd="16dp"
                 android:paddingBottom="24dp">
 
-                <TextView
-                    android:id="@+id/textStatus"
+                <!--
+                  Порядок блоков — по частоте использования. Сверху то, что нужно каждый день
+                  (подключить/отключить), ниже итог последнего подбора, потом список замен, и только
+                  в конце то, что открывают редко: подбор и резервные копии.
+                -->
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/cardConnect"
+                    style="@style/Card.Panel"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="@string/status_idle"
-                    android:textAppearance="?attr/textAppearanceBodyLarge" />
+                    android:layout_marginTop="@dimen/space_s">
 
-                <com.google.android.material.progressindicator.LinearProgressIndicator
-                    android:id="@+id/progress"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:indeterminate="true"
-                    android:visibility="gone" />
-
-                <TextView
-                    android:id="@+id/textDone"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:text="@string/done_never"
-                    android:textAppearance="?attr/textAppearanceTitleLarge" />
-
-                <TextView
-                    android:id="@+id/textBest"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:textAppearance="?attr/textAppearanceTitleMedium" />
-
-                <!-- ── быстрые действия: три кнопки, всё остальное — по вкладкам ── -->
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnRun"
-                    android:layout_width="match_parent"
-                    android:layout_height="56dp"
-                    android:layout_marginTop="16dp"
-                    android:text="@string/btn_run"
-                    android:textSize="16sp" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnTunnel"
-                        android:layout_width="0dp"
-                        android:layout_height="52dp"
-                        android:layout_weight="1"
-                        android:text="@string/btn_tunnel_on" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnQuickConfig"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="0dp"
-                        android:layout_height="52dp"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:text="@string/btn_quick_config" />
-                </LinearLayout>
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnStop"
-                    style="@style/Widget.Material3.Button.TextButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/btn_stop" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnBackup"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="0dp"
+                    <LinearLayout
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/btn_backup" />
+                        android:orientation="vertical"
+                        android:padding="@dimen/space_l">
 
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnRestore"
-                        style="@style/Widget.Material3.Button.TextButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:text="@string/btn_restore" />
-                </LinearLayout>
+                        <!--
+                          Знак на главной карточке: щит с лисой. Появляется анимацией в момент
+                          старта подключения (см. animateShield в MainActivity) — так видно, что
+                          нажатие принято, ещё до того как обновится текст статуса.
+                        -->
+                        <ImageView
+                            android:id="@+id/imageShield"
+                            android:layout_width="88dp"
+                            android:layout_height="88dp"
+                            android:layout_gravity="center_horizontal"
+                            android:layout_marginBottom="@dimen/space_s"
+                            android:contentDescription="@string/shield_desc"
+                            android:src="@drawable/ic_fox_shield" />
 
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="@string/backup_hint"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
+                        <TextView
+                            android:id="@+id/textStatus"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/status_idle"
+                            android:textAppearance="?attr/textAppearanceBodyMedium"
+                            android:textColor="?attr/colorOnSurfaceVariant" />
 
-                <TextView
-                    android:id="@+id/textQuickHint"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:text="@string/quick_hint"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
+                        <com.google.android.material.progressindicator.LinearProgressIndicator
+                            android:id="@+id/progress"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_s"
+                            android:indeterminate="true"
+                            android:visibility="gone" />
 
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnTunnel"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/button_primary"
+                            android:layout_marginTop="@dimen/space_m"
+                            android:text="@string/btn_tunnel_on"
+                            android:textSize="16sp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnStop"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/btn_stop" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+
+                <!-- Панель ошибок и подсказок: на первой странице, без всплывающих плашек. -->
                 <com.google.android.material.card.MaterialCardView
                     android:id="@+id/cardBanner"
+                    style="@style/Card.Section"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:visibility="gone"
-                    app:cardCornerRadius="10dp">
+                    android:layout_marginTop="@dimen/space_m"
+                    android:visibility="gone">
 
                     <TextView
                         android:id="@+id/textBanner"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:padding="12dp"
+                        android:padding="@dimen/space_m"
                         android:textAppearance="?attr/textAppearanceBodyMedium" />
+                </com.google.android.material.card.MaterialCardView>
+
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/cardLastTune"
+                    style="@style/Card.Section"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_m">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="@dimen/space_l">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/home_last_tune"
+                            android:textAppearance="?attr/textAppearanceLabelLarge"
+                            android:textColor="?attr/colorOnSurfaceVariant" />
+
+                        <TextView
+                            android:id="@+id/textDone"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_s"
+                            android:text="@string/done_never"
+                            android:textAppearance="?attr/textAppearanceTitleMedium" />
+
+                        <TextView
+                            android:id="@+id/textBest"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_xs"
+                            android:textAppearance="?attr/textAppearanceBodyMedium" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+
+                <!-- ── топ-3 подобранных конфигов: переключение одним нажатием ── -->
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/cardTop3"
+                    style="@style/Card.Section"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_m"
+                    android:visibility="gone">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="@dimen/space_l">
+
+                        <TextView
+                            android:id="@+id/textTop3Title"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/top3_title"
+                            android:textAppearance="?attr/textAppearanceTitleSmall" />
+
+                        <TextView
+                            android:id="@+id/textTop3Hint"
+                            style="@style/Text.Caption"
+                            android:text="@string/top3_hint" />
+
+                        <RadioGroup
+                            android:id="@+id/groupTop3"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_xs"
+                            android:orientation="vertical" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnTop3Forget"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/top3_forget" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+
+                <com.google.android.material.card.MaterialCardView
+                    style="@style/Card.Section"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_m">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="@dimen/space_l">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/home_scan_title"
+                            android:textAppearance="?attr/textAppearanceLabelLarge"
+                            android:textColor="?attr/colorOnSurfaceVariant" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnRun"
+                            style="@style/Widget.Material3.Button.TonalButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/button_secondary"
+                            android:layout_marginTop="@dimen/space_s"
+                            android:text="@string/btn_run" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnQuickConfig"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/button_secondary"
+                            android:text="@string/btn_quick_config" />
+
+                        <TextView
+                            android:id="@+id/textQuickHint"
+                            style="@style/Text.Caption"
+                            android:text="@string/quick_hint" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+
+                <com.google.android.material.card.MaterialCardView
+                    style="@style/Card.Section"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_m">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="@dimen/space_l">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/home_backup_title"
+                            android:textAppearance="?attr/textAppearanceLabelLarge"
+                            android:textColor="?attr/colorOnSurfaceVariant" />
+
+                        <!--
+                          Обе кнопки — одного вида и во всю ширину, друг под другом: раньше
+                          «Восстановить последний» была текстовой кнопкой в половину строки,
+                          подпись не влезала и обрезалась, а рядом с рамкой выглядела как текст.
+                        -->
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnBackup"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/button_secondary"
+                            android:layout_marginTop="@dimen/space_s"
+                            android:text="@string/btn_backup"
+                            android:textSize="14sp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnRestore"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/button_secondary"
+                            android:layout_marginTop="@dimen/space_xs"
+                            android:text="@string/btn_restore"
+                            android:textSize="14sp" />
+
+                        <TextView
+                            style="@style/Text.Caption"
+                            android:text="@string/backup_hint" />
+                    </LinearLayout>
                 </com.google.android.material.card.MaterialCardView>
 
 
@@ -796,12 +913,8 @@
 
 <TextView
                     android:id="@+id/textConfig"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:fontFamily="monospace"
-                    android:textAppearance="?attr/textAppearanceBodySmall"
-                    android:textIsSelectable="true" />
+                    style="@style/Text.Mono"
+                    android:layout_marginTop="@dimen/space_s" />
 
 
                 <!-- ── шум: маскировка handshake (перенесён из вкладки «Обход DPI») ── -->
@@ -859,41 +972,42 @@
                     android:text="@string/apps_note"
                     android:textAppearance="?attr/textAppearanceBodySmall" />
 
-                <com.google.android.material.button.MaterialButtonToggleGroup
+                <!--
+                  Три режима списком, а не тесной группой из трёх кнопок: подписи вроде
+                  «Только выбранные» в треть ширины не влезали и обрезались. Здесь каждая
+                  строка во всю ширину и нажимается целиком.
+                -->
+                <RadioGroup
                     android:id="@+id/appsGroup"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    app:selectionRequired="true"
-                    app:singleSelection="true">
+                    android:orientation="vertical">
 
-                    <com.google.android.material.button.MaterialButton
+                    <com.google.android.material.radiobutton.MaterialRadioButton
                         android:id="@+id/btnAppsAll"
-                        style="?attr/materialButtonOutlinedStyle"
-                        android:layout_width="0dp"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:textSize="11sp"
-                        android:text="@string/apps_all" />
+                        android:minHeight="48dp"
+                        android:text="@string/apps_all"
+                        android:textSize="15sp" />
 
-                    <com.google.android.material.button.MaterialButton
+                    <com.google.android.material.radiobutton.MaterialRadioButton
                         android:id="@+id/btnAppsOnly"
-                        style="?attr/materialButtonOutlinedStyle"
-                        android:layout_width="0dp"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:textSize="11sp"
-                        android:text="@string/apps_only" />
+                        android:minHeight="48dp"
+                        android:text="@string/apps_only"
+                        android:textSize="15sp" />
 
-                    <com.google.android.material.button.MaterialButton
+                    <com.google.android.material.radiobutton.MaterialRadioButton
                         android:id="@+id/btnAppsExcept"
-                        style="?attr/materialButtonOutlinedStyle"
-                        android:layout_width="0dp"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:textSize="11sp"
-                        android:text="@string/apps_except" />
-                </com.google.android.material.button.MaterialButtonToggleGroup>
+                        android:minHeight="48dp"
+                        android:text="@string/apps_except"
+                        android:textSize="15sp" />
+                </RadioGroup>
 
                 <TextView
                     android:id="@+id/textAppsState"
@@ -977,14 +1091,50 @@
                     android:text="@string/journal_empty"
                     android:textAppearance="?attr/textAppearanceBodySmall" />
 
-                <TextView
-                    android:id="@+id/textLog"
+                <!--
+                  Журнал — в своём окне фиксированной высоты: строки листаются внутри, а не
+                  растягивают страницу на несколько экранов. Так до карточек ниже (диагностика,
+                  копирование) можно добраться одним движением, не проезжая весь лог.
+                -->
+                <ScrollView
+                    android:id="@+id/logBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="260dp"
+                    android:layout_marginTop="8dp"
+                    android:background="?attr/colorSurfaceContainerLow"
+                    android:fillViewport="true"
+                    android:fadeScrollbars="false"
+                    android:padding="8dp"
+                    android:scrollbars="vertical">
+
+                    <TextView
+                        android:id="@+id/textLog"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:textIsSelectable="true" />
+                </ScrollView>
+
+                <!--
+                  Очистка журнала. Нужна не «для чистоты»: после обновления человек собирает
+                  свежий журнал, и хвост прошлой версии в нём только мешает — в разборе
+                  смешиваются два разных поведения. Кнопка рядом с самим журналом, а не в
+                  настройках: её ищут там, где читают строки.
+                -->
+                <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:fontFamily="monospace"
-                    android:textAppearance="?attr/textAppearanceBodySmall"
-                    android:textIsSelectable="true" />
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnLogClear"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/btn_log_clear" />
+                </LinearLayout>
 
                 <!-- ── диагностика туннеля (flavor tunnel) ───────────────── -->
                 <LinearLayout
@@ -997,20 +1147,42 @@
                         style="@style/SectionHeader"
                         android:text="@string/section_tunnel_diag" />
 
-                    <TextView
-                        android:id="@+id/textTunnelState"
+                    <!--
+                      Диагностика — тоже в своём окне: раньше она шла простынёй вниз страницы,
+                      и «Скопировать журнал» уезжала за несколько экранов.
+                    -->
+                    <ScrollView
+                        android:id="@+id/diagBox"
                         android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:fontFamily="monospace"
-                        android:textAppearance="?attr/textAppearanceBodySmall"
-                        android:textIsSelectable="true" />
-
-                    <LinearLayout
-                        android:id="@+id/tunnelAdviceBox"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
+                        android:layout_height="220dp"
                         android:layout_marginTop="4dp"
-                        android:orientation="vertical" />
+                        android:background="?attr/colorSurfaceContainerLow"
+                        android:fillViewport="true"
+                        android:fadeScrollbars="false"
+                        android:padding="8dp"
+                        android:scrollbars="vertical">
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:id="@+id/textTunnelState"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:fontFamily="monospace"
+                                android:textAppearance="?attr/textAppearanceBodySmall"
+                                android:textIsSelectable="true" />
+
+                            <LinearLayout
+                                android:id="@+id/tunnelAdviceBox"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="4dp"
+                                android:orientation="vertical" />
+                        </LinearLayout>
+                    </ScrollView>
 
                     <LinearLayout
                         android:layout_width="match_parent"
@@ -1072,21 +1244,61 @@
                     android:textAppearance="?attr/textAppearanceBodySmall" />
                 <TextView
                     android:id="@+id/textReport"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:fontFamily="monospace"
-                    android:textAppearance="?attr/textAppearanceBodySmall"
-                    android:textIsSelectable="true" />
+                    style="@style/Text.Mono" />
 
 
                 <TextView
                     android:id="@+id/textVersion"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="20dp"
-                    android:gravity="center"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
+                    style="@style/Text.Caption"
+                    android:layout_marginTop="@dimen/space_xl"
+                    android:gravity="center" />
             </LinearLayout>
         </ScrollView>
     </FrameLayout>
+
+    <!--
+      Навигация внизу: до неё дотягивается большой палец, и она не уезжает, когда содержимое
+      раздела длинное. Внутри — пять обычных кнопок, а не BottomNavigationView: у него слишком
+      много собственной механики (меню, иконки, презентер, состояние выбора), и ошибка в ней
+      роняет экран целиком. Здесь ломаться нечему.
+    -->
+    <LinearLayout
+        android:id="@+id/navBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/colorSurfaceContainerLow"
+        android:orientation="horizontal"
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/nav_start"
+            style="@style/Widget.WarpScout.NavButton"
+            android:layout_weight="1"
+            android:text="@string/tab_start" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/nav_scan"
+            style="@style/Widget.WarpScout.NavButton"
+            android:layout_weight="1"
+            android:text="@string/tab_scan" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/nav_settings"
+            style="@style/Widget.WarpScout.NavButton"
+            android:layout_weight="1"
+            android:text="@string/tab_config" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/nav_apps"
+            style="@style/Widget.WarpScout.NavButton"
+            android:layout_weight="1"
+            android:text="@string/tab_apps" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/nav_log"
+            style="@style/Widget.WarpScout.NavButton"
+            android:layout_weight="1"
+            android:text="@string/tab_log" />
+    </LinearLayout>
 </LinearLayout>

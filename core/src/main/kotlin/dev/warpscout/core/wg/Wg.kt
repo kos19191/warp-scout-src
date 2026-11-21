@@ -237,13 +237,25 @@ object Wg {
      * Transport-пакет (type=4): `type | receiver | counter | AEAD(sendKey, nonce=counter, data, ∅)`.
      * Возвращает пакет и сессию с увеличенным счётчиком отправки.
      */
-    fun buildTransport(receiverIndex: Int, session: Session, data: ByteArray): Pair<ByteArray, Session> {
-        val out = ByteArray(32 + data.size)
+    fun buildTransport(receiverIndex: Int, session: Session, data: ByteArray): Pair<ByteArray, Session> =
+        buildTransport(receiverIndex, session, data, data.size)
+
+    /**
+     * То же, но шифрует первые [dataLength] байт: tun отдаёт пакет в переиспользуемый буфер, и
+     * копия только ради обрезки длины — лишняя работа на каждый отправленный пакет.
+     */
+    fun buildTransport(
+        receiverIndex: Int,
+        session: Session,
+        data: ByteArray,
+        dataLength: Int
+    ): Pair<ByteArray, Session> {
+        val out = ByteArray(32 + dataLength)
         Crypto.le32(TYPE_TRANSPORT).copyInto(out, 0)
         Crypto.le32(receiverIndex).copyInto(out, 4)
         putLe64(out, 8, session.sendCounter)
         val nonce = ByteArray(12).also { putLe64(it, 4, session.sendCounter) }
-        Crypto.chacha20Poly1305Seal(session.sendKey, nonce, data, ByteArray(0)).copyInto(out, 16)
+        Crypto.chacha20Poly1305Seal(session.sendKey, nonce, data, Crypto.EMPTY_AAD, dataLength).copyInto(out, 16)
         return out to session.copy(sendCounter = session.sendCounter + 1)
     }
 
@@ -262,7 +274,7 @@ object Wg {
         if (counter <= session.receiveCounter) return null
         val nonce = ByteArray(12).also { putLe64(it, 4, counter) }
         val data = packet.copyOfRange(16, packet.size)
-        val plain = Crypto.chacha20Poly1305Open(session.receiveKey, nonce, data, ByteArray(0)) ?: return null
+        val plain = Crypto.chacha20Poly1305Open(session.receiveKey, nonce, data, Crypto.EMPTY_AAD) ?: return null
         return plain to session.copy(receiveCounter = counter)
     }
 

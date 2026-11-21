@@ -16,6 +16,7 @@ import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.net.EndpointPool
 import dev.warpscout.core.net.EndpointSpec
 import dev.warpscout.core.net.NetSettings
+import dev.warpscout.core.net.PoolMode
 import dev.warpscout.core.net.ResourceProber
 import dev.warpscout.core.net.TlsProber
 import dev.warpscout.core.net.WgProber
@@ -69,8 +70,16 @@ data class TuningSpec(
     val checkBaselineResources: Boolean = true,
     val verifyThroughTunnel: Boolean = true,
     val tunnelSettleMs: Int = 6000,
-    val namePrefix: String = "WARP-Auto"
+    val namePrefix: String = "WARP-Auto",
+    /**
+     * Прошлая удачная конфигурация (сеть та же, свежая). Если задана, подбор сначала проверяет
+     * только её: одна точка вместо пула — секунды вместо минут и без разогрева радио на весь скан.
+     */
+    val cachedStart: CachedStart? = null
 )
+
+/** Сохранённая удачная точка: её проверяют первой, но по тем же правилам, что и свежую. */
+data class CachedStart(val endpoint: Endpoint, val junkName: String = "")
 
 class TuningResult(
     val report: TuningReport,
@@ -121,124 +130,187 @@ class AutoTuner(
             notes += "Приватного ключа нет/он не Curve25519 — точный handshake недоступен, переключаемся на эвристики UDP/TLS."
             return runHeuristicOnly(spec, progress, started, notes, account)
         }
-
         val peerPublic = Crypto.unBase64(account.peerPublicB64)
-        val endpoints = EndpointPool.build(spec.endpointSpec)
-        progress.log("Ключи: ${account.source}; кандидатов: ${endpoints.size}")
 
-        // --- фаза 1: быстрый скан -------------------------------------------------------
-        val coarse = wgProber.scan(endpoints, account, peerPublic, junk = null) { d, t, _ ->
-            if (d % 25 == 0 || d == t) progress.progress(d, t, "первичный UDP-скан")
+        // Сохранённую конфигурацию пробуем первой: проверить одну точку — секунды, полный
+        // скан пула — минуты и заметный расход батареи. Не подтвердилась — честно идём в полный подбор.
+        val cached = spec.cachedStart
+        if (cached != null) {
+            speculativeStart(spec, cached, progress)?.let { narrow ->
+                // Заметки быстрой попытки — отдельная копия: если она провалится, полный подбор не
+                // должен рассказывать пользователю про точки, которые он даже не проверял.
+                val quickNotes = notes.toMutableList()
+                quickNotes += "Быстрый старт: сохранённая конфигурация проверена заново, полный скан не понадобился."
+                val quick = tuneWith(narrow, progress, started, quickNotes, account, peerPublic)
+                if (quick.best != null && cachedConfirmed(quick, cached)) return quick
+                progress.log("сохранённая конфигурация не подтвердилась — полный подбор")
+            }
         }
-        if (progress.isCancelled()) return finish(spec, started, notes, emptyList(), emptyList(), account, progress, endpoints.size)
 
-        // rank у вердикта растёт по мере «ухудшения», поэтому лучший — с минимальным rank
-        val ranked = coarse.sortedWith(
-            compareBy<EndpointStats> { it.bestVerdict.rank }
-                .thenBy { it.minRtt ?: Double.MAX_VALUE }
-                .thenBy { it.lossPct }
+        return tuneWith(spec, progress, started, notes, account, peerPublic)
+    }
+
+    /**
+     * Пул, суженный до сохранённой точки и её профиля шума. Всё остальное (проверки ресурсов,
+     * изнутри туннеля тоже) остаётся общим с полным подбором: сохранённая конфигурация
+     * принимается по тем же правилам, что и свежая, иначе кеш мог бы протащить нерабочее.
+     */
+    private fun speculativeStart(spec: TuningSpec, cached: CachedStart, progress: ProgressSink): TuningSpec? {
+        val ep = cached.endpoint
+        val profiles = spec.junkProfiles.filter { it.name == cached.junkName }
+        // IPv6 в разборе списка пока не поддержан — быстрый старт не для него, полный подбор работает.
+        if (ep.host.isBlank() || ep.port !in 1..65535 || ep.host.contains(':')) return null
+        progress.log("быстрый старт: проверяю сохранённую конфигурацию ${ep.render()}" +
+            (profiles.firstOrNull()?.let { " · ${it.name}" } ?: ""))
+        return spec.copy(
+            endpointSpec = EndpointSpec(
+                mode = PoolMode.EXPLICIT,
+                subnets = emptyList(),
+                hostnames = listOf("${ep.host}:${ep.port}"),
+                maxEndpoints = 1
+            ),
+            junkProfiles = profiles.ifEmpty { spec.junkProfiles },
+            refineTop = 1
         )
-        val alive = ranked.filter { it.bestVerdict in setOf(Verdict.HANDSHAKE_OK, Verdict.COOKIE_REPLY) }
-        notes += "Живых (подтверждённый handshake/cookie): ${alive.size} из ${ranked.size}"
+    }
 
-        val refineCandidates = (if (alive.size >= 2) alive else ranked).take(maxOf(3, spec.refineTop))
+    /** Есть ли в отчёте сохранённая точка и подтвердилась ли она (см. [CachedPoint]). */
+    private fun cachedConfirmed(result: TuningResult, cached: CachedStart): Boolean {
+        val cand = result.report.candidates.firstOrNull { it.config.endpoint == cached.endpoint } ?: return false
+        return CachedPoint.confirmed(cand.stats.replies, cand.resourcesTotal, cand.resourcesOk)
+    }
 
-        // --- фаза 2: подробно, по профилям шума ---------------------------------------
-        val perProfile = LinkedHashMap<Endpoint, MutableMap<String, EndpointStats>>()
-        val totalWork = refineCandidates.size * spec.junkProfiles.size
-        var done = 0
-        for (stats in refineCandidates) {
-            for (profile in spec.junkProfiles) {
-                if (progress.isCancelled()) break
-                val refined = wgProber.probe(stats.endpoint, account, peerPublic, profile).stats
-                perProfile.getOrPut(stats.endpoint) { LinkedHashMap() }[profile.name] = refined
-                done++
-                progress.progress(done, totalWork, "${stats.endpoint.render()} · ${profile.name} · ${refined.bestVerdict}")
-            }
+    /**
+     * Сам подбор: пул endpoint'ов → скан → подробные пробы по профилям шума → проверки ресурсов.
+     *
+     * Отдельным методом — чтобы «быстрый старт» гонял тот же конвейер, а не его упрощённую
+     * копию: две реализации одной проверки неизбежно расходятся.
+     */
+    private fun tuneWith(
+        spec: TuningSpec,
+        progress: ProgressSink,
+        started: LocalDateTime,
+        notes: MutableList<String>,
+        account: dev.warpscout.core.model.WarpAccount,
+        peerPublic: ByteArray
+    ): TuningResult {
+    val peerPublic = Crypto.unBase64(account.peerPublicB64)
+    val endpoints = EndpointPool.build(spec.endpointSpec)
+    progress.log("Ключи: ${account.source}; кандидатов: ${endpoints.size}")
+
+    // --- фаза 1: быстрый скан -------------------------------------------------------
+    val coarse = wgProber.scan(endpoints, account, peerPublic, junk = null) { d, t, _ ->
+        if (d % 25 == 0 || d == t) progress.progress(d, t, "первичный UDP-скан")
+    }
+    if (progress.isCancelled()) return finish(spec, started, notes, emptyList(), emptyList(), account, progress, endpoints.size)
+
+    // rank у вердикта растёт по мере «ухудшения», поэтому лучший — с минимальным rank
+    val ranked = coarse.sortedWith(
+        compareBy<EndpointStats> { it.bestVerdict.rank }
+            .thenBy { it.minRtt ?: Double.MAX_VALUE }
+            .thenBy { it.lossPct }
+    )
+    val alive = ranked.filter { it.bestVerdict in setOf(Verdict.HANDSHAKE_OK, Verdict.COOKIE_REPLY) }
+    notes += "Живых (подтверждённый handshake/cookie): ${alive.size} из ${ranked.size}"
+
+    val refineCandidates = (if (alive.size >= 2) alive else ranked).take(maxOf(3, spec.refineTop))
+
+    // --- фаза 2: подробно, по профилям шума ---------------------------------------
+    val perProfile = LinkedHashMap<Endpoint, MutableMap<String, EndpointStats>>()
+    val totalWork = refineCandidates.size * spec.junkProfiles.size
+    var done = 0
+    for (stats in refineCandidates) {
+        for (profile in spec.junkProfiles) {
+            if (progress.isCancelled()) break
+            val refined = wgProber.probe(stats.endpoint, account, peerPublic, profile).stats
+            perProfile.getOrPut(stats.endpoint) { LinkedHashMap() }[profile.name] = refined
+            done++
+            progress.progress(done, totalWork, "${stats.endpoint.render()} · ${profile.name} · ${refined.bestVerdict}")
         }
+    }
 
-        // --- фаза 3: MASQUE/TLS, если подсеть задана ------------------------------------
-        val tlsResults: Map<Endpoint, ProbeSample> = if (spec.endpointSpec.ports.contains(443) &&
-            spec.endpointSpec.subnets.any { it.startsWith("162.159.19") }
-        ) {
-            refineCandidates.take(4).associate { it.endpoint to tlsProber.probe(it.endpoint) }
-        } else emptyMap()
+    // --- фаза 3: MASQUE/TLS, если подсеть задана ------------------------------------
+    val tlsResults: Map<Endpoint, ProbeSample> = if (spec.endpointSpec.ports.contains(443) &&
+        spec.endpointSpec.subnets.any { it.startsWith("162.159.19") }
+    ) {
+        refineCandidates.take(4).associate { it.endpoint to tlsProber.probe(it.endpoint) }
+    } else emptyMap()
 
-        // --- кандидаты: endpoint × профиль ----------------------------------------------
-        val candidates = ArrayList<Candidate>()
-        for ((endpoint, profiles) in perProfile) {
-            for ((profileName, stats) in profiles) {
-                val profile = spec.junkProfiles.firstOrNull { it.name == profileName } ?: continue
-                val survived = stats.replies > 0
-                val tlsSample = tlsResults[endpoint]
-                val effectiveStats = if (tlsSample != null && tlsSample.verdict == Verdict.TLS_OK) {
-                    EndpointStats(endpoint, stats.samples + tlsSample, Verdict.TLS_OK, stats.replies, stats.attempts)
-                } else stats
-                val parts = Scoring.evaluate(effectiveStats, survived, 0, 0, weights)
-                candidates.add(
-                    Candidate(
-                        config = buildConfig(spec, account, endpoint, profile, parts.total),
-                        stats = effectiveStats,
-                        parts = parts,
-                        junkProbes = stats.samples
-                    )
-                )
-            }
-        }
-        // добавляем «просто лучший endpoint без шума» — иногда честный WG проходит лучше AWG
-        ranked.firstOrNull()?.let { top ->
+    // --- кандидаты: endpoint × профиль ----------------------------------------------
+    val candidates = ArrayList<Candidate>()
+    for ((endpoint, profiles) in perProfile) {
+        for ((profileName, stats) in profiles) {
+            val profile = spec.junkProfiles.firstOrNull { it.name == profileName } ?: continue
+            val survived = stats.replies > 0
+            val tlsSample = tlsResults[endpoint]
+            val effectiveStats = if (tlsSample != null && tlsSample.verdict == Verdict.TLS_OK) {
+                EndpointStats(endpoint, stats.samples + tlsSample, Verdict.TLS_OK, stats.replies, stats.attempts)
+            } else stats
+            val parts = Scoring.evaluate(effectiveStats, survived, 0, 0, weights)
             candidates.add(
                 Candidate(
-                    buildConfig(spec, account, top.endpoint, JunkLibrary.none(), 0),
-                    top,
-                    Scoring.evaluate(top, null, 0, 0, weights),
-                    top.samples
+                    config = buildConfig(spec, account, endpoint, profile, parts.total),
+                    stats = effectiveStats,
+                    parts = parts,
+                    junkProbes = stats.samples
                 )
             )
         }
+    }
+    // добавляем «просто лучший endpoint без шума» — иногда честный WG проходит лучше AWG
+    ranked.firstOrNull()?.let { top ->
+        candidates.add(
+            Candidate(
+                buildConfig(spec, account, top.endpoint, JunkLibrary.none(), 0),
+                top,
+                Scoring.evaluate(top, null, 0, 0, weights),
+                top.samples
+            )
+        )
+    }
 
-        val ordered = candidates.sortedByDescending { it.score }
+    val ordered = candidates.sortedByDescending { it.score }
 
-        // --- ресурсы ---------------------------------------------------------------------
-        val resourceResults = if (spec.checkBaselineResources && spec.resources.isNotEmpty()) {
-            progress.log("Проверяю доступность ресурсов без туннеля (это база сравнения)…")
-            resources.checkAll(spec.resources)
-        } else emptyList()
+    // --- ресурсы ---------------------------------------------------------------------
+    val resourceResults = if (spec.checkBaselineResources && spec.resources.isNotEmpty()) {
+        progress.log("Проверяю доступность ресурсов без туннеля (это база сравнения)…")
+        resources.checkAll(spec.resources)
+    } else emptyList()
 
-        var finalList = ordered
-        if (spec.verifyThroughTunnel && tunnel != null && ordered.isNotEmpty() && spec.resources.isNotEmpty()) {
-            progress.log("Проверяю топ-${minOf(3, ordered.size)} кандидатов внутри туннеля…")
-            val verified = ArrayList<Candidate>()
-            val tv: TunnelVerifier = tunnel
-            for (cand in ordered.take(minOf(3, ordered.size))) {
-                if (progress.isCancelled()) break
-                val results = runCatching { tv.verify(cand.config, spec.resources, spec.tunnelSettleMs) }
-                    .getOrElse {
-                        notes += "Туннель не поднялся (${it.javaClass.simpleName}) — пропускаю проверку изнутри."
-                        emptyList()
-                    }
-                val ok = results.count { it.ok }
-                progress.log("  ${cand.config.endpoint.render()} · ${cand.junk.name} → ${ok}/${spec.resources.size} ресурсов")
-                val parts = Scoring.evaluate(cand.stats, cand.stats.replies > 0, ok, spec.resources.size, weights)
-                verified.add(
-                    cand.copy(
-                        parts = parts,
-                        resourcesOk = ok,
-                        resourcesTotal = spec.resources.size,
-                        config = cand.config.copy(name = "${spec.namePrefix}-${ok}of${spec.resources.size}")
-                    )
+    var finalList = ordered
+    if (spec.verifyThroughTunnel && tunnel != null && ordered.isNotEmpty() && spec.resources.isNotEmpty()) {
+        progress.log("Проверяю топ-${minOf(3, ordered.size)} кандидатов внутри туннеля…")
+        val verified = ArrayList<Candidate>()
+        val tv: TunnelVerifier = tunnel
+        for (cand in ordered.take(minOf(3, ordered.size))) {
+            if (progress.isCancelled()) break
+            val results = runCatching { tv.verify(cand.config, spec.resources, spec.tunnelSettleMs) }
+                .getOrElse {
+                    notes += "Туннель не поднялся (${it.javaClass.simpleName}) — пропускаю проверку изнутри."
+                    emptyList()
+                }
+            val ok = results.count { it.ok }
+            progress.log("  ${cand.config.endpoint.render()} · ${cand.junk.name} → ${ok}/${spec.resources.size} ресурсов")
+            val parts = Scoring.evaluate(cand.stats, cand.stats.replies > 0, ok, spec.resources.size, weights)
+            verified.add(
+                cand.copy(
+                    parts = parts,
+                    resourcesOk = ok,
+                    resourcesTotal = spec.resources.size,
+                    config = cand.config.copy(name = "${spec.namePrefix}-${ok}of${spec.resources.size}")
                 )
-            }
-            // Проверенные изнутри важнее непроверенных: «открылось 7 из 9 сайтов» — это факт, а
-            // сетевой балл — только догадка. Раньше списки перемешивались по баллу, и победить
-            // мог кандидат, который отвечал на handshake, но не пускал трафик.
-            finalList = verified.sortedByDescending { it.score } +
-                ordered.drop(verified.size).sortedByDescending { it.score }
-        } else if (tunnel == null && spec.verifyThroughTunnel) {
-            notes += "Сборка без встроенного туннеля: проверка «изнутри» пропущена, отранжировано по сетевым пробам."
+            )
         }
+        // Проверенные изнутри важнее непроверенных: «открылось 7 из 9 сайтов» — это факт, а
+        // сетевой балл — только догадка. Раньше списки перемешивались по баллу, и победить
+        // мог кандидат, который отвечал на handshake, но не пускал трафик.
+        finalList = verified.sortedByDescending { it.score } +
+            ordered.drop(verified.size).sortedByDescending { it.score }
+    } else if (tunnel == null && spec.verifyThroughTunnel) {
+        notes += "Сборка без встроенного туннеля: проверка «изнутри» пропущена, отранжировано по сетевым пробам."
+    }
 
-        return finish(spec, started, notes, finalList, resourceResults, account, progress, endpoints.size)
+    return finish(spec, started, notes, finalList, resourceResults, account, progress, endpoints.size)
     }
 
     /** Когда приватного ключа нет: только «закрыт/открыт» и TLS. Честно помечаем низкую уверенность. */

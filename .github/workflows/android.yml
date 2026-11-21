@@ -82,6 +82,8 @@ jobs:
           need /tmp/selftest.log "rekey: сессия пересогласована сама"
           need /tmp/selftest.log "rekey: данные идут после пересогласования"
           need /tmp/selftest.log "rekey: возраст сессии обнулился"
+          need /tmp/selftest.log "rekey: в тишине сессия не пересогласовывается"
+          need /tmp/selftest.log "rekey: после простоя данные идут"
           need /tmp/selftest.log "сеть: handshake переживает потерю первой инициации"
           need /tmp/selftest.log "сеть: повтор ушёл раньше общего окна (быстро)"
           need /tmp/selftest.log "сеть: данные идут после потери инициации"
@@ -179,14 +181,16 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # AGP создаёт debug-ключ в ~/.android, если его нет. На свежем раннере он каждый раз
-      # новый → APK не ставится «поверх» предыдущей версии. Кэш с постоянным ключом фиксирует
-      # подпись, и обновления на телефоне ставятся обычным «Установить».
-      - name: "Постоянный debug-ключ (чтобы APK ставился поверх прошлой версии)"
-        uses: actions/cache@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: warpscout-debug-keystore-v1
+      # Ключ подписи лежит в репозитории (app/debug.keystore) и одинаков во всех сборках.
+      # Раньше его «фиксировали» кешем GitHub Actions: кеш истекает после недели простоя,
+      # на следующей сборке создавался новый ключ, и обновление на телефоне переставало
+      # ставиться. Теперь стабильность подписи проверяется прямо в логе сборки.
+      - name: "Проверка ключа подписи"
+        run: |
+          set -o pipefail
+          test -f app/debug.keystore || { echo "::error title=подпись::нет app/debug.keystore"; exit 1; }
+          keytool -list -v -keystore app/debug.keystore -storetype PKCS12 \
+            -storepass "${WARPSCOUT_STOREPASS:-warpscout}" 2>&1 | tee /tmp/keytool.log | grep -E "Alias|SHA256|Valid"
 
       - name: "Ресурсы и форматные строки (без SDK)"
         run: |
@@ -197,6 +201,35 @@ jobs:
         run: |
           set -o pipefail
           ./gradlew --no-daemon :app:assembleScoutDebug :app:assembleTunnelDebug 2>&1 | tee /tmp/apk.log
+
+      # Главная проверка подписи — по готовым APK, а не по файлу ключа: важно, чем подписан
+      # именно тот файл, который человек скачает. Отпечаток закреплён: если он изменится,
+      # обновление «поверх» перестанет ставиться («Пакет конфликтует с существующим пакетом»),
+      # поэтому сборка должна падать здесь, а не на телефоне.
+      - name: "Подпись готовых APK = закреплённый ключ"
+        run: |-
+          set -o pipefail
+          PINNED="76b0e9eb5436d15108a044d8ee4b87b1ea80a5c059acdf59dd5a2dae6428dfb0"
+          APKSIGNER="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/35.0.0/apksigner"
+          [ -x "$APKSIGNER" ] || APKSIGNER=$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" -name apksigner -type f | sort | tail -1)
+          echo "apksigner: $APKSIGNER"
+          fail=0
+          n=0
+          while IFS= read -r apk; do
+            [ -n "$apk" ] || continue
+            n=$((n + 1))
+            echo "== $apk"
+            out=$("$APKSIGNER" verify --print-certs "$apk" 2>&1) || { echo "$out"; echo "::error title=подпись::apksigner не смог проверить $apk"; fail=1; continue; }
+            echo "$out" | grep -iE "Signer #1 certificate (DN|SHA-256 digest)" || true
+            if echo "$out" | grep -qi "$PINNED"; then
+              echo "ok: подпись совпадает с закреплённой"
+            else
+              echo "::error title=подпись::$apk подписан НЕ закреплённым ключом — обновление поверх не встанет"
+              fail=1
+            fi
+          done < <(find app/build/outputs/apk -name '*.apk' | sort)
+          [ "$n" -gt 0 ] || { echo "::error title=подпись::не нашёл ни одного APK"; fail=1; }
+          exit $fail
 
       - uses: actions/upload-artifact@v4
         if: success()
@@ -290,39 +323,39 @@ jobs:
           fi
           echo "тег: $TAG"
 
+          # Описание релиза — только про сам релиз: что лежит в файлах, что нужно для установки,
+          # что приложение делает. Без пересказа правок и без истории версий: разбор изменений
+          # живёт в коммитах, а страница релиза нужна человеку, который пришёл скачать APK.
           {
-            echo "WarpScout $VERSION — сборка из коммита \`${GITHUB_SHA:0:7}\` (\`${GITHUB_REF_NAME}\`)."
+            echo "WarpScout $VERSION — Android-приложение для работы через Cloudflare WARP."
             echo
-            echo "Собрано автоматически: \`./gradlew :app:assembleScoutDebug :app:assembleTunnelDebug\`."
+            echo "Находит в вашей сети адрес Cloudflare, который пропускает трафик, поднимает на нём"
+            echo "туннель WireGuard/AmneziaWG и держит его сам: переподключается после смены сети,"
+            echo "меняет точку входа, когда прежняя перестала отвечать, показывает, что реально"
+            echo "открывается, и умеет отправить часть сайтов в свою страну через второй туннель."
+            echo "Своих серверов и посредников нет: только адреса Cloudflare и телефон."
             echo
             echo "| Файл | Что внутри | applicationId |"
             echo "|---|---|---|"
-            echo "| \`WarpScout-$VERSION-scout.apk\` | скан, подбор, генерация конфига, передача в AmneziaVPN; своего туннеля нет | \`dev.warpscout.app\` |"
-            echo "| \`WarpScout-$VERSION-tunnel.apk\` | то же + собственный туннель (VpnService) и проверки из-под него | \`dev.warpscout.app.tunnel\` |"
+            echo "| \`WarpScout-$VERSION-tunnel.apk\` | полная сборка: подбор, собственный туннель, проверки из-под него | \`dev.warpscout.app.tunnel\` |"
+            echo "| \`WarpScout-$VERSION-scout.apk\` | только подбор и экспорт конфигов для AmneziaVPN | \`dev.warpscout.app\` |"
+            echo
+            echo "**Что нужно:** Android 8.0 и новее; при первом подключении система спросит разрешение"
+            echo "на VPN. Для разделения по приложениям — доступ к списку приложений."
             echo
             echo "**Как поставить:** разрешить установку из неизвестных источников → открыть APK."
-            echo "Сборка **debug-подписанная** — для тестов и сайдлоада, не для магазина."
-            echo "Оба flavor'а ставятся рядом: у них разные applicationId."
+            echo "Обновление ставится поверх предыдущей версии: настройки, ключи и подобранный конфиг"
+            echo "сохраняются. Обе сборки можно держать на телефоне одновременно — идентификаторы разные."
+            echo "Сборки подписаны debug-ключом: для сайдлоада и тестов, не для магазина."
             echo
-            echo "> Если на телефоне стояла сборка 1.1.0 или более ранняя — сначала удалите её:"
-            echo "> подпись другая, Android не даст обновиться поверх. Начиная с 1.2.1 ключ"
-            echo "> закреплён в CI, поэтому следующие версии ставятся обычным «Установить»."
+            echo "Контрольные суммы SHA-256 — \`SHA256SUMS.txt\` в этом же релизе."
+            echo "Как устроено приложение, что и как часто оно запрашивает — в [README](https://github.com/${GITHUB_REPOSITORY}/blob/main/README.md)."
+            echo "Собрано автоматически из коммита \`${GITHUB_SHA:0:7}\`, прогон: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo
-            echo "Контрольные суммы — \`SHA256SUMS.txt\` в этом же релизе."
-            echo "Журнал прогона: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "—"
+            echo "На странице релизов хранятся три последние версии: при выпуске новой самая старая"
+            echo "удаляется вместе с тегом, поэтому откатиться на одну-две версии назад можно всегда."
           } > notes.md
-
-          # «Что нового» — прямо из CHANGELOG, чтобы раздел версии был виден и на телефоне,
-          # без похода в репозиторий. Берём ровно секцию «## <версия>».
-          if [ -f CHANGELOG.md ]; then
-            awk -v v="$VERSION" 'BEGIN { p = 0 } /^## / { p = (index($0, "## " v) == 1) } p' CHANGELOG.md > /tmp/changes.md
-            if [ -s /tmp/changes.md ]; then
-              echo "" >> notes.md
-              cat /tmp/changes.md >> notes.md
-            fi
-          fi
-          echo "—" >> notes.md
-          echo "Предыдущие сборки не удалены: \`v1.2.1\` и более ранние остаются в релизах." >> notes.md
 
           if gh release view "$TAG" > /dev/null 2>&1; then
             # Описание и заголовок тоже обновляем: иначе у перезалитого релиза остаются
@@ -341,3 +374,33 @@ jobs:
             echo "создал релиз $TAG"
           fi
           gh release view "$TAG" --json url,assets --jq '{url, assets: [.assets[].name]}'
+
+      # На странице релизов остаются только три последние версии.
+      #
+      # Иначе список растёт без конца и нужную сборку приходится искать среди десятков строк.
+      # Три — потому что откатиться на одну-две версии назад бывает нужно, а хранить историю
+      # всех debug-сборок смысла нет: каждая весит по 10 МБ. Тег удаляем вместе с релизом
+      # (`--cleanup-tag`), иначе он остаётся висеть отдельно и путает.
+      - name: "Оставить три последних релиза"
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          KEEP=3
+          # Самые новые сверху; всё, что дальше третьего, — удаляем.
+          # Через API, а не `gh release list --json`: во раннерах встречается gh без --json
+          # у этой команды, и шаг тихо ломался бы.
+          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq "sort_by(.created_at) | reverse | .[$KEEP:] | .[].tag_name" > /tmp/old-releases.txt || exit 0
+          if [ ! -s /tmp/old-releases.txt ]; then
+            echo "удалять нечего: релизов не больше $KEEP"
+            exit 0
+          fi
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            echo "удаляю старый релиз $tag"
+            gh release delete "$tag" --yes --cleanup-tag || echo "::warning title=релизы::не удалось удалить $tag"
+          done < /tmp/old-releases.txt
+          echo "осталось:"
+          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=10" --jq '.[] | .tag_name' 

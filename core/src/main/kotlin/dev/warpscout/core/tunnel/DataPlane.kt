@@ -28,20 +28,37 @@ class SocketUdpChannel(
     private val timeoutMs: Int = 1500
 ) : UdpChannel {
 
+    /**
+     * Буфер и пакет приёма — одни на канал, а не на пакет.
+     *
+     * Раньше `receive()` создавал массив на 64 КБ **на каждый входящий пакет** и ещё один пакет
+     * поверх него. На скорости в сотни пакетов в секунду это десятки мегабайт мусора в секунду:
+     * сборщик мусора работает без остановки, процессор занят им, и скорость загрузки проседает —
+     * именно это и видно на медиа в мессенджерах. wireguard-пакет не бывает больше MTU + 32 байта,
+     * поэтому 4 КБ хватает с запасом на любой шум.
+     */
+    private val rxBuf = ByteArray(4096)
+    private val rxPacket = java.net.DatagramPacket(rxBuf, rxBuf.size)
+    private val txPacket = java.net.DatagramPacket(ByteArray(1), 0)
+
     init {
         if (!socket.isConnected) socket.connect(InetSocketAddress(endpoint.host, endpoint.port))
         socket.soTimeout = timeoutMs
     }
 
     override fun send(packet: ByteArray) {
-        socket.send(java.net.DatagramPacket(packet, packet.size))
+        // Пакет отправки переиспользуется: send() копирует данные в ядро сразу и не держит ссылку.
+        txPacket.data = packet
+        txPacket.length = packet.size
+        socket.send(txPacket)
     }
 
     override fun receive(): ByteArray? = try {
-        val buf = ByteArray(65536)
-        val p = java.net.DatagramPacket(buf, buf.size)
-        socket.receive(p)
-        p.data.copyOfRange(0, p.length)
+        rxPacket.setLength(rxBuf.size)
+        socket.receive(rxPacket)
+        // Копия нужна: буфер приёма переиспользуется, а расшифровка идёт уже после возврата.
+        // Но это одна копия размера пакета вместо 64 КБ мусора на каждый пакет.
+        rxPacket.data.copyOfRange(0, rxPacket.length)
     } catch (e: java.net.SocketTimeoutException) {
         null
     }
@@ -75,6 +92,30 @@ class DataPlane(
     private val tunOutput: OutputStream,
     private val config: WarpConfig,
     private val settings: NetSettings = NetSettings(),
+    /**
+     * Зовётся, когда handshake действительно прошёл и туннель поднят.
+     *
+     * Зачем отдельный сигнал, если в журнал пишется «туннель поднят»: сервис раньше определял
+     * подъём поиском этой подстроки в строке журнала. Одна правка формулировки в ядре — и
+     * состояние «работает» перестало бы устанавливаться вовсе, молча и без ошибки. Логика должна
+     * опираться на событие, а текст журнала остаётся текстом для человека.
+     *
+     * Параметр стоит ДО `log`/`onFatal` намеренно: хвостовая лямбда в вызовах привязывается к
+     * последнему параметру, и её смысл не должен меняться от добавления нового события.
+     */
+    private val onTunnelUp: (() -> Unit)? = null,
+    /**
+     * Горит ли экран. От этого зависит частота keepalive: с погашенным экраном и без трафика
+     * телефон должен спать, а не будить радио каждые 25 секунд. Ядро не знает про Android, поэтому
+     * состояние приходит снаружи.
+     */
+    private val screenOn: () -> Boolean = { true },
+    /**
+     * Дополнительные цифры для строки статистики (расход процессора, число переподключений).
+     * Считает вызывающий: ядро не знает ни Android, ни сервиса, а гадать о расходе батареи без
+     * цифр — ровно то, чем мы занимались до сих пор.
+     */
+    private val vitals: (() -> String)? = null,
     private val log: (String) -> Unit = {},
     /**
      * Зовётся, когда сокет перестал отправлять пакеты (ENETUNREACH/EPERM после смены сети или
@@ -127,14 +168,48 @@ class DataPlane(
     @Volatile
     private var lastOutboundAt: Long = 0L
 
+    /**
+     * Когда последний раз был настоящий пользовательский трафик (в любую сторону).
+     *
+     * Отдельно от `lastOutboundAt`: тот обновляется и самим keepalive, поэтому «сколько уже тихо»
+     * по нему не измерить — интервал никогда не вырастал, и телефон будили с прежней частотой.
+     */
+    @Volatile
+    private var lastUserTrafficAt: Long = 0L
+
+    /** Счётчики сеанса — для строки «сколько чего было» в журнале. */
+    @Volatile
+    private var keepalivesSent: Int = 0
+    @Volatile
+    private var handshakesDone: Int = 0
+    @Volatile
+    private var nextStatsAt: Long = 0L
+
+    /** Момент запуска: по нему считается тишина, если трафика не было вовсе. */
+    private val startedAt: Long = System.currentTimeMillis()
+
+    /** Когда последний раз с сервера пришёл хоть один пакет: любое «да» — признак живой сети. */
+    @Volatile
+    private var lastRxAt: Long = 0L
+
+    /** Когда начался текущий поток исходящих пакетов, на который ответа ещё не было. */
+    @Volatile
+    private var burstStartAt: Long = 0L
+
+    /** Сколько пользовательских пакетов ушло с начала этого потока. */
+    @Volatile
+    private var burstPackets: Int = 0
+
+    /** О мёртвой сессии сообщаем один раз, иначе каждая следующая отправка дёргала бы сервис. */
+    @Volatile
+    private var stallReported: Boolean = false
+
     /** Сколько раз подряд не удалось пересогласовать сессию (rekey). */
     private var rekeyFailures = 0
 
     /** Сколько раз ПОДРЯД не удалось отправить пакет: несколько подряд = сеть ушла. */
     private val sendFailures = java.util.concurrent.atomic.AtomicInteger(0)
 
-    /** После двух минут тишины keepalive уходит реже (см. [keepaliveIntervalMs]). */
-    private val IDLE_BEFORE_BACKOFF_MS = 120_000L
 
     private val lock = Any()
     private var session: Wg.Session? = null
@@ -164,13 +239,48 @@ class DataPlane(
     /** Возраст текущей сессии: по нему видно, жива ли она вообще. */
     fun sessionAgeMs(): Long = if (sessionStartedAt == 0L) 0 else System.currentTimeMillis() - sessionStartedAt
 
+    /**
+     * Пересогласование по требованию: «сессия старая, но трафика не было — не буди радио зря».
+     *
+     * Раньше rekey шёл строго по таймеру — каждые 150 секунд даже в полной тишине. За час это 24
+     * рукопожатия, и каждое поднимает модем: сеть отвечает, радио переходит в активное состояние и
+     * висит в нём ещё несколько секунд после ответа. В списке «расход батареи» этого не видно —
+     * там показываются приложения, которые гоняют данные, — а заряд уходит.
+     *
+     * WireGuard в ядре делает так же: пересогласование запускается тогда, когда есть что отправлять.
+     * Поэтому теперь rekey идёт либо по таймеру при живом трафике, либо перед первым пакетом после
+     * простоя.
+     */
+
+    /** Отметки счётчиков на прошлую строку статистики: показываем расход за интервал. */
+    private var keepaliveMark = 0L
+    private var handshakeMark = 0L
+    private var bytesUpMark = 0L
+    private var bytesDownMark = 0L
+
+    /** Один пересогласователь на туннель: таймер и отправитель не должны войти в handshake вдвоём. */
+    private val rekeyLock = Any()
+
+    /** Когда последний раз пытались пересогласовать — чтобы неудача не блокировала отправителя. */
+    @Volatile
+    private var lastRekeyAttemptAt = 0L
+
+    /** Когда написана прошлая строка статистики: по ней считается настоящая длина интервала. */
+    private var statsMarkAt = 0L
+
     /** @return true, если handshake удался и передача шла (поток завершается при stop()). */
     fun run(): Boolean {
         if (localPriv == null || localPub == null) return fail("PrivateKey не разбирается как base64 или короче ${Wg.KEY_LEN} байт")
         if (peerPub == null) return fail("PublicKey пира не разбирается как base64 или короче ${Wg.KEY_LEN} байт")
 
         // Читатель стартует ДО handshake: теперь он один на всё — и транспорт, и ответы на rekey.
-        val reader = Thread({ readerLoop() }, "warpscout-tunnel-in").apply { isDaemon = true; start() }
+        val reader = Thread({
+            try {
+                readerLoop()
+            } catch (e: InterruptedException) {
+                stopped = true   // штатная остановка
+            }
+        }, "ws-tun-in").apply { isDaemon = true; start() }
 
         if (!negotiate(initial = true)) {
             log("handshake не прошёл — туннель не поднят")
@@ -180,9 +290,16 @@ class DataPlane(
         }
         handshakeOk = true
         log("handshake OK, туннель поднят")
+        runCatching { onTunnelUp?.invoke() }
 
-        val timers = Thread({ timerLoop() }, "warpscout-tunnel-timers").apply { isDaemon = true; start() }
-        val sender = Thread({ tunToUdp() }, "warpscout-tunnel-out").apply { isDaemon = true; start() }
+        val timers = Thread({
+            try {
+                timerLoop()
+            } catch (e: InterruptedException) {
+                stopped = true   // штатная остановка, а не сбой
+            }
+        }, "ws-tun-timer").apply { isDaemon = true; start() }
+        val sender = Thread({ tunToUdp() }, "ws-tun-out").apply { isDaemon = true; start() }
 
         reader.join()
         sender.join(1000)
@@ -197,11 +314,26 @@ class DataPlane(
             // Закрытие сокета при stop() — штатный выход, а не ошибка: ловим и уходим.
             val pkt = try {
                 udp.receive()
+            } catch (e: java.net.PortUnreachableException) {
+                // ICMP port unreachable — сервер явно сказал «на этом порту WARP нет». Это не
+                // потеря пакета и не «сеть пропала»: точка мертва прямо сейчас, и ждать остальные
+                // инициации (ещё две секунды и пять датаграмм) незачем — переходим к следующей.
+                if (!stopped) {
+                    failureReason = "порт закрыт: ICMP port unreachable"
+                    log("точка мертва: порт закрыт (ICMP port unreachable)")
+                }
+                stopped = true
+                return
             } catch (e: Exception) {
                 if (!stopped) log("чтение сокета: ${e.javaClass.simpleName}: ${e.message}")
                 return
             } ?: continue
             if (pkt.isEmpty()) continue
+            // Любой пришедший пакет (даже чужой/мусорный) значит, что путь до сервера жив.
+            lastRxAt = System.currentTimeMillis()
+            burstPackets = 0
+            burstStartAt = 0L
+            stallReported = false
             val type = if (pkt.size >= 4) Crypto.readLe32(pkt, 0) else -1
             when (type) {
                 // Ответ на инициацию (в том числе на rekey) или cookie reply — отдаём ожидающему.
@@ -252,6 +384,13 @@ class DataPlane(
             tunOutput.write(plain)
             tunOutput.flush()
             bytesDown += plain.size
+            lastUserTrafficAt = System.currentTimeMillis()
+        } catch (e: java.io.IOException) {
+            // EIO/EBADF на запись в tun — это закрытый файловый дескриптор, а не сбой данных:
+            // так выглядит смена сессии (старый tun закрыли, новый уже поднимают) и обычная
+            // остановка. Пишем в журнал нейтрально, чтобы это не читалось как падение.
+            if (!stopped) log("туннель закрыт (${e.message ?: e.javaClass.simpleName})")
+            stop()
         } catch (e: Exception) {
             if (!stopped) log("в tun: ${e.javaClass.simpleName}: ${e.message}")
             stop()
@@ -292,16 +431,32 @@ class DataPlane(
 
         sendOne()
         nextSendAt = startedAt + spacing
-        val deadline = startedAt + spacing * (attempts - 1) + settings.timeoutMs
+        var deadline = startedAt + spacing * (attempts - 1) + settings.timeoutMs
         while (!stopped && System.currentTimeMillis() < deadline) {
             val now = System.currentTimeMillis()
             if (sent < attempts && now >= nextSendAt) {
                 sendOne()
                 nextSendAt = now + spacing
                 log("повтор инициации №${sent} — ответа не было ${spacing} мс")
+                if (sent >= attempts) {
+                    // Все инициации уже ушли. Ждать полный timeout нечего: пять датаграмм подряд
+                    // без единого ответа — это молчащая точка, а не «медленная сеть». В ночном
+                    // журнале здесь стояло «5 инициаций за 17946 мс без ответа» — 15 секунд
+                    // тишины на ровном месте, и всё это время сессия не годилась для трафика.
+                    // Три секунды сверх последней отправки — запас на самый медленный RTT.
+                    val tail = System.currentTimeMillis() + maxOf(3_000L, spacing * 2)
+                    if (tail < deadline) deadline = tail
+                }
             }
             val waitMs = minOf(deadline - now, (nextSendAt - now).coerceAtLeast(20))
-            val reply = handshakeInbox.poll(waitMs.coerceAtLeast(1), TimeUnit.MILLISECONDS) ?: continue
+            // Прерывание — это штатная остановка (closeAll() будит ожидающие потоки), а не сбой.
+            // Раньше оно вылетало из negotiate, убивало поток и попадало в «падения» журнала.
+            val reply = try {
+                handshakeInbox.poll(waitMs.coerceAtLeast(1), TimeUnit.MILLISECONDS)
+            } catch (e: InterruptedException) {
+                failureReason = "остановлено"
+                return false
+            } ?: continue
 
             // Чей это ответ? В response receiver_index на смещении 8, в cookie reply — на 4.
             val type = if (reply.size >= 4) Crypto.readLe32(reply, 0) else -1
@@ -320,6 +475,7 @@ class DataPlane(
                     val idx = res.peerSenderIndex ?: continue
                     log("handshake за ${System.currentTimeMillis() - startedAt} мс, инициаций: $sent")
                     install(s, idx, initiation.state.senderIndex, initial)
+                    handshakesDone += 1
                     return true
                 }
 
@@ -340,9 +496,17 @@ class DataPlane(
             }
         }
 
-        failureReason = "сервер молчит: $sent ${if (sent == 1) "инициация" else "инициаций"} за " +
-            "${System.currentTimeMillis() - startedAt} мс без ответа"
-        log("ответа нет: $failureReason")
+        // Причина могла быть названа точнее прямо по ходу (ICMP port unreachable). Общее «сервер
+        // молчит» на этом месте её перекрывало, и в журнале вместо «порт закрыт» появлялось
+        // «сервер молчит» — то есть подсказка вела не туда.
+        val known = failureReason
+        if (known == null) {
+            failureReason = "сервер молчит: $sent ${if (sent == 1) "инициация" else "инициаций"} за " +
+                "${System.currentTimeMillis() - startedAt} мс без ответа"
+            log("ответа нет: $failureReason")
+        } else {
+            log("ответа нет: $known")
+        }
         return false
     }
 
@@ -377,6 +541,26 @@ class DataPlane(
     // ---------------------------------------------------------------- таймеры
 
     /**
+     * Пересогласовать сессию. Возвращает true, если новая сессия установлена.
+     *
+     * Вызывается из двух мест: таймера (плановый rekey) и отправителя (первый пакет после простоя).
+     * Замок нужен потому, что handshake — это обмен по общему `handshakeInbox`: два одновременных
+     * вызывающих съели бы ответы друг друга. Повтор чаще, чем раз в `rekeyRetryMs`, не начинаем —
+     * иначе при молчащем сервере отправитель вставал бы на полный таймаут на каждом пакете.
+     */
+    private fun rekey(force: Boolean = false): Boolean {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastRekeyAttemptAt < settings.rekeyRetryMs) return false
+        return synchronized(rekeyLock) {
+            if (stopped) return@synchronized false
+            val again = System.currentTimeMillis()
+            if (!force && again - lastRekeyAttemptAt < settings.rekeyRetryMs) return@synchronized false
+            lastRekeyAttemptAt = again
+            negotiate(initial = false)
+        }
+    }
+
+    /**
      * Rekey и keepalive. Отдельный поток, потому что пересогласование занимает до нескольких
      * секунд и не должно останавливать пересылку.
      */
@@ -396,6 +580,10 @@ class DataPlane(
             } else {
                 Long.MAX_VALUE
             }
+            // Трафик «живой», если пользователь что-то отправлял недавно. В полной тишине сессию не
+            // пересогласовываем: радио за это время успевает уснуть, а модем — не просыпается.
+            val idleFor = if (lastUserTrafficAt == 0L) Long.MAX_VALUE else now - lastUserTrafficAt
+            val idleAndQuiet = idleFor >= settings.rekeyAfterMs
             val nextRekeyAt = if (age >= settings.rekeyAfterMs) now else {
                 val wait = settings.rekeyAfterMs - age
                 if (lastAttemptAt == 0L || now - lastAttemptAt >= settings.rekeyRetryMs) now + wait
@@ -414,13 +602,26 @@ class DataPlane(
                 continue
             }
 
+            if (age >= settings.rekeyAfterMs && idleAndQuiet) {
+                // Планового rekey нет — но и будить радио незачем. Ждём первого пакета: отправитель
+                // попросит пересогласование сам (см. tunToUdp).
+                warnedExpiry = false
+                val sleep = (nextKeepaliveAt - now).coerceIn(250L, 60_000L)
+                try {
+                    Thread.sleep(sleep)
+                } catch (e: InterruptedException) {
+                    return
+                }
+                continue
+            }
+
             if (age >= settings.rekeyAfterMs && now - lastAttemptAt >= settings.rekeyRetryMs) {
                 lastAttemptAt = now
                 if (age >= 180_000 && !warnedExpiry) {
                     warnedExpiry = true
                     log("сессия старше 180 с — сервер её уже мог выбросить, пересогласовываю")
                 }
-                if (!negotiate(initial = false)) {
+                if (!rekey(force = true)) {
                     lastRekeyFailure = failureReason ?: "rekey не удался"
                     rekeyFailures += 1
                     log("rekey не удался: ${lastRekeyFailure}")
@@ -443,22 +644,56 @@ class DataPlane(
             if (keepaliveSeconds > 0 && now - lastOutboundAt >= keepaliveIntervalMs(now)) {
                 sendKeepalive()
             }
+
+            // Сюда попадаем, когда ближайшее событие уже наступило, но выполнять его нельзя:
+            // например, rekey только что провалился и до повтора ещё несколько секунд. Без этой
+            // паузы цикл крутится без сна и держит процессор занятым всё окно повтора — а это
+            // ровно те моменты, когда сессия восстанавливается после сбоя.
+            val untilRetry = (lastAttemptAt + settings.rekeyRetryMs) - System.currentTimeMillis()
+            if (untilRetry > 0) runCatching { Thread.sleep(untilRetry.coerceAtMost(1_000L)) }
+
+            // Раз в пять минут — честные цифры в журнал: сколько было пробуждений радио и рукопожатий.
+            // Без этого «батарея садится» обсуждается догадками, а не фактами.
+            if (now >= nextStatsAt) {
+                nextStatsAt = now + STATS_EVERY_MS
+                // «за 5 мин» было неправдой: в глубоком сне система не даёт потоку проснуться
+                // вовремя, и между строками проходило по 19 минут — а подпись оставалась прежней.
+                // Человек читал «cpu 17 с за 5 мин» и делал вывод в шесть раз строже реального.
+                val spanMin = if (statsMarkAt == 0L) (STATS_EVERY_MS / 60_000).toInt()
+                else ((now - statsMarkAt) / 60_000).toInt().coerceAtLeast(1)
+                statsMarkAt = now
+                val idle = if (lastUserTrafficAt == 0L) now - startedAt else now - lastUserTrafficAt
+                val extra = vitals?.invoke().orEmpty()
+                // Цифры за интервал, а не накопленные: «keepalive 30» за час ничего не говорит о
+                // том, что было в эти пять минут.
+                val ka = keepalivesSent - keepaliveMark
+                val hs = handshakesDone - handshakeMark
+                val upKb = (bytesUp - bytesUpMark) / 1024
+                val downKb = (bytesDown - bytesDownMark) / 1024
+                keepaliveMark = keepalivesSent.toLong()
+                handshakeMark = handshakesDone.toLong()
+                bytesUpMark = bytesUp
+                bytesDownMark = bytesDown
+                log(
+                    "$STATS_PREFIX за $spanMin мин: keepalive $ka, " +
+                        "рукопожатий $hs, вверх $upKb КБ, вниз $downKb КБ, " +
+                        "трафика нет ${idle / 1000} с, " +
+                        Keepalive.describe(keepaliveIntervalMs(now), screenOn(), idle) +
+                        (if (extra.isNotBlank()) ", $extra" else "")
+                )
+            }
         }
     }
 
     /**
-     * Как часто слать keepalive. Пока трафик есть — базовый интервал из настроек (по умолчанию 25 с):
-     * на активном соединении лишний пакет дешевле, чем потеря первого входящего.
-     *
-     * Если трафик не шёл дольше двух минут, соединение и так держится пересогласованием (rekey
-     * каждые 120 с заново пробивает NAT), поэтому keepalive можно слать реже — вдвое. На мобильной
-     * сети это ровно то, что жрёт батарею: каждое пробуждение радио стоит около секунды.
+     * Как часто шлём keepalive. Раньше здесь было «интервал из конфига, а после двух минут тишины —
+     * вдвое реже», и это не работало: тишину мерили по `lastOutboundAt`, который обновляет сам же
+     * keepalive, поэтому удвоение не наступало никогда. Теперь решение принимает [Keepalive] по
+     * настоящему простою и состоянию экрана.
      */
     private fun keepaliveIntervalMs(now: Long): Long {
-        val base = (config.persistentKeepalive ?: 0).toLong() * 1000L
-        if (base <= 0L) return Long.MAX_VALUE
-        val idleMs = if (lastOutboundAt == 0L) 0L else now - lastOutboundAt
-        return if (idleMs >= IDLE_BEFORE_BACKOFF_MS) minOf(base * 2, 90_000L) else base
+        val idleMs = if (lastUserTrafficAt == 0L) Long.MAX_VALUE else now - lastUserTrafficAt
+        return Keepalive.intervalMs(config.persistentKeepalive ?: 0, idleMs, screenOn())
     }
 
     private fun sendKeepalive() {
@@ -469,6 +704,7 @@ class DataPlane(
             bytes
         }
         sendTracked(pkt)
+        keepalivesSent += 1
         // Отметку времени ставим даже при ошибке: иначе таймер будет пытаться слать keepalive
         // вплотную, пока сеть не вернётся.
         lastOutboundAt = System.currentTimeMillis()
@@ -492,12 +728,23 @@ class DataPlane(
                 -1
             }
             if (n < 0) break
-            if (n == 0) continue
-            val payload = buf.copyOf(n)
+            if (n == 0) {
+                // Пустое чтение на неблокирующем дескрипторе — не повод крутить цикл: 20 мс паузы
+                // стоят дешевле, чем поток, который жжёт процессор вхолостую.
+                runCatching { Thread.sleep(20) }
+                continue
+            }
+            // Первый пакет после долгой тишины: сессия, скорее всего, уже выброшена сервером
+            // (REJECT_AFTER_TIME), и отправлять им бессмысленно. Пересогласовываем здесь, на
+            // отправителе: таймер в это время спит и радио не будит, а ожидание ответа (0,2–0,4 с)
+            // случается ровно тогда, когда пользователь и так ждёт загрузки.
+            if (sessionAgeMs() > settings.rekeyAfterMs) rekey()
+            // Без копии: буфер tun переиспользуется, а длина передаётся отдельно. Раньше под
+            // каждый пакет делался ByteArray(n) только ради того, чтобы «подрезать» буфер.
             val packet: ByteArray? = synchronized(lock) {
                 val s = session
                 if (s == null) null else {
-                    val (pkt, next) = Wg.buildTransport(peerIndex, s, payload)
+                    val (pkt, next) = Wg.buildTransport(peerIndex, s, buf, n)
                     session = next
                     pkt
                 }
@@ -510,6 +757,7 @@ class DataPlane(
             try {
                 sendTracked(packet)
                 bytesUp += n
+                noteUserPacketSent()
             } catch (e: Exception) {
                 if (!stopped) log("отправка: ${e.javaClass.simpleName}: ${e.message}")
                 break
@@ -517,5 +765,46 @@ class DataPlane(
         }
         // tun закрылся — значит, сервис останавливают: гасим и читателя с таймерами.
         stopped = true
+    }
+
+    /**
+     * Учёт пользовательских пакетов и проверка «а отвечает ли сервер».
+     *
+     * Раньше мёртвая сессия обнаруживалась только по провалу пересогласования — это две-три
+     * минуты, в течение которых интернет «есть», но ничего не открывается. Здесь видно раньше:
+     * если ушло [StallDetector.MIN_PACKETS] пакетов и за [StallDetector.WINDOW_MS] не пришло ни
+     * одного ответа, соединение мертво. Проверка стоит одно сравнение времени на пакет, никаких
+     * таймеров и пробуждений.
+     */
+    private fun noteUserPacketSent() {
+        val now = System.currentTimeMillis()
+        lastUserTrafficAt = now
+        if (stallReported) return
+        val sent = burstPackets + 1
+        burstPackets = sent
+        if (sent == 1) burstStartAt = now
+        if (!StallDetector.isStalled(now, lastRxAt, burstStartAt, sent)) return
+        stallReported = true
+        val reason = StallDetector.explain(now, lastRxAt, burstStartAt, sent)
+        log(reason)
+        onFatal?.invoke(reason)
+    }
+
+    companion object {
+        /**
+         * Строки с этим префиксом — статистика, а не состояние: сервис пишет их в журнал, но не
+         * выставляет в уведомление, иначе вместо «туннель поднят» там мелькали бы цифры.
+         */
+        const val STATS_PREFIX = "статистика:"
+
+        /** Раз в полчаса — достаточно, чтобы увидеть расход, и мало, чтобы не засорять журнал. */
+        /**
+         * Как часто писать строку статистики.
+         *
+         * Было 30 минут — и по такой строке нельзя было понять, что происходит: за полчаса
+         * смешиваются и простой, и работа, и переподключения. Пять минут дают цифры, по которым
+         * видно, что именно жгло процессор и модем.
+         */
+        private const val STATS_EVERY_MS = 5 * 60_000L
     }
 }

@@ -123,8 +123,37 @@ object Crypto {
 
     // ---------------------------------------------------------------- aead
 
+    /** Общий пустой AAD: в транспортных пакетах WireGuard он всегда пустой, а аллокация — на каждый пакет. */
+    val EMPTY_AAD = ByteArray(0)
+
+    /**
+     * Переиспользуемый экземпляр AEAD — **только для расшифровки**, свой на поток.
+     *
+     * Для шифрования так делать нельзя: BouncyCastle помнит последний nonce и запрещает повторное
+     * использование на одном экземпляре. После пересогласования счётчик начинается заново, поэтому
+     * nonce первого пакета новой сессии совпадает с каким-то из прошлой — и вместо пакета
+     * получалось исключение, то есть случайный обрыв туннеля после rekey. Экземпляр на каждый
+     * пакет при шифровании остаётся; экономию даёт приём, а он и есть основной путь загрузки.
+     */
+    private val openCipherPerThread = ThreadLocal.withInitial { org.bouncycastle.crypto.modes.ChaCha20Poly1305() }
+
     fun chacha20Poly1305Seal(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray): ByteArray =
-        chachaPoly(true, key, nonce, plaintext, aad)
+        chachaPoly(true, key, nonce, plaintext, aad, plaintext.size)
+
+    /**
+     * То же, но шифрует только первые [length] байт.
+     *
+     * Зачем: tun отдаёт пакет в переиспользуемый буфер, а раньше под каждый пакет делалась копия
+     * ровно для того, чтобы «обрезать» его до нужной длины. Одна копия на пакет — это мусор для
+     * сборщика на всём пути медиа.
+     */
+    fun chacha20Poly1305Seal(
+        key: ByteArray,
+        nonce: ByteArray,
+        plaintext: ByteArray,
+        aad: ByteArray,
+        length: Int
+    ): ByteArray = chachaPoly(true, key, nonce, plaintext, aad, length)
 
     fun chacha20Poly1305Open(key: ByteArray, nonce: ByteArray, ciphertext: ByteArray, aad: ByteArray): ByteArray? =
         try {
@@ -138,19 +167,27 @@ object Crypto {
         key: ByteArray,
         nonce: ByteArray,
         input: ByteArray,
-        aad: ByteArray
+        aad: ByteArray,
+        length: Int = input.size
     ): ByteArray {
         require(nonce.size == 12) { "ChaCha20-Poly1305 nonce = 12 байт" }
-        val c = org.bouncycastle.crypto.modes.ChaCha20Poly1305()
+        require(length in 0..input.size) { "длина $length вне 0..${input.size}" }
+        val c = if (encrypt) {
+            org.bouncycastle.crypto.modes.ChaCha20Poly1305()
+        } else {
+            openCipherPerThread.get() ?: org.bouncycastle.crypto.modes.ChaCha20Poly1305()
+        }
         val params = org.bouncycastle.crypto.params.AEADParameters(
             org.bouncycastle.crypto.params.KeyParameter(key), 128, nonce, aad
         )
         c.init(encrypt, params)
         // Паттерн BC: processBytes + doFinal в тот же буфер, размер — из getOutputSize().
-        val out = ByteArray(c.getOutputSize(input.size))
-        var n = c.processBytes(input, 0, input.size, out, 0)
+        val out = ByteArray(c.getOutputSize(length))
+        var n = c.processBytes(input, 0, length, out, 0)
         n += c.doFinal(out, n)
-        return out.copyOf(n)
+        // Копируем только если размер не совпал: при шифровании он совпадает всегда, и лишняя
+        // копия каждого пакета — это ещё один объект в кучу на ровном месте.
+        return if (n == out.size) out else out.copyOf(n)
     }
 
 // ------------------------------------------------ xchacha20poly1305 (cookie WG)

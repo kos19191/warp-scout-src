@@ -9,13 +9,13 @@ import dev.warpscout.core.keys.KeySourceConfig
 import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.net.HttpClient
 import dev.warpscout.core.net.ResourceProber
-import dev.warpscout.core.net.Socks5Endpoint
 import dev.warpscout.core.net.TlsProber
 import dev.warpscout.core.net.WgProber
 import dev.warpscout.core.report.Report
 import dev.warpscout.core.tune.AutoTuner
 import dev.warpscout.core.tune.ProgressSink
 import dev.warpscout.core.tune.TuningResult
+import dev.warpscout.core.tune.Shortlist
 import dev.warpscout.core.tune.TuningSpec
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -60,10 +60,29 @@ class Engine(private val context: Context) {
             return
         }
         val main = Handler(Looper.getMainLooper())
+        val guard = context.applicationContext
         running = true
         cancelled.set(false)
+        // Пока идёт подбор, процесс держится foreground-сервисом: иначе сворачивание экрана
+        // отдаёт процесс системе на растерзание и скан обрывается молча.
+        ScanGuard.start(guard)
+        // Прогресс дублируем в уведомление — по нему видно, что подбор жив, когда приложение свёрнуто.
+        val watched = object : ProgressSink {
+            override fun log(message: String) {
+                ScanGuard.update(guard, message)
+                sink.log(message)
+            }
+
+            override fun progress(done: Int, total: Int, current: String) {
+                ScanGuard.update(guard, if (total > 0) "$done из $total · $current" else current)
+                sink.progress(done, total, current)
+            }
+
+            override fun isCancelled(): Boolean = cancelled.get() || sink.isCancelled()
+        }
         executor.execute {
-            val outcome = runCatching { runOnce(spec, manual, sink) }
+            val outcome = runCatching { runOnce(spec, manual, watched) }
+            ScanGuard.stop(guard)
             main.post {
                 running = false
                 onDone(outcome.getOrNull(), outcome.exceptionOrNull()?.let { describe(it) })
@@ -98,17 +117,10 @@ class Engine(private val context: Context) {
             spec.copy(net = spec.net.copy(udpFactory = udp, tcpFactory = tcp))
         } ?: spec
 
-        // 1b) «Базу» можно мерить и через обход DPI (ByeDPI в режиме прокси): тогда подбор видит
-        // картину «после фрагментации», а не «что нарисовал провайдер».
-        val socks = Socks5Endpoint.parse(prefs.byedpiProxy)
-        val withProxy = if (prefs.tuneViaByedpi && socks != null && socks.configured) {
-            sink.log("базовые замеры идут через SOCKS5 ${socks.render()} (ByeDPI)")
-            tuned.copy(net = tuned.net.copy(socks5 = socks))
-        } else {
-            if (prefs.tuneViaByedpi) sink.log("замеры через ByeDPI включены, но адрес SOCKS5 не разобран — мёрим напрямую")
-            tuned
-        }
-        val resourceHttp = if (withProxy.net.socks5 != null) HttpClient(6000, proxy = withProxy.net.socks5) else HttpClient(6000)
+        // Замеры идут напрямую: настройки внешнего SOCKS5-обхода в интерфейсе нет, а «включено, но
+        // не настроено» — худший вид настройки: подбор молча мерил бы не то, что видит пользователь.
+        val withProxy = tuned
+        val resourceHttp = HttpClient(6000)
 
         val vault = KeyVault(context)
         val keySource = KeySource(
@@ -124,8 +136,12 @@ class Engine(private val context: Context) {
             resources = ResourceProber(resourceHttp),
             tunnel = tunnel.verifier()
         )
+        // Быстрый старт: если на этой же сети недавно нашлась рабочая точка, проверяем сначала
+        // только её (секунды вместо минут и без разогрева радио на весь скан). Не подтвердится —
+        // подбор сам уйдёт в полный проход по пулу.
+        val withCache = withProxy.copy(cachedStart = TuningCache.cachedStart(context, withProxy.junkProfiles))
         val result = try {
-            tuner.run(withProxy, sink)
+            tuner.run(withCache, sink)
         } finally {
             CleanNetwork.unbind(context)
         }
@@ -153,6 +169,7 @@ class Engine(private val context: Context) {
         val now = System.currentTimeMillis()
         prefs.lastTunedAt = now
         result.best?.let { cfg ->
+            runCatching { TuningCache.save(context, cfg.endpoint, cfg.junk.name) }
             val prev = prefs.lastTunedEndpoint
             val rendered = cfg.endpoint.render()
             if (rendered != prev) {
@@ -160,6 +177,41 @@ class Engine(private val context: Context) {
                 prefs.lastTunedEndpoint = rendered
                 prefs.lastTunedScore = result.report.best?.score ?: 0
                 sink.log("новый конфиг: endpoint $rendered (прежний: ${prev.ifBlank { "ещё не было подобранного" }})")
+            }
+        }
+
+        // 2b) Топ-3: не только победитель, но и две готовые замены. Сеть режет адреса выборочно и
+        // без предупреждения — «переключиться на второй» должно быть нажатием, а не новым сканом.
+        runCatching {
+            val picked = Shortlist.pick(result.report.candidates)
+            val network = TuningCache.transportOf(context)
+            val savedAt = System.currentTimeMillis()
+            val entries = picked.mapNotNull { cand ->
+                val composed = ConfigComposer.applyPrefs(cand.config, prefs, prefs.junkPool)
+                // Ручной сервер из настроек свёл бы всю тройку в один адрес, и список замен стал бы
+                // бесполезным: три строки, которые падают вместе. В тройке остаётся адрес подбора —
+                // именно он и есть альтернатива текущей точке.
+                val restoreEndpoint = if (composed.endpoint != cand.config.endpoint) {
+                    composed.copy(endpoint = cand.config.endpoint)
+                } else {
+                    composed
+                }
+                val text = ConfigComposer.render(restoreEndpoint, prefs)
+                if (text.isBlank()) return@mapNotNull null
+                ConfigShortlist.Entry(
+                    endpoint = restoreEndpoint.endpoint.render(),
+                    junk = restoreEndpoint.junk.name,
+                    score = cand.score,
+                    resourcesOk = cand.resourcesOk,
+                    resourcesTotal = cand.resourcesTotal,
+                    configText = text,
+                    savedAt = savedAt,
+                    network = network
+                )
+            }.distinctBy { it.endpoint + "|" + it.junk }
+            if (entries.isNotEmpty()) {
+                ConfigShortlist.save(context, entries)
+                sink.log("топ-${entries.size} для переключения: " + entries.joinToString { it.endpoint })
             }
         }
 
@@ -178,12 +230,13 @@ class Engine(private val context: Context) {
                         prefs.lastConfigText = runCatching { WgConf.render(withRoutes) }
                             .getOrDefault(prefs.lastConfigText)
                         prefs.lastEndpoint = withRoutes.endpoint.render()
+                        prefs.shortlistActive = withRoutes.endpoint.render() + "|" + withRoutes.junk.name
                         sink.log("туннель поднят на подобранном конфиге: ${withRoutes.endpoint.render()}")
                     } else {
                         val why = tunnel.lastError() ?: tunnel.status
                         sink.log("туннель не поднялся: $why")
                         TunnelTrouble.advise(tunnel.debugDump()).forEach {
-                            sink.log("  почему: ${it.title} — ${it.whatToDo}")
+                            sink.log("  почему: ${context.getString(it.titleRes)} — ${context.getString(it.whatToDoRes)}")
                         }
                     }
                 }

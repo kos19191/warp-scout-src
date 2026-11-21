@@ -20,16 +20,19 @@ class TuneWorker(appContext: Context, params: WorkerParameters) : Worker(appCont
         // «нажал галочку каждый час — и соединение отвалилось». Не мешаем и заходим позже.
         // `TunnelState` живёт во flavor'е `tunnel`, поэтому смотрим через общий мост сборки.
         if (runCatching { TunnelFactory.create(context).isUp }.getOrDefault(false)) {
-            notify(context, "авто-подбор отложен: туннель работает, попробую позже")
+            notify(context, context.getString(R.string.tune_delayed))
             return Result.retry()
         }
         val manual = prefs.manualConf.takeIf { it.isNotBlank() }
             ?.let { runCatching { dev.warpscout.core.config.WgConf.toWarpConfig("импорт", it) }.getOrNull() }
         val sink = object : ProgressSink {
+            /**
+             * Прогресс идёт в журнал, а не в уведомления: раньше здесь искали слова в строках
+             * подбора и на каждое совпадение показывали уведомление — за один прогон их
+             * набирались десятки. Уведомление теперь одно, с результатом.
+             */
             override fun log(message: String) {
-                if (message.contains("Лучший") || message.contains("не прошёл") || message.contains("Живых")) {
-                    notify(context, message)
-                }
+                TunnelDebug.stage("подбор: $message")
             }
 
             override fun isCancelled(): Boolean = isStopped
@@ -55,8 +58,11 @@ class TuneWorker(appContext: Context, params: WorkerParameters) : Worker(appCont
         val best = result.best
         // Бекап и после фонового подбора: настройки меняются и без участия человека.
         runCatching { Backup.save(context, "фоновый подбор") }
-        notify(context, best?.let { "Лучший endpoint: ${it.endpoint.render()} (${it.junk.name})" }
-            ?: "Живых endpoint'ов не найдено — попробуйте позже")
+        notify(
+            context,
+            best?.let { context.getString(R.string.tune_best, it.endpoint.render(), it.junk.name) }
+                ?: context.getString(R.string.tune_none)
+        )
         return Result.success()
     }
 
@@ -64,11 +70,16 @@ class TuneWorker(appContext: Context, params: WorkerParameters) : Worker(appCont
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(
-                NotificationChannel(CHANNEL, "WarpScout: подбор конфигурации", NotificationManager.IMPORTANCE_LOW)
+                NotificationChannel(
+                    CHANNEL,
+                    context.getString(R.string.tune_channel),
+                    NotificationManager.IMPORTANCE_LOW
+                )
             )
         }
         val n = NotificationCompat.Builder(context, CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            // Своя иконка: значок Bluetooth в уведомлении о подборе конфигурации сбивал с толку.
+            .setSmallIcon(R.drawable.ic_tile_tunnel)
             .setContentTitle("WarpScout")
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))

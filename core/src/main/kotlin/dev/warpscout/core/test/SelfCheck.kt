@@ -9,6 +9,9 @@ import dev.warpscout.core.lists.AllowLists
 import dev.warpscout.core.lists.ListSide
 import dev.warpscout.core.report.ConfigExport
 import dev.warpscout.core.tunnel.ExitRouter
+import dev.warpscout.core.tunnel.Keepalive
+import dev.warpscout.core.tunnel.StallDetector
+import dev.warpscout.core.tune.CachedPoint
 import dev.warpscout.core.tunnel.IpPacket
 import dev.warpscout.core.crypto.Blake2s
 import dev.warpscout.core.crypto.Crypto
@@ -36,7 +39,11 @@ import dev.warpscout.core.net.TlsProber
 import dev.warpscout.core.net.WgProber
 import dev.warpscout.core.presets.RoutePresets
 import dev.warpscout.core.report.Report
+import dev.warpscout.core.state.ServiceSettings
+import dev.warpscout.core.state.TunnelStatus
+import dev.warpscout.core.model.Candidate
 import dev.warpscout.core.tune.Scoring
+import dev.warpscout.core.tune.Shortlist
 import dev.warpscout.core.tune.Weights
 import dev.warpscout.core.wg.Wg
 
@@ -73,6 +80,22 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("конфиги") {
             confRoundTrip()
             sampleFiles()
+        }
+        section("живость сессии по трафику") {
+            stallDetection()
+            deadPortFailsFast()
+        }
+        section("быстрый старт подбора") {
+            cachedPoint()
+        }
+        section("топ-3 конфига для переключения") {
+            shortlistPick()
+        }
+        section("расход батареи: интервал keepalive") {
+            keepalivePolicy()
+        }
+        section("состояние сервиса между процессами") {
+            serviceState()
         }
         section("пул endpoint'ов") {
             endpointPool()
@@ -180,6 +203,30 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         val pt = ByteArray(100) { (it * 5).toByte() }
         val ct = Crypto.chacha20Poly1305Seal(key, nonce, pt, aad)
         check("chachapoly: длина = plaintext+16", ct.size == pt.size + 16)
+
+        // Повторное шифрование тем же nonce не должно бросать: экземпляр AEAD при шифровании
+        // создаётся заново. На общем экземпляре BouncyCastle запрещает повтор nonce, а после
+        // пересогласования счётчик начинается с нуля — это был бы случайный обрыв туннеля.
+        val ctAgain = runCatching { Crypto.chacha20Poly1305Seal(key, nonce, pt, aad) }
+        check(
+            "chachapoly: шифрование с тем же nonce не падает",
+            ctAgain.isSuccess && ctAgain.getOrNull()!!.contentEquals(ct),
+            ctAgain.exceptionOrNull()?.message ?: "разные результаты"
+        )
+
+        // Шифрование «первые N байт буфера» — путь отправки из tun без копии пакета. Результат
+        // обязан совпадать с шифрованием точной копии, иначе на проводе окажется мусор.
+        val full = ByteArray(64) { (it * 7).toByte() }
+        val partOfBuffer = Crypto.chacha20Poly1305Seal(key, nonce, full, Crypto.EMPTY_AAD, 40)
+        val partCopied = Crypto.chacha20Poly1305Seal(key, nonce, full.copyOf(40), Crypto.EMPTY_AAD)
+        check("chachapoly: часть буфера шифруется как копия части", partOfBuffer.contentEquals(partCopied))
+        check("chachapoly: часть даёт длину N+16", partOfBuffer.size == 56, "${partOfBuffer.size}")
+        val openedPart = Crypto.chacha20Poly1305Open(key, nonce, partOfBuffer, Crypto.EMPTY_AAD)
+        check(
+            "chachapoly: часть расшифровывается обратно",
+            openedPart != null && openedPart.contentEquals(full.copyOf(40)),
+            "раскрылось ${openedPart?.size} байт"
+        )
 
         val jca = javax.crypto.Cipher.getInstance("ChaCha20-Poly1305")
         jca.init(
@@ -471,6 +518,323 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         expect("роуты обхода белых списков", RoutePresets.BYPASS_WHITELIST.size, 56)
     }
 
+    /**
+     * Быстрый старт принимает сохранённую точку без полного скана. Ошибка здесь тише и хуже, чем
+     * кажется: подбор отрапортует «готово», а конфиг не работает. Поэтому подтверждение требует
+     * настоящих признаков, а не «кандидат найден».
+     */
+    private fun cachedPoint() {
+        val c = CachedPoint
+        check("быстрый старт: без ответа сервера не подтверждается", !c.confirmed(0, 0, 0))
+        check("быстрый старт: ответ есть, проверок не было — подтверждается", c.confirmed(1, 0, 0))
+        check("быстрый старт: ответ есть, но изнутри ничего не открылось", !c.confirmed(3, 9, 0))
+        check("быстрый старт: открылся хотя бы один ресурс", c.confirmed(3, 9, 1))
+        check("быстрый старт: все ресурсы открылись", c.confirmed(3, 9, 9))
+        check("быстрый старт: отрицательные числа не считаются успехом", !c.confirmed(-1, 9, 9))
+    }
+
+    /**
+     * Топ-3 для переключения. Проверяем не «функция вернула три элемента», а два свойства, из-за
+     * которых список вообще имеет смысл: варианты стоят на разных адресах (иначе сеть режет их
+     * вместе) и первым идёт тот, что реально пускал трафик, а не просто отвечал на handshake.
+     */
+    private fun shortlistPick() {
+        fun cand(host: String, port: Int, junk: String, score: Int, replies: Int = 1, ok: Int = -1, total: Int = 0): Candidate {
+            val cfg = WarpConfig(
+                name = "тест",
+                account = WarpAccount("a=", "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=", "172.16.0.2", "2606::1"),
+                endpoint = Endpoint(host, port),
+                junk = if (junk == "none") JunkLibrary.none() else JunkLibrary.tlsFixed(),
+                allowedIps = "0.0.0.0/0, ::/0"
+            )
+            val st = EndpointStats(cfg.endpoint, emptyList(), Verdict.HANDSHAKE_OK, replies, 1)
+            return Candidate(cfg, st, Scoring.evaluate(st, replies > 0, ok.coerceAtLeast(0), total), emptyList(), ok, total)
+        }
+
+        val a = cand("162.159.192.1", 2408, "tls-fixed", 900, ok = 9, total = 9)
+        val b = cand("162.159.192.1", 2408, "none", 950, ok = 4, total = 9)      // та же точка, другой шум
+        val c = cand("188.114.97.1", 500, "tls-fixed", 800, ok = 7, total = 9)
+        val d = cand("162.159.195.1", 1701, "tls-fixed", 700, ok = 5, total = 9)
+        val dead = cand("188.114.99.1", 2408, "tls-fixed", -500, replies = 0, ok = -1, total = 0)
+
+        val top = Shortlist.pick(listOf(dead, d, b, c, a))
+        expect("топ-3: ровно три варианта", top.size, Shortlist.LIMIT)
+        expect("топ-3: первым — где открылось больше всего", top.first().config.endpoint.render(), "162.159.192.1:2408")
+        expect("топ-3: на первом месте тот же адрес, но с лучшим результатом изнутри", top.first().resourcesOk, 9)
+        check("топ-3: сначала разные адреса, а не три профиля на одном",
+            top.map { it.config.endpoint.render() }.distinct().size == 3,
+            top.joinToString { it.config.endpoint.render() + "/" + it.junk.name })
+        check("топ-3: мёртвая точка не предлагается", top.none { it.config.endpoint.port == 2408 && it.stats.replies == 0 })
+
+        // Если точек меньше трёх — добираем профилями шума, но не повторяем один и тот же вариант.
+        val two = Shortlist.pick(listOf(a, b), limit = 3)
+        expect("топ-3: при двух точках добирается вторым профилем шума", two.size, 2)
+        expect("топ-3: варианты не повторяются", two.map { it.config.endpoint.render() + "/" + it.junk.name }.distinct().size, 2)
+
+        // Непроверенное изнутри не должно обгонять проверенное, даже если балл выше.
+        val unverified = cand("162.159.198.2", 443, "tls-fixed", 990, replies = 2, ok = -1, total = 0)
+        val ordered = Shortlist.pick(listOf(unverified, c), limit = 1)
+        expect("топ-3: проверенный изнутри выше более «балльного»", ordered.single().resourcesOk, 7)
+
+        check("топ-3: пустой отчёт не ломает отбор", Shortlist.pick(emptyList()).isEmpty())
+    }
+
+    /**
+     * Интервал keepalive — главный наш вклад в расход батареи на мобильной сети. Проверяем ровно
+     * то, что важно: активный экран будит радио не реже раза в минуту, лежащий телефон — реже,
+     * а сам пользователь может попросить ещё реже, но не чаще нижней границы.
+     */
+    private fun keepalivePolicy() {
+        val k = Keepalive
+        val active = k.intervalMs(configuredSeconds = 25, idleMs = 0, screenOn = true)
+        check("батарея: на активном экране не чаще раза в минуту", active == Keepalive.ACTIVE_FLOOR_MS, "$active")
+
+        val idle = k.intervalMs(25, idleMs = 300_000, screenOn = false)
+        check("батарея: экран погашен и тишина — полторы минуты", idle == Keepalive.IDLE_SCREEN_OFF_FLOOR_MS, "$idle")
+
+        val idleScreenOn = k.intervalMs(25, idleMs = 300_000, screenOn = true)
+        check("батарея: экран горит — минута даже в тишине", idleScreenOn == Keepalive.ACTIVE_FLOOR_MS, "$idleScreenOn")
+
+        val justIdle = k.intervalMs(25, idleMs = Keepalive.IDLE_AFTER_MS - 1_000, screenOn = false)
+        check("батарея: тишина ещё не наступила — держим минуту", justIdle == Keepalive.ACTIVE_FLOOR_MS, "$justIdle")
+
+        val userWantsRare = k.intervalMs(110, idleMs = 0, screenOn = true)
+        check("батарея: просьбу «реже» уважаем", userWantsRare == 110_000L, "$userWantsRare")
+
+        val tooSlow = k.intervalMs(120, idleMs = 300_000, screenOn = false)
+        check("батарея: дольше двух минут не растягиваем", tooSlow == Keepalive.MAX_MS, "$tooSlow")
+
+        val off = k.intervalMs(0, idleMs = 0, screenOn = true)
+        check("батарея: keepalive выключен — не будим вовсе", off == Long.MAX_VALUE, "$off")
+
+        // Частота за час: было 144 пробуждения (25 с), стало не больше 60/40.
+        val perHourActive = 3_600_000L / active
+        val perHourIdle = 3_600_000L / idle
+        check("батарея: за час активных пробуждений не больше 60", perHourActive <= 60, "$perHourActive")
+        check("батарея: за час в тишине не больше 40", perHourIdle <= 40, "$perHourIdle")
+        check(
+            "батарея: тишина реже активности",
+            perHourIdle < perHourActive,
+            "$perHourIdle против $perHourActive"
+        )
+        check(
+            "батарея: пересогласование успевает до жёсткого предела протокола",
+            NetSettings().rekeyAfterMs < 180_000L,
+            "${NetSettings().rekeyAfterMs}"
+        )
+        check(
+            "батарея: запас на повторные попытки не меньше трёх штук",
+            (180_000L - NetSettings().rekeyAfterMs) / NetSettings().rekeyRetryMs >= 3,
+            "${(180_000L - NetSettings().rekeyAfterMs) / NetSettings().rekeyRetryMs}"
+        )
+    }
+
+    // ------------------------------------------------- живость сессии по трафику
+
+    /**
+     * Правило «сессия мертва» решает, рвать ли рабочий туннель. Слишком чувствительное — рвёт
+     * нормальную работу, слишком грубое — оставляет мёртвое соединение на минуты. Поэтому
+     * проверяются ровно те сценарии, которые бывают в жизни.
+     */
+    private fun stallDetection() {
+        val d = StallDetector
+        val t0 = 1_000_000L
+
+        // Пока трафик стоит, судить не о чем: молчащий туннель без трафика — норма.
+        check("живость: без трафика не считается мёртвой", !d.isStalled(t0 + 600_000, t0, 0L, 0))
+        check("живость: трафика нет, но счётчик шумит", !d.isStalled(t0 + 600_000, t0, 0L, 500))
+
+        // Единичные пакеты (UDP-датаграммы, DNS) ответа не ждут — порог по количеству обязателен.
+        check(
+            "живость: 10 пакетов без ответа — ещё не приговор",
+            !d.isStalled(t0 + 300_000, t0, t0, 10)
+        )
+        check(
+            "живость: 49 пакетов за 10 минут — под порогом",
+            !d.isStalled(t0 + 600_000, t0, t0, StallDetector.MIN_PACKETS - 1)
+        )
+
+        // Поток только начался — окно ещё не вышло, даже если ответа не было давно.
+        val burst = t0 + 600_000
+        check(
+            "живость: поток только начался",
+            !d.isStalled(burst + 1_000, t0, burst, 80)
+        )
+
+        // Ответ был недавно — соединение живое, сколько бы ни ушло пакетов.
+        check(
+            "живость: недавний ответ снимает подозрения",
+            !d.isStalled(t0 + 60_000, t0 + 55_000, t0, 200)
+        )
+
+        // Классический случай: 50+ пакетов, 45 секунд тишины.
+        check(
+            "живость: 50 пакетов и 45 секунд тишины — мертва",
+            d.isStalled(t0 + 45_000, t0, t0, StallDetector.MIN_PACKETS)
+        )
+        check(
+            "живость: за секунду до окна — ещё нет",
+            !d.isStalled(t0 + 44_000, t0, t0, StallDetector.MIN_PACKETS)
+        )
+        check(
+            "живость: окно считается от последнего ответа, а не от начала",
+            !d.isStalled(t0 + 100_000, t0 + 80_000, t0, 500)
+        )
+
+        // Ни одного ответа за всю жизнь сессии: отсчёт от начала потока.
+        check(
+            "живость: ответов не было вовсе",
+            d.isStalled(t0 + 50_000, 0L, t0, StallDetector.MIN_PACKETS)
+        )
+
+        // Объяснение должно быть понятным человеку и содержать секунды и число пакетов.
+        val why = d.explain(t0 + 60_000, t0, t0, 120)
+        check("живость: объяснение называет число пакетов", why.contains("120"), why)
+        check("живость: объяснение называет время тишины", why.contains("60 с"), why)
+    }
+
+    // -------------------------------------------------- состояние между процессами
+
+    /**
+     * Снимок состояния — единственный способ узнать что-либо о туннеле из другого процесса,
+     * поэтому сериализация проверяется отдельно: битый снимок = «туннель работает, а UI молчит».
+     */
+    private fun serviceState() {
+        val full = TunnelStatus(
+            up = true,
+            status = "туннель поднят",
+            endpoint = "162.159.192.7:2408",
+            error = null,
+            gaveUp = false,
+            busy = true,
+            startedAt = 1_758_000_000_123,
+            updatedAt = 1_758_000_004_456,
+            bytesUp = 12_345_678_901L,
+            bytesDown = 98_765_432_109L,
+            handshakeAttempts = 3,
+            lastError = "endpoint молчит",
+            lastStageMs = 1_758_000_004_000,
+            touched = true,
+        )
+        val back = TunnelStatus.fromJson(full.toJson())
+        check("снимок: читается обратно", back != null)
+        expect("снимок: up", back?.up, true)
+        expect("снимок: статус", back?.status, "туннель поднят")
+        expect("снимок: endpoint", back?.endpoint, "162.159.192.7:2408")
+        expect("снимок: нет ошибки", back?.error, null)
+        expect("снимок: busy", back?.busy, true)
+        expect("снимок: время старта без потерь", back?.startedAt, 1_758_000_000_123L)
+        expect("снимок: время обновления без потерь", back?.updatedAt, 1_758_000_004_456L)
+        expect("снимок: счётчик вверх без потерь", back?.bytesUp, 12_345_678_901L)
+        expect("снимок: счётчик вниз без потерь", back?.bytesDown, 98_765_432_109L)
+        expect("снимок: попытки handshake", back?.handshakeAttempts, 3)
+        expect("снимок: последняя ошибка", back?.lastError, "endpoint молчит")
+        expect("снимок: время этапа", back?.lastStageMs, 1_758_000_004_000L)
+        expect("снимок: журнал трогали", back?.touched, true)
+
+        // Русский текст с кавычками и переводами строк — иначе журнал превратится в кашу.
+        val tricky = TunnelStatus(
+            status = "строка \"в кавычках\" и \\ слэш\nвторая строка\tтаб",
+            error = "ошибка: «ёлка», тире — и юникод ✓",
+        )
+        val trickyBack = TunnelStatus.fromJson(tricky.toJson())
+        expect("снимок: кавычки и переводы строк", trickyBack?.status, tricky.status)
+        expect("снимок: юникод в ошибке", trickyBack?.error, tricky.error)
+
+        // Битый и чужой ввод не должен ронять процесс интерфейса.
+        expect("снимок: пустая строка → null", TunnelStatus.fromJson(""), null)
+        expect("снимок: null → null", TunnelStatus.fromJson(null), null)
+        expect("снимок: мусор → null", TunnelStatus.fromJson("не json"), null)
+        expect("снимок: обрезанный json → null", TunnelStatus.fromJson("{\"up\": true, \"status\": \"тун"), null)
+        expect("снимок: не объект → null", TunnelStatus.fromJson("[1,2,3]"), null)
+        expect("снимок: пустой объект → значения по умолчанию", TunnelStatus.fromJson("{}"), TunnelStatus())
+        val unknown = TunnelStatus.fromJson("{\"up\": true, \"чужоеПоле\": 5, \"ещё\": {\"a\": 1}}")
+        expect("снимок: лишние поля не мешают", unknown?.up, true)
+        expect("снимок: лишние поля не ломают статус", unknown?.status, "")
+
+        // Настройки сервиса: то, из-за чего «поменял в настройках — туннель не заметил».
+        val settings = ServiceSettings(
+            secondExitOn = true,
+            secondConf = "[Interface]\nPrivateKey = abc=\n[Peer]\nEndpoint = 1.2.3.4:51820",
+            secondCidrs = "1.1.1.0/24, 8.8.8.8/32",
+            appsMode = 1,
+            appsSelected = listOf("org.telegram.messenger", "com.google.android.youtube", "ru.yandex.music"),
+        )
+        val settingsBack = ServiceSettings.fromJson(settings.toJson())
+        check("настройки сервиса: читаются обратно", settingsBack != null)
+        expect("настройки сервиса: второй выход", settingsBack?.secondExitOn, true)
+        expect("настройки сервиса: конфиг дословно", settingsBack?.secondConf, settings.secondConf)
+        expect("настройки сервиса: подсети", settingsBack?.secondCidrs, settings.secondCidrs)
+        expect("настройки сервиса: режим приложений", settingsBack?.appsMode, 1)
+        expect("настройки сервиса: список приложений", settingsBack?.appsSelected, settings.appsSelected)
+
+        val many = (0 until 300).map { "app.number.$it" }
+        expect(
+            "настройки сервиса: 300 приложений",
+            ServiceSettings.fromJson(ServiceSettings(appsSelected = many).toJson())?.appsSelected,
+            many
+        )
+        expect(
+            "настройки сервиса: пустой список",
+            ServiceSettings.fromJson(ServiceSettings().toJson())?.appsSelected,
+            emptyList<String>()
+        )
+        expect("настройки сервиса: мусор → null", ServiceSettings.fromJson("<xml/>"), null)
+
+        // Очередь точек: по ней процесс туннеля сам меняет точку, когда прежняя замолчала.
+        val queue = listOf("162.159.192.10:864", "162.159.192.7:500", "188.114.97.1:500")
+        expect(
+            "настройки сервиса: очередь точек сохраняется",
+            ServiceSettings.fromJson(ServiceSettings(failover = queue).toJson())?.failover,
+            queue
+        )
+        expect(
+            "настройки сервиса: пустая очередь",
+            ServiceSettings.fromJson(ServiceSettings().toJson())?.failover,
+            emptyList<String>()
+        )
+        // Старый снимок без поля обязан читаться: обновление не должно ломать уже поднятый туннель.
+        expect(
+            "настройки сервиса: снимок без очереди читается",
+            ServiceSettings.fromJson("""{"ver":1,"appsMode":2}""")?.failover,
+            emptyList<String>()
+        )
+
+        // Фаза: машинный код вместо поиска подстрок в русском статусе.
+        expect("фаза: по умолчанию простаивает", TunnelStatus().phase, TunnelStatus.PHASE_IDLE)
+        expect(
+            "фаза: переживает сериализацию",
+            TunnelStatus.fromJson(TunnelStatus(phase = TunnelStatus.PHASE_RECONNECTING).toJson())?.phase,
+            TunnelStatus.PHASE_RECONNECTING
+        )
+        expect(
+            "фаза: «идёт подключение» у подъёма",
+            TunnelStatus(phase = TunnelStatus.PHASE_STARTING).isStarting,
+            true
+        )
+        expect(
+            "фаза: «идёт подключение» у переподключения",
+            TunnelStatus(phase = TunnelStatus.PHASE_RECONNECTING).isStarting,
+            true
+        )
+        expect("фаза: работа — это не «идёт подключение»", TunnelStatus(phase = TunnelStatus.PHASE_UP).isStarting, false)
+        expect(
+            "фаза: «нет сети» — отдельный признак",
+            TunnelStatus(phase = TunnelStatus.PHASE_NO_NETWORK).hasNoNetwork,
+            true
+        )
+        expect(
+            "фаза: старый снимок без фазы читается как простой",
+            TunnelStatus.fromJson("{\"up\": false}")?.phase,
+            TunnelStatus.PHASE_IDLE
+        )
+
+        // Совместимость: снимок без новых полей (он же — снимок старой версии приложения).
+        val legacy = TunnelStatus.fromJson("{\"up\": true, \"status\": \"старый снимок\"}")
+        expect("снимок: читается без новых полей", legacy?.status, "старый снимок")
+        expect("снимок: отсутствующие поля по умолчанию", legacy, TunnelStatus(up = true, status = "старый снимок"))
+    }
+
     // ----------------------------------------------------------- scoring/report
 
     private fun scoring() {
@@ -617,6 +981,47 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         return PlaneHarness(plane, tunIn, tunOut, log, thread)
     }
 
+    /**
+     * ICMP port unreachable — самый частый ответ на «мёртвой» точке: сервер прямо говорит, что на
+     * этом порту WARP нет. Раньше это тонуло в общем «чтение сокета» и туннель продолжал ждать
+     * ещё пять инициаций по 400 мс — то есть каждая мёртвая точка стоила двух с половиной секунд
+     * и лишних датаграмм. Проверяем именно это: отказ быстрый и с внятной причиной.
+     */
+    private fun deadPortFailsFast() {
+        val clientPriv = ByteArray(32) { (it * 3 + 7).toByte() }
+        val serverPriv = ByteArray(32) { (it * 5 + 11).toByte() }
+        val dead = object : dev.warpscout.core.tunnel.UdpChannel {
+            override fun send(packet: ByteArray) = Unit
+            override fun receive(): ByteArray? =
+                throw java.net.PortUnreachableException("ICMP Port Unreachable")
+            override fun close() = Unit
+        }
+        val config = WarpConfig(
+            name = "test",
+            account = WarpAccount(Crypto.base64(clientPriv), Crypto.base64(Crypto.publicOf(serverPriv))),
+            endpoint = Endpoint("127.0.0.1", 9),
+            junk = JunkLibrary.none(),
+            persistentKeepalive = null
+        )
+        val startedAt = System.currentTimeMillis()
+        val plane = dev.warpscout.core.tunnel.DataPlane(
+            dead,
+            java.io.PipedInputStream(),
+            java.io.ByteArrayOutputStream(),
+            config,
+            NetSettings(attempts = 5, timeoutMs = 1000, retryEveryMs = 400, junkPacketsBeforeHandshake = 1)
+        )
+        val ok = plane.run()
+        val took = System.currentTimeMillis() - startedAt
+        check("закрытый порт: туннель не поднят", !ok)
+        check(
+            "закрытый порт: причина названа портом, а не «сервер молчит»",
+            plane.failureReason?.contains("порт закрыт") == true,
+            plane.failureReason ?: "причина не записана"
+        )
+        check("закрытый порт: не ждём остальные инициации", took < 1_500, "$took мс")
+    }
+
     private fun dataPlaneLoopback() {
         val clientPriv = ByteArray(32) { (it * 3 + 7).toByte() }
         val serverPriv = ByteArray(32) { (it * 5 + 11).toByte() }
@@ -660,8 +1065,14 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         try {
             check("rekey: сессия поднялась", h.awaitUp(4000), h.log.toString())
 
+            // Пересогласование по требованию (1.10.13): в полной тишине rekey не выполняется —
+            // иначе модем просыпается каждые 150 с без всякой пользы. Значит, чтобы проверить
+            // плановый rekey, нужен живой трафик: подкидываем по пакету, пока не наберётся два.
             val rekeyUntil = System.currentTimeMillis() + 6000
-            while (h.plane.rekeyCount < 2 && System.currentTimeMillis() < rekeyUntil) Thread.sleep(50)
+            while (h.plane.rekeyCount < 2 && System.currentTimeMillis() < rekeyUntil) {
+                h.tunIn.offer(testPacket())
+                Thread.sleep(50)
+            }
             check(
                 "rekey: сессия пересогласована сама (2 раза)",
                 h.plane.rekeyCount >= 2,
@@ -675,6 +1086,35 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
                 server.error ?: "back=${back?.size}; ${h.log}")
             check("rekey: возраст сессии обнулился", h.plane.sessionAgeMs() < 4000,
                 "age=${h.plane.sessionAgeMs()}")
+
+            // Тишина: ждём дольше, чем rekeyAfterMs, и убеждаемся, что рукопожатий не прибавилось.
+            // Это и есть «не будить радио зря»: расход батареи в простое давали именно эти
+            // пересогласования каждые 150 секунд.
+            //
+            // Сначала даём плоскости доработать накопленные пакеты и трафику стихнуть: пока хоть
+            // один пакет идёт, «живой трафик» — это правда, и плановый rekey в это время законен.
+            // Заодно вычерпываем эхо, иначе очередь в tun переполнится и задержит доставку.
+            val settleUntil = System.currentTimeMillis() + 1200
+            while (System.currentTimeMillis() < settleUntil) {
+                h.tunOut.poll(50L)
+            }
+            val before = h.plane.rekeyCount
+            Thread.sleep(1400)
+            check(
+                "rekey: в тишине сессия не пересогласовывается",
+                h.plane.rekeyCount == before,
+                "было $before, стало ${h.plane.rekeyCount}; ${h.log}"
+            )
+
+            // А первый пакет после простоя должен вернуть сессию: либо уже действующую, либо
+            // пересогласованную на месте (см. tunToUdp).
+            val afterIdle = testPacket()
+            h.tunIn.offer(afterIdle)
+            check(
+                "rekey: после простоя данные идут",
+                h.tunOut.poll(4000L) != null,
+                "back=null; ${h.log}"
+            )
         } finally {
             h.stop()
             server.stop()
@@ -789,8 +1229,14 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
 
                 // Ровно тот баг, из-за которого Telegram умирал через три минуты: сессия обязана
                 // пересогласовываться САМА, без перезапуска сервиса.
+                // Трафик во время ожидания обязателен: с 1.10.13 в полной тишине пересогласования
+                // нет (не будим радио зря), а с потоком пакетов плановый rekey работает как раньше.
                 val rekeyUntil = System.currentTimeMillis() + 6000
-                while (plane.rekeyCount < 1 && System.currentTimeMillis() < rekeyUntil) Thread.sleep(50)
+                while (plane.rekeyCount < 1 && System.currentTimeMillis() < rekeyUntil) {
+                    tunIn.offer(ip)
+                    tunOut.poll(200L)
+                    Thread.sleep(50)
+                }
                 check("integration: сессия пересогласована автоматически", plane.rekeyCount >= 1,
                     "rekey=${plane.rekeyCount}; ${planeLog}")
             } finally {
