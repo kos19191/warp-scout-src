@@ -755,12 +755,12 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         // «Туннель нужен» и «выключил сам человек»: по ним кнопка и плитка решают, что предлагать,
         // а фоновый подбор — включать ли туннель. Потерять их при сериализации — значит снова
         // «выключил руками, а он включился сам».
-        val held = TunnelStatus.fromJson(TunnelStatus(wanted = true, stoppedByUser = true).toJson())
-        expect("снимок: туннель нужен", held?.wanted, true)
-        expect("снимок: выключен вручную", held?.stoppedByUser, true)
-        val legacy = TunnelStatus.fromJson("{\"up\": false, \"phase\": 5}")
-        expect("снимок: старый формат — туннель не нужен", legacy?.wanted, false)
-        expect("снимок: старый формат — не выключался вручную", legacy?.stoppedByUser, false)
+        val heldBack = TunnelStatus.fromJson(TunnelStatus(wanted = true, stoppedByUser = true).toJson())
+        expect("снимок: туннель нужен", heldBack?.wanted, true)
+        expect("снимок: выключен вручную", heldBack?.stoppedByUser, true)
+        val beforeFields = TunnelStatus.fromJson("{\"up\": false, \"phase\": 5}")
+        expect("снимок: старый формат — туннель не нужен", beforeFields?.wanted, false)
+        expect("снимок: старый формат — не выключался вручную", beforeFields?.stoppedByUser, false)
 
         // Русский текст с кавычками и переводами строк — иначе журнал превратится в кашу.
         val tricky = TunnelStatus(
