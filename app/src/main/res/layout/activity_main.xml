@@ -1068,11 +1068,12 @@
         </ScrollView>
 
         <!-- ══════ вкладка «Журнал» ══════ -->
-        <ScrollView
+        <androidx.core.widget.NestedScrollView
             android:id="@+id/pageLog"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:fillViewport="true"
+            android:nestedScrollingEnabled="true"
             android:visibility="gone">
 
             <LinearLayout
@@ -1096,14 +1097,15 @@
                   растягивают страницу на несколько экранов. Так до карточек ниже (диагностика,
                   копирование) можно добраться одним движением, не проезжая весь лог.
                 -->
-                <ScrollView
+                <androidx.core.widget.NestedScrollView
                     android:id="@+id/logBox"
                     android:layout_width="match_parent"
-                    android:layout_height="260dp"
+                    android:layout_height="300dp"
                     android:layout_marginTop="8dp"
                     android:background="?attr/colorSurfaceContainerLow"
                     android:fillViewport="true"
                     android:fadeScrollbars="false"
+                    android:nestedScrollingEnabled="true"
                     android:padding="8dp"
                     android:scrollbars="vertical">
 
@@ -1112,9 +1114,8 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:fontFamily="monospace"
-                        android:textAppearance="?attr/textAppearanceBodySmall"
-                        android:textIsSelectable="true" />
-                </ScrollView>
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+                </androidx.core.widget.NestedScrollView>
 
                 <!--
                   Очистка журнала. Нужна не «для чистоты»: после обновления человек собирает
@@ -1151,14 +1152,15 @@
                       Диагностика — тоже в своём окне: раньше она шла простынёй вниз страницы,
                       и «Скопировать журнал» уезжала за несколько экранов.
                     -->
-                    <ScrollView
+                    <androidx.core.widget.NestedScrollView
                         android:id="@+id/diagBox"
                         android:layout_width="match_parent"
-                        android:layout_height="220dp"
+                        android:layout_height="240dp"
                         android:layout_marginTop="4dp"
                         android:background="?attr/colorSurfaceContainerLow"
                         android:fillViewport="true"
                         android:fadeScrollbars="false"
+                        android:nestedScrollingEnabled="true"
                         android:padding="8dp"
                         android:scrollbars="vertical">
 
@@ -1172,8 +1174,7 @@
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
                                 android:fontFamily="monospace"
-                                android:textAppearance="?attr/textAppearanceBodySmall"
-                                android:textIsSelectable="true" />
+                                android:textAppearance="?attr/textAppearanceBodySmall" />
 
                             <LinearLayout
                                 android:id="@+id/tunnelAdviceBox"
@@ -1182,7 +1183,7 @@
                                 android:layout_marginTop="4dp"
                                 android:orientation="vertical" />
                         </LinearLayout>
-                    </ScrollView>
+                    </androidx.core.widget.NestedScrollView>
 
                     <LinearLayout
                         android:layout_width="match_parent"
@@ -1253,7 +1254,7 @@
                     android:layout_marginTop="@dimen/space_xl"
                     android:gravity="center" />
             </LinearLayout>
-        </ScrollView>
+        </androidx.core.widget.NestedScrollView>
     </FrameLayout>
 
     <!--

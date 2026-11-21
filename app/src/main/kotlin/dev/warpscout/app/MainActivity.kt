@@ -5,12 +5,14 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.MotionEvent
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.widget.NestedScrollView
 import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.checkbox.MaterialCheckBox
 import com.google.android.material.radiobutton.MaterialRadioButton
@@ -33,6 +35,7 @@ import dev.warpscout.core.tune.ProgressSink
 import dev.warpscout.core.tune.TuningResult
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 
 /**
  * Шесть вкладок: первая — быстрый путь («проверить → сгенерировать → подключить») с настройками по
@@ -55,6 +58,10 @@ class MainActivity : AppCompatActivity() {
     private var suppressExportListener = false
     private val listChecks = LinkedHashMap<String, MaterialCheckBox>()
     private val tunnelHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** Окна «Журнал» и «Диагностика»: сами держатся за самый свежий край (см. [TailKeeper]). */
+    private val logTail by lazy { TailKeeper(binding.logBox) }
+    private val diagTail by lazy { TailKeeper(binding.diagBox) }
 
     /**
      * Сколько точек пробуем за одно подключение.
@@ -387,9 +394,54 @@ class MainActivity : AppCompatActivity() {
                     )
                 )
             }
+            // Открыли «Журнал» — сразу видно, что происходит сейчас. Раньше окно показывало
+            // начало списка, и свежую строку приходилось искать листанием.
+            if (safe == TAB_LOG) {
+                logTail.forceEnd()
+                diagTail.forceEnd()
+            }
         }.onFailure { t ->
             TunnelDebug.error("не удалось открыть раздел $index: " + SafeMode.describe(t))
         }
+    }
+
+    /** Начало пальца при смахивании: по нему считаем, было ли движение боковым. */
+    private var swipeFromX = 0f
+    private var swipeFromY = 0f
+    private var swipeTracking = false
+
+    /**
+     * Смахивание влево-вправо переключает разделы — привычный жест «пейджера».
+     *
+     * Смотрим события раньше всех: иначе вложенные окна (журнал, диагностика) съедали жест
+     * целиком. Переключаем только явно боковое движение — вертикальная прокрутка списков и
+     * протаскивание ползунков должны остаться собой. Ошибка в жесте не имеет права уронить
+     * экран, поэтому обработка в `runCatching`.
+     */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        // До построения экрана (или на аварийном) переключать нечего — жест просто не наш.
+        if (::pages.isInitialized) runCatching {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    swipeFromX = ev.x
+                    swipeFromY = ev.y
+                    swipeTracking = true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (swipeTracking) {
+                        swipeTracking = false
+                        val dx = ev.x - swipeFromX
+                        val dy = ev.y - swipeFromY
+                        val threshold = 72f * resources.displayMetrics.density
+                        if (abs(dx) > threshold && abs(dx) > abs(dy) * 2f) {
+                            showPage(selectedTab + if (dx < 0f) 1 else -1)
+                        }
+                    }
+                }
+                MotionEvent.ACTION_CANCEL -> swipeTracking = false
+            }
+        }
+        return super.dispatchTouchEvent(ev)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -1068,6 +1120,44 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Держит окно журнала у самого свежего края.
+     *
+     * Строки дописываются в конец, а окно после обновления текста остаётся там, где было: открыв
+     * вкладку, человек видел начало журнала и должен был листать вниз, чтобы понять, что
+     * происходит сейчас. Пока окно у конца — новая строка сама остаётся видимой; как только окно
+     * отлистали вверх почитать, обновления больше не дёргают текст из-под пальца, а вернувшись
+     * к концу, окно снова «прилипает».
+     */
+    private class TailKeeper(private val box: NestedScrollView) {
+
+        /** Окно у конца содержимого: новые строки подтягиваем. */
+        private var stick = true
+
+        init {
+            // Слушатель берём именно у NestedScrollView: у View есть одноимённый, и лямбда без
+            // явного типа не даёт выбрать между ними.
+            box.setOnScrollChangeListener(
+                NestedScrollView.OnScrollChangeListener { view, _, top, _, _ ->
+                    val content = view.getChildAt(0)?.height ?: 0
+                    stick = top + view.height >= content - 24
+                }
+            )
+        }
+
+        /** Догнать хвост, если человек не отлистал выше. */
+        fun toEnd() {
+            if (!stick) return
+            box.post { box.fullScroll(View.FOCUS_DOWN) }
+        }
+
+        /** Показать хвост принудительно: раздел только что открыли. */
+        fun forceEnd() {
+            stick = true
+            box.post { box.fullScroll(View.FOCUS_DOWN) }
+        }
+    }
+
+    /**
      * Пустое окно журнала не показываем: рамка на пол-экрана без единой строки выглядела как
      * «сломанный журнал» (и ровно так и попала на скриншот). Появилась первая строка — окно есть.
      */
@@ -1092,14 +1182,11 @@ class MainActivity : AppCompatActivity() {
             }
             binding.textLogHint.visibility = android.view.View.GONE
             if (log.length > 30000) log.delete(0, log.length - 30000)
-            val box = binding.logBox
-            // Держимся за хвост журнала, но только если человек не отлистал вверх почитать:
-            // иначе каждая новая строка выдёргивала бы текст из-под пальца.
-            val content = box.getChildAt(0)?.height ?: 0
-            val atBottom = box.scrollY + box.height >= content - 24
             binding.textLog.text = log.toString()
             refreshLogBox()
-            if (atBottom) box.post { box.fullScroll(View.FOCUS_DOWN) }
+            // Новые строки дописываются в конец: окно должно оставаться у них, пока человек сам не
+            // отлистал вверх почитать — иначе текст выдёргивался бы из-под пальца.
+            logTail.toEnd()
         }
 
         override fun progress(done: Int, total: Int, current: String) = runOnUiThread {
@@ -2136,7 +2223,8 @@ class MainActivity : AppCompatActivity() {
         // Раньше здесь искали подстроки в русском статусе («Поднимаю», «переподключаюсь»,
         // «нет сети»). Любая правка формулировки в сервисе молча ломала оформление, поэтому
         // состояние приходит машинным кодом.
-        val phase = runCatching { TunnelStatusBus.snapshot(this).phase }.getOrDefault(TunnelStatus.PHASE_IDLE)
+        val snapshot = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
+        val phase = snapshot?.phase ?: TunnelStatus.PHASE_IDLE
         val starting = connecting || phase == TunnelStatus.PHASE_STARTING || phase == TunnelStatus.PHASE_RECONNECTING
         val noNet = phase == TunnelStatus.PHASE_NO_NETWORK
         val failed = TunnelDebug.lastError
@@ -2144,8 +2232,14 @@ class MainActivity : AppCompatActivity() {
         val color: Int
         when {
             up -> {
-                val uptime = if (tunnelStartedAtLocal > 0L) {
-                    humanDuration(System.currentTimeMillis() - tunnelStartedAtLocal)
+                // Время работы берём из снимка сервиса: он помнит, когда началась текущая сессия,
+                // даже если экран был закрыт, а приложение перезапущено или обновлено. Локальная
+                // отметка ставится только при подключении из этого экрана, поэтому после
+                // перезапуска интерфейса она была нулевой и экран показывал «активен 0 с» при
+                // часе реальной работы (Диагностика-5: подъём 13:59:58, экран открыт в 15:00).
+                val since = snapshot?.startedAt?.takeIf { it > 0L } ?: tunnelStartedAtLocal
+                val uptime = if (since > 0L && since <= System.currentTimeMillis()) {
+                    humanDuration(System.currentTimeMillis() - since)
                 } else {
                     getString(R.string.duration_sec, 0)
                 }
@@ -2190,13 +2284,10 @@ class MainActivity : AppCompatActivity() {
         // иначе каждые 700 мс заново строится список подсказок и переверстывается текст.
         val full = "$status\n$dump"
         if (binding.textTunnelState.text.toString() != full) {
+            binding.textTunnelState.text = full
             // Новые шаги дописываются в конец: если человек не отлистал выше, держимся за хвост,
             // иначе свежие строки уезжали бы вниз за пределы окна.
-            val box = binding.diagBox
-            val content = box.getChildAt(0)?.height ?: 0
-            val atBottom = box.scrollY + box.height >= content - 24
-            binding.textTunnelState.text = full
-            if (atBottom) box.post { box.fullScroll(View.FOCUS_DOWN) }
+            diagTail.toEnd()
         }
         if (dump == lastDiagDump) return
         lastDiagDump = dump
@@ -2264,5 +2355,6 @@ class MainActivity : AppCompatActivity() {
 
         const val TAB_START = 0
         const val TAB_CONFIG = 2
+        const val TAB_LOG = 4
     }
 }
