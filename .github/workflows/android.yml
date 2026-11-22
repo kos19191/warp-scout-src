@@ -15,6 +15,10 @@ on:
         description: "Тег релиза (пусто → latest-preview)"
         required: false
         default: ""
+      restore_releases:
+        description: "Вернуть удалённые релизы из артефактов прошлых прогонов: «тег прогон полный-sha» через запятую (пусто — обычная сборка)"
+        required: false
+        default: ""
 
 # Один прогон на ветку: новый пуш отменяет предыдущий, чтобы не жечь минуты.
 concurrency:
@@ -28,6 +32,8 @@ permissions:
 jobs:
   core:
     name: "Ядро: самопроверка + интеграция с фейковым эндпоинтом"
+    # Восстановление релизов (см. job «restore») ничего не собирает — сборку пропускаем.
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.restore_releases == ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -166,6 +172,7 @@ jobs:
 
   apk:
     name: "APK (scout + tunnel)"
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.restore_releases == ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -360,8 +367,8 @@ jobs:
             echo "Собрано автоматически из коммита \`${GITHUB_SHA:0:7}\`, прогон: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo
             echo "—"
-            echo "На странице релизов хранятся три последние версии: при выпуске новой самая старая"
-            echo "удаляется вместе с тегом, поэтому откатиться на одну-две версии назад можно всегда."
+            echo "Предыдущие версии остаются на странице релизов. Вернуться на более старую можно, только"
+            echo "удалив текущую: поверх новой версии Android старую не ставит (настройки при этом сотрутся)."
           } > notes.md
 
           if gh release view "$TAG" > /dev/null 2>&1; then
@@ -382,32 +389,139 @@ jobs:
           fi
           gh release view "$TAG" --json url,assets --jq '{url, assets: [.assets[].name]}'
 
-      # На странице релизов остаются только три последние версии.
-      #
-      # Иначе список растёт без конца и нужную сборку приходится искать среди десятков строк.
-      # Три — потому что откатиться на одну-две версии назад бывает нужно, а хранить историю
-      # всех debug-сборок смысла нет: каждая весит по 10 МБ. Тег удаляем вместе с релизом
-      # (`--cleanup-tag`), иначе он остаётся висеть отдельно и путает.
-      - name: "Оставить три последних релиза"
-        if: success()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Старые релизы больше не удаляются (с 1.10.30). До этого здесь был шаг «оставить три
+      # последних релиза»: он стёр 1.10.22–1.10.26 вместе с тегами, а человеку понадобилась
+      # именно 1.10.25 — она у него работала лучше новых. Сколько хранить, решим, когда станет
+      # ясно, какие версии нужны; пока не удаляем ничего.
+
+  # Восстановление удалённых релизов (с 1.10.30): исходные APK берутся из артефактов тех прогонов,
+  # которые их собирали (артефакты живут 90 дней), без пересборки — это ровно те файлы, что были
+  # опубликованы. Тег ставится через API на исходный коммит. Теги, созданные GITHUB_TOKEN, сборку
+  # не запускают — поэтому workflow старого коммита со своим шагом удаления «лишних» релизов не
+  # сработает и новые релизы не тронет. «Latest» остаётся за самой новой версией (--latest=false).
+  restore:
+    name: "Восстановление релизов из артефактов"
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.restore_releases != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      LIST: ${{ github.event.inputs.restore_releases }}
+    steps:
+      - name: "Скачать исходные APK и опубликовать"
         run: |
           set -uo pipefail
-          KEEP=3
-          # Самые новые сверху; всё, что дальше третьего, — удаляем.
-          # Через API, а не `gh release list --json`: во раннерах встречается gh без --json
-          # у этой команды, и шаг тихо ломался бы.
-          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq "sort_by(.created_at) | reverse | .[$KEEP:] | .[].tag_name" > /tmp/old-releases.txt || exit 0
-          if [ ! -s /tmp/old-releases.txt ]; then
-            echo "удалять нечего: релизов не больше $KEEP"
-            exit 0
-          fi
-          while IFS= read -r tag; do
-            [ -n "$tag" ] || continue
-            echo "удаляю старый релиз $tag"
-            gh release delete "$tag" --yes --cleanup-tag || echo "::warning title=релизы::не удалось удалить $tag"
-          done < /tmp/old-releases.txt
-          echo "осталось:"
-          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=10" --jq '.[] | .tag_name' 
+          PINNED="76b0e9eb5436d15108a044d8ee4b87b1ea80a5c059acdf59dd5a2dae6428dfb0"
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/nonexistent}}"
+          APKSIGNER=$(find "$SDK/build-tools" -name apksigner -type f 2>/dev/null | sort | tail -1)
+          fail=0
+          err() { echo "::error title=восстановление::$1"; fail=1; }
+
+          # Одна строка — один релиз: «тег прогон полный-sha». Разделитель — запятая или новая строка.
+          while read -r TAG RUN SHA REST; do
+            [ -n "${TAG:-}" ] || continue
+            echo "::group::$TAG"
+            if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && "${RUN:-}" =~ ^[0-9]+$ && "${SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+              err "непонятная строка «$TAG ${RUN:-} ${SHA:-}»: нужно «тег прогон полный-sha»"; echo "::endgroup::"; continue
+            fi
+            VERSION="${TAG#v}"
+            if gh release view "$TAG" > /dev/null 2>&1; then
+              echo "::notice title=восстановление::$TAG уже есть — не трогаю"; echo "::endgroup::"; continue
+            fi
+            # Тег мог остаться без релиза: тогда годится только тот же коммит.
+            have=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq '.object.sha' 2>/dev/null)
+            if [[ "$have" =~ ^[0-9a-f]{40}$ && "$have" != "$SHA" ]]; then
+              err "тег $TAG уже стоит на ${have:0:7}, а не на ${SHA:0:7}"; echo "::endgroup::"; continue
+            fi
+            # Прогон собран именно из этого коммита, и в коммите именно эта версия.
+            head=$(gh api "repos/$GH_REPO/actions/runs/$RUN" --jq '.head_sha' 2>/dev/null)
+            if [ "$head" != "$SHA" ]; then
+              err "прогон $RUN собран из «${head:0:7}», а не из ${SHA:0:7}"; echo "::endgroup::"; continue
+            fi
+            built=$(gh api "repos/$GH_REPO/contents/app/build.gradle.kts?ref=$SHA" --jq '.content' 2>/dev/null \
+              | base64 -d 2>/dev/null | grep -oP 'versionName\s*=\s*"\K[^"]+' | head -1)
+            if [ "$built" != "$VERSION" ]; then
+              err "в коммите ${SHA:0:7} версия «$built», а тег $TAG"; echo "::endgroup::"; continue
+            fi
+
+            work="work/$TAG"
+            rm -rf "$work"; mkdir -p "$work/apk" "$work/out"
+            if ! out=$(gh run download "$RUN" -n warpscout-debug-apk -D "$work/apk" 2>&1); then
+              err "$TAG: не скачался артефакт прогона $RUN: ${out:0:150}"; echo "::endgroup::"; continue
+            fi
+            SCOUT=$(find "$work/apk" -name '*scout*.apk' | head -1)
+            TUNNEL=$(find "$work/apk" -name '*tunnel*.apk' | head -1)
+            if [ -z "$SCOUT" ] || [ -z "$TUNNEL" ]; then
+              find "$work/apk" -type f
+              err "$TAG: в артефакте прогона $RUN нет одного из APK"; echo "::endgroup::"; continue
+            fi
+            cp "$SCOUT" "$work/out/WarpScout-$VERSION-scout.apk"
+            cp "$TUNNEL" "$work/out/WarpScout-$VERSION-tunnel.apk"
+            ( cd "$work/out" && sha256sum *.apk | tee SHA256SUMS.txt )
+
+            # Подпись проверял исходный прогон; здесь — ещё раз, если на раннере есть apksigner.
+            bad=0
+            if [ -n "$APKSIGNER" ]; then
+              for apk in "$work"/out/*.apk; do
+                if "$APKSIGNER" verify --print-certs "$apk" 2>&1 | grep -qi "$PINNED"; then
+                  echo "подпись совпадает с закреплённой: $(basename "$apk")"
+                else
+                  bad=1; err "$TAG: $(basename "$apk") подписан не закреплённым ключом"
+                fi
+              done
+            else
+              echo "::warning title=восстановление::apksigner не найден — подпись проверена только исходным прогоном"
+            fi
+            [ "$bad" = 0 ] || { echo "::endgroup::"; continue; }
+
+            # Описание — тот же шаблон, что у выпусков 1.10.25–1.10.26 (таблица — про тогдашние
+            # сборки), ссылка — на прогон, который собрал эти файлы.
+            {
+              echo "WarpScout $VERSION — Android-приложение для работы через Cloudflare WARP."
+              echo
+              echo "Находит в вашей сети адрес Cloudflare, который пропускает трафик, поднимает на нём"
+              echo "туннель WireGuard/AmneziaWG и держит его сам: переподключается после смены сети,"
+              echo "меняет точку входа, когда прежняя перестала отвечать, показывает, что реально"
+              echo "открывается, и умеет отправить часть сайтов в свою страну через второй туннель."
+              echo "Своих серверов и посредников нет: только адреса Cloudflare и телефон."
+              echo
+              echo "| Файл | Что внутри | applicationId |"
+              echo "|---|---|---|"
+              echo "| \`WarpScout-$VERSION-tunnel.apk\` | полная сборка: подбор, собственный туннель, проверки из-под него | \`dev.warpscout.app.tunnel\` |"
+              echo "| \`WarpScout-$VERSION-scout.apk\` | только подбор и экспорт конфигов для AmneziaVPN | \`dev.warpscout.app\` |"
+              echo
+              echo "**Что нужно:** Android 8.0 и новее; при первом подключении система спросит разрешение"
+              echo "на VPN. Для разделения по приложениям — доступ к списку приложений."
+              echo
+              echo "**Как поставить:** разрешить установку из неизвестных источников → открыть APK."
+              echo "Обновление ставится поверх предыдущей версии: настройки, ключи и подобранный конфиг"
+              echo "сохраняются. Обе сборки можно держать на телефоне одновременно — идентификаторы разные."
+              echo "Сборки подписаны debug-ключом: для сайдлоада и тестов, не для магазина."
+              echo
+              echo "Контрольные суммы SHA-256 — \`SHA256SUMS.txt\` в этом же релизе."
+              echo "Как устроено приложение, что и как часто оно запрашивает — в [README](https://github.com/${GH_REPO}/blob/main/README.md)."
+              echo "Собрано автоматически из коммита \`${SHA:0:7}\`, прогон: https://github.com/${GH_REPO}/actions/runs/${RUN}"
+              echo
+              echo "—"
+              echo "Предыдущие версии остаются на странице релизов. Вернуться на более старую можно, только"
+              echo "удалив текущую: поверх новой версии Android старую не ставит (настройки при этом сотрутся)."
+            } > "$work/notes.md"
+
+            if ! out=$(gh release create "$TAG" "$work"/out/*.apk "$work/out/SHA256SUMS.txt" \
+                --target "$SHA" --title "WarpScout $VERSION" --notes-file "$work/notes.md" --latest=false 2>&1); then
+              err "$TAG: релиз не создан: ${out:0:170}"; echo "::endgroup::"; continue
+            fi
+            echo "$out"
+            assets=$(gh release view "$TAG" --json assets --jq '[.assets[].name] | join(", ")' 2>/dev/null)
+            echo "::notice title=восстановление::$TAG восстановлен из прогона $RUN: $assets"
+            echo "::endgroup::"
+          done < <(printf '%s\n' "$LIST" | tr ',;' '\n\n')
+
+          echo "релизы сейчас:"
+          gh api "repos/$GH_REPO/releases?per_page=20" --jq '.[] | "\(.tag_name)\t\(.created_at)"' || true
+          latest=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name 2>/dev/null)
+          echo "::notice title=восстановление::Latest = $latest"
+          exit $fail
