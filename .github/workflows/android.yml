@@ -244,6 +244,36 @@ jobs:
           [ "$n" -gt 0 ] || { echo "::error title=подпись::не нашёл ни одного APK"; fail=1; }
           exit $fail
 
+      # С 1.10.32: «Защита приложений» Samsung (движок McAfee) назвала 1.10.31 вредоносной — из-за
+      # разрешения ставить другие приложения. Проверяем итоговый манифест готовых APK (вместе с
+      # библиотеками): таких разрешений там быть не должно. Полный список — в заметках сборки.
+      - name: "Разрешения готовых APK: без установки приложений и без списка всех приложений"
+        run: |-
+          set -o pipefail
+          AAPT2="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/35.0.0/aapt2"
+          [ -x "$AAPT2" ] || AAPT2=$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" -name aapt2 -type f | sort | tail -1)
+          echo "aapt2: $AAPT2"
+          FORBIDDEN="REQUEST_INSTALL_PACKAGES QUERY_ALL_PACKAGES PACKAGE_USAGE_STATS REQUEST_DELETE_PACKAGES"
+          fail=0
+          n=0
+          while IFS= read -r apk; do
+            [ -n "$apk" ] || continue
+            n=$((n + 1))
+            perms=$("$AAPT2" dump permissions "$apk" 2>&1) || { echo "$perms"; echo "::error title=разрешения::aapt2 не прочитал $apk"; fail=1; continue; }
+            echo "== $apk"
+            echo "$perms"
+            list=$(echo "$perms" | grep -oE "android\.permission\.[A-Z_]+" | sed 's/android.permission.//' | sort -u | tr '\n' ' ' || true)
+            echo "::notice title=разрешения $(basename "$apk")::$list"
+            for p in $FORBIDDEN; do
+              if echo "$perms" | grep -qE "android\.permission\.$p([^A-Z_]|\$)"; then
+                echo "::error title=разрешения::$(basename "$apk") просит $p — антивирусы считают это признаком вредоносного приложения"
+                fail=1
+              fi
+            done
+          done < <(find app/build/outputs/apk -name '*.apk' | sort)
+          [ "$n" -gt 0 ] || { echo "::error title=разрешения::не нашёл ни одного APK"; fail=1; }
+          exit $fail
+
       - uses: actions/upload-artifact@v4
         if: success()
         with:
