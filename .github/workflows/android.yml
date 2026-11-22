@@ -435,10 +435,21 @@ jobs:
             if gh release view "$TAG" > /dev/null 2>&1; then
               echo "::notice title=восстановление::$TAG уже есть — не трогаю"; echo "::endgroup::"; continue
             fi
-            # Тег мог остаться без релиза: тогда годится только тот же коммит.
+            # Тег уже есть — релиз публикуется на нём (--verify-tag). Годится тот же коммит или
+            # служебный коммит прямо поверх него. Служебный нужен, когда workflow исходного коммита
+            # отличается от main: тогда GITHUB_TOKEN ставить тег не вправе (403), тег ставится
+            # вручную на коммит с тем же кодом, у которого из старого workflow убран запуск по тегу.
+            target=(--target "$SHA")
             have=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq '.object.sha' 2>/dev/null)
-            if [[ "$have" =~ ^[0-9a-f]{40}$ && "$have" != "$SHA" ]]; then
-              err "тег $TAG уже стоит на ${have:0:7}, а не на ${SHA:0:7}"; echo "::endgroup::"; continue
+            if [[ "$have" =~ ^[0-9a-f]{40}$ ]]; then
+              if [ "$have" != "$SHA" ]; then
+                parent=$(gh api "repos/$GH_REPO/git/commits/$have" --jq '.parents[0].sha' 2>/dev/null)
+                if [ "$parent" != "$SHA" ]; then
+                  err "тег $TAG стоит на ${have:0:7}: это не ${SHA:0:7} и не коммит поверх него"; echo "::endgroup::"; continue
+                fi
+                echo "тег $TAG стоит на служебном коммите ${have:0:7} поверх ${SHA:0:7}"
+              fi
+              target=(--verify-tag)
             fi
             # Прогон собран именно из этого коммита, и в коммите именно эта версия.
             head=$(gh api "repos/$GH_REPO/actions/runs/$RUN" --jq '.head_sha' 2>/dev/null)
@@ -515,7 +526,7 @@ jobs:
             } > "$work/notes.md"
 
             if ! out=$(gh release create "$TAG" "$work"/out/*.apk "$work/out/SHA256SUMS.txt" \
-                --target "$SHA" --title "WarpScout $VERSION" --notes-file "$work/notes.md" --latest=false 2>&1); then
+                "${target[@]}" --title "WarpScout $VERSION" --notes-file "$work/notes.md" --latest=false 2>&1); then
               err "$TAG: релиз не создан: ${out:0:170}"; echo "::endgroup::"; continue
             fi
             echo "$out"
