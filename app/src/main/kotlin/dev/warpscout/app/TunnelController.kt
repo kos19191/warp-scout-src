@@ -79,6 +79,12 @@ interface TunnelController {
      * приходит в снимке состояния: `linkWeb`, `linkTg`, `linkMs`.
      */
     fun requestLinkCheck() {}
+
+    /**
+     * Попросить сервис замерить скорость через туннель полной загрузкой (до 10 МБ / 6 с). Итог
+     * приходит в снимке состояния: `speedState`, `speedKbps`, `speedPingMs`.
+     */
+    fun requestSpeedTest() {}
 }
 
 class UnsupportedTunnelController : TunnelController {

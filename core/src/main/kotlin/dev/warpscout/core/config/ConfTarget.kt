@@ -119,4 +119,62 @@ object SplitRoutes {
     /** Обратная задача: из конфига вытащить маршруты (для «показать, что реально попадёт в туннель»). */
     fun prefixesOf(allowedIps: String): List<String> =
         allowedIps.split(',').map { it.trim() }.filter { it.isNotEmpty() && it.contains('/') }
+
+    /**
+     * DNS-серверы конфига — в маршруты туннеля, если маршруты раздельные.
+     *
+     * Зачем. При «весь трафик» DNS и так идёт через туннель. А в режиме «только нужные сайты»
+     * адрес DNS (1.1.1.1, 8.8.8.8…) в маршруты обычно не входит — запросы идут мимо туннеля, и с
+     * августа 2026 их ответы подменяет оператор (об этом пишут и в NetFix): сайт «из списка»
+     * получает чужой адрес, и маршрут к нему уже не помогает. Маршрут /32 (/128) к самому DNS
+     * отправляет запросы внутрь туннеля, где подменять их некому.
+     *
+     * Уже покрытые адреса и полный туннель не трогаем: строка возвращается как была.
+     */
+    fun withDns(allowedIps: String, dns: List<String>): String {
+        val prefixes = prefixesOf(allowedIps)
+        if (prefixes.isEmpty()) return allowedIps
+        val v4All = prefixes.any { it.replace(" ", "") == "0.0.0.0/0" }
+        val v6All = prefixes.any { it.replace(" ", "") == "::/0" }
+        val add = ArrayList<String>()
+        for (raw in dns) {
+            val ip = raw.trim()
+            if (ip.isEmpty()) continue
+            if (ip.contains(':')) {
+                if (v6All || prefixes.any { it.substringBefore('/').trim().equals(ip, ignoreCase = true) }) continue
+                add += "$ip/128"
+            } else {
+                val addr = v4ToInt(ip) ?: continue
+                if (v4All || prefixes.any { coversV4(it, addr) }) continue
+                add += "$ip/32"
+            }
+        }
+        if (add.isEmpty()) return allowedIps
+        return (prefixes + add).distinct().joinToString(", ")
+    }
+
+    /** «a.b.c.d» → число; null — не IPv4. */
+    private fun v4ToInt(ip: String): Int? {
+        val parts = ip.split('.')
+        if (parts.size != 4) return null
+        var out = 0
+        for (p in parts) {
+            val b = p.trim().toIntOrNull() ?: return null
+            if (b !in 0..255) return null
+            out = (out shl 8) or b
+        }
+        return out
+    }
+
+    /** Префикс IPv4 «сеть/длина» накрывает адрес. */
+    private fun coversV4(prefix: String, addr: Int): Boolean {
+        val net = prefix.substringBefore('/').trim()
+        if (net.contains(':')) return false
+        val bits = prefix.substringAfter('/', "").trim().toIntOrNull() ?: return false
+        if (bits !in 0..32) return false
+        val base = v4ToInt(net) ?: return false
+        if (bits == 0) return true
+        val mask = -1 shl (32 - bits)
+        return (base and mask) == (addr and mask)
+    }
 }

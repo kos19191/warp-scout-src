@@ -1,58 +1,67 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Выбор резервной точки (нижняя шторка упрощённого экрана). Строки — item_backup_row, по одной на
-  точку из последнего подбора; у каждой — что о ней знает дозор.
+  Выбор резервной точки (нижняя шторка упрощённого экрана). Две части — Wi-Fi и мобильная сеть:
+  у каждой своя тройка лучших и своя резервная, обе можно выбрать, находясь на Wi-Fi. Строки —
+  item_backup_row, у каждой — что о точке знает дозор. Отметка только запоминает точку; перейти
+  сейчас — отдельная кнопка в строке.
 -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:orientation="vertical"
-    android:paddingStart="20dp"
-    android:paddingTop="8dp"
-    android:paddingEnd="20dp"
-    android:paddingBottom="20dp">
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/sheet_backup_title"
-        android:textAppearance="?attr/textAppearanceTitleLarge" />
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingTop="6dp"
-        android:paddingBottom="10dp"
-        android:text="@string/sheet_backup_hint"
-        android:textAppearance="?attr/textAppearanceBodySmall"
-        android:textColor="?attr/colorOnSurfaceVariant" />
-
-    <TextView
-        android:id="@+id/sheetEmpty"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/sheet_empty"
-        android:textAppearance="?attr/textAppearanceBodyMedium"
-        android:visibility="gone" />
+    android:layout_height="wrap_content">
 
     <LinearLayout
-        android:id="@+id/sheetRows"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical" />
+        android:orientation="vertical"
+        android:paddingStart="20dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="20dp"
+        android:paddingBottom="20dp">
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/sheetClear"
-        style="@style/Widget.Material3.Button.TextButton"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:text="@string/sheet_clear" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/sheet_backup_title"
+            android:textAppearance="?attr/textAppearanceTitleLarge" />
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/sheetRescan"
-        style="@style/Widget.Material3.Button.TextButton"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/sheet_rescan" />
-</LinearLayout>
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:text="@string/sheet_backup_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall"
+            android:textColor="?attr/colorOnSurfaceVariant" />
+
+        <TextView
+            android:id="@+id/sheetEmpty"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/sheet_empty"
+            android:textAppearance="?attr/textAppearanceBodyMedium"
+            android:visibility="gone" />
+
+        <!-- Части «Wi-Fi» и «Мобильная сеть»: заголовок, строки, «Снять отметку» — собираются в коде. -->
+        <LinearLayout
+            android:id="@+id/sheetRows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/sheetScanMobile"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/sheet_scan_mobile"
+            android:visibility="gone" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/sheetRescan"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/sheet_rescan" />
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

@@ -65,6 +65,13 @@ interface TunnelVerifier {
         isCancelled: () -> Boolean
     ): List<ResourceResult> = verify(config, checks, settleMs)
 
+    /**
+     * Скорость загрузки через туннель, измеренная последним [verify], Кбит/с (-1 — не мерили).
+     * Отдельным методом, а не полем результата: проверки ресурсов — это список «открылось или
+     * нет», а скорость — одно число на кандидата. Реализации без замера ничего не меняют.
+     */
+    fun lastSpeedKbps(): Int = -1
+
     fun stop() {}
 }
 
@@ -311,21 +318,28 @@ class AutoTuner(
                     emptyList()
                 }
             val ok = results.count { it.ok }
-            progress.log("  ${cand.config.endpoint.render()} · ${cand.junk.name} → ${ok}/${spec.resources.size} ресурсов")
+            // Скорость через туннель этого кандидата: её мерит проверяющий сразу после сайтов.
+            val speed = if (results.isEmpty()) -1 else runCatching { tv.lastSpeedKbps() }.getOrDefault(-1)
+            progress.log(
+                "  ${cand.config.endpoint.render()} · ${cand.junk.name} → ${ok}/${spec.resources.size} ресурсов" +
+                    (if (speed > 0) " · ${dev.warpscout.core.net.SpeedTest.human(speed)}" else "")
+            )
             val parts = Scoring.evaluate(cand.stats, cand.stats.replies > 0, ok, spec.resources.size, weights)
             verified.add(
                 cand.copy(
                     parts = parts,
                     resourcesOk = ok,
                     resourcesTotal = spec.resources.size,
+                    speedKbps = speed,
                     config = cand.config.copy(name = "${spec.namePrefix}-${ok}of${spec.resources.size}")
                 )
             )
         }
         // Проверенные изнутри важнее непроверенных: «открылось 7 из 9 сайтов» — это факт, а
         // сетевой балл — только догадка. Раньше списки перемешивались по баллу, и победить
-        // мог кандидат, который отвечал на handshake, но не пускал трафик.
-        finalList = verified.sortedByDescending { it.score } +
+        // мог кандидат, который отвечал на handshake, но не пускал трафик. Среди одинаково
+        // открывшихся выше тот, через кого быстрее качается (ступенями, см. SpeedTest.bucket).
+        finalList = verified.sortedWith(verifiedOrder()) +
             ordered.drop(verified.size).sortedByDescending { it.score }
     } else if (tunnel == null && spec.verifyThroughTunnel) {
         notes += "Сборка без встроенного туннеля: проверка «изнутри» пропущена, отранжировано по сетевым пробам."
@@ -333,6 +347,15 @@ class AutoTuner(
 
     return finish(spec, started, notes, finalList, resourceResults, account, progress, endpoints.size)
     }
+
+    /**
+     * Порядок проверенных изнутри: сколько открылось → ступень скорости через туннель → балл.
+     * Один и тот же для списка и победителя, иначе «лучший» и первая строка топ-3 расходились бы.
+     */
+    private fun verifiedOrder(): Comparator<Candidate> =
+        compareByDescending<Candidate> { it.resourcesOk }
+            .thenByDescending { dev.warpscout.core.net.SpeedTest.bucket(it.speedKbps) }
+            .thenByDescending { it.score }
 
     /** Когда приватного ключа нет: только «закрыт/открыт» и TLS. Честно помечаем низкую уверенность. */
     private fun runHeuristicOnly(
@@ -400,9 +423,7 @@ class AutoTuner(
         // проверяли — обычный максимум балла.
         val verifiedAny = candidates.filter { it.resourcesTotal > 0 }
         val best = if (verifiedAny.any { it.resourcesOk > 0 }) {
-            verifiedAny.sortedWith(
-                compareByDescending<Candidate> { it.resourcesOk }.thenByDescending { it.score }
-            ).firstOrNull()
+            verifiedAny.sortedWith(verifiedOrder()).firstOrNull()
         } else {
             candidates.maxByOrNull { it.score }
         }
@@ -412,6 +433,7 @@ class AutoTuner(
             else buildString {
                 append("Лучший: ${best.config.endpoint.render()} · ${best.junk.name} · ${best.score} балла")
                 if (best.resourcesTotal > 0) append(" · изнутри открылось ${best.resourcesOk}/${best.resourcesTotal}")
+                if (best.speedKbps > 0) append(" · ${dev.warpscout.core.net.SpeedTest.human(best.speedKbps)}")
             }
         )
         // Явно говорим, что профили шума сравнивались: это и есть ответ на «какой метод эффективнее».

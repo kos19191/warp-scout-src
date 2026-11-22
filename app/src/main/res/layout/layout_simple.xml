@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Упрощённый экран: одна большая кнопка, связь и резервная точка. Всё остальное — в расширенном
+  Упрощённый экран: одна большая кнопка, скорость, резервная точка и приложения. В шапке — два
+  частых действия: подобрать точку заново и отправить журнал. Всё остальное — в расширенном
   режиме (еле заметный тумблер внизу, выбор запоминается).
 
   Тема — как у всего приложения: светлая или тёмная по системе (или по выбору в настройках).
@@ -8,6 +9,7 @@
   лозунгов. Подписи — только о состоянии: «Подключено», «Выключено», а не «починить» и «обойти».
 -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:fillViewport="true">
@@ -36,12 +38,37 @@
 
             <TextView
                 android:id="@+id/simpleBrand"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="10dp"
+                android:layout_weight="1"
                 android:text="@string/simple_brand"
                 android:textAppearance="?attr/textAppearanceTitleLarge"
                 android:textStyle="bold" />
+
+            <!-- Подобрать точку заново: туннель на время замеров гаснет и возвращается сам. -->
+            <ImageButton
+                android:id="@+id/simpleRescan"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/simple_rescan_desc"
+                android:padding="10dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_rescan"
+                android:tint="?attr/colorOnSurfaceVariant" />
+
+            <!-- Отправить журнал: .txt одним нажатием (сохраняется в «Загрузки» и открывается «Поделиться»). -->
+            <ImageButton
+                android:id="@+id/simpleSendLog"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/simple_send_log_desc"
+                android:padding="10dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_send_log"
+                android:tint="?attr/colorOnSurfaceVariant" />
         </LinearLayout>
 
         <!-- Пустое место над и под кнопкой делится поровну: кнопка стоит в центре экрана. -->
@@ -132,15 +159,20 @@
             android:baselineAligned="false"
             android:orientation="horizontal">
 
-            <!-- Связь: проверка настоящим запросом через туннель (Cloudflare и Telegram). -->
+            <!--
+              Скорость через туннель: крупно — последний замер (сам после подключения, по нажатию —
+              полный), мелко — пинг и сколько качается сейчас. При выбранных приложениях — подпись
+              «для N приложений»: через туннель идут только они.
+            -->
             <com.google.android.material.card.MaterialCardView
-                android:id="@+id/simpleCardLink"
+                android:id="@+id/simpleCardSpeed"
                 style="@style/Card.Section"
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
                 android:layout_marginEnd="6dp"
                 android:layout_weight="1"
                 android:clickable="true"
+                android:contentDescription="@string/simple_speed_desc"
                 android:focusable="true">
 
                 <LinearLayout
@@ -152,37 +184,48 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="@string/simple_link_title"
+                        android:text="@string/simple_speed_title"
                         android:textAllCaps="true"
                         android:textAppearance="?attr/textAppearanceLabelMedium"
                         android:textColor="?attr/colorOnSurfaceVariant" />
 
                     <TextView
-                        android:id="@+id/simpleLinkValue"
+                        android:id="@+id/simpleSpeedValue"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
+                        android:ellipsize="end"
                         android:maxLines="1"
                         android:text="@string/simple_dash"
                         android:textAppearance="?attr/textAppearanceTitleLarge"
                         android:textStyle="bold" />
 
                     <TextView
-                        android:id="@+id/simpleLinkWeb"
+                        android:id="@+id/simpleSpeedPing"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
+                        android:ellipsize="end"
                         android:maxLines="1"
-                        android:text="@string/simple_link_web"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
                     <TextView
-                        android:id="@+id/simpleLinkTg"
+                        android:id="@+id/simpleSpeedNow"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
+                        android:ellipsize="end"
                         android:maxLines="1"
-                        android:text="@string/simple_link_tg"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <TextView
+                        android:id="@+id/simpleSpeedApps"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:ellipsize="end"
+                        android:maxLines="1"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:textColor="?attr/colorPrimary"
+                        android:visibility="gone" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
@@ -204,8 +247,11 @@
                     android:padding="14dp">
 
                     <TextView
+                        android:id="@+id/simpleBackupTitle"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
+                        android:ellipsize="end"
+                        android:maxLines="1"
                         android:text="@string/simple_backup_title"
                         android:textAllCaps="true"
                         android:textAppearance="?attr/textAppearanceLabelMedium"
@@ -240,6 +286,22 @@
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
         </LinearLayout>
+
+        <!--
+          Приложения в туннеле: все, только выбранные или все, кроме выбранных. Выбор — в шторке со
+          списком и поиском; «Сохранить» при включённом туннеле переподключает его.
+        -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/simpleApps"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="@string/simple_apps_all"
+            app:icon="@drawable/ic_apps"
+            app:iconGravity="textStart" />
 
         <!-- Еле заметный тумблер режима: нужен редко, и внимание на себя не тянет. -->
         <LinearLayout

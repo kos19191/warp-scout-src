@@ -7,7 +7,12 @@ import java.io.File
 import java.util.Base64
 
 /**
- * Три лучших конфига из последнего подбора.
+ * Три лучших конфига из последнего подбора — отдельно для Wi-Fi и для мобильной сети.
+ *
+ * Две тройки, а не одна: адреса Cloudflare не универсальны, и точка, лучшая на домашнем Wi-Fi, на
+ * мобильной сети часто молчит. Раньше подбор на Wi-Fi затирал тройку, найденную на мобильной, и
+ * наоборот. Теперь подбор заменяет только тройку своей сети; мобильную можно подобрать и не уходя
+ * с Wi-Fi (см. Engine.startMobile).
  *
  * Зачем отдельно от [TuningCache]: кеш отвечает на вопрос «с чего начать следующий скан», и ему
  * достаточно одной точки. Здесь другое — «чем подключаться, если текущая точка перестала работать».
@@ -24,6 +29,13 @@ object ConfigShortlist {
 
     /** Больше трёх не нужно: переключение должно быть быстрым выбором, а не вторым списком конфигов. */
     const val MAX = 3
+
+    /** Группы сетей для двух троек. Всё, что не мобильная сеть, считается «Wi-Fi». */
+    const val GROUP_WIFI = "wifi"
+    const val GROUP_MOBILE = "mobile"
+
+    /** Группа по виду сети записи (`TuningCache.transportOf`: wifi / mobile / ethernet / none). */
+    fun group(network: String): String = if (network.trim() == GROUP_MOBILE) GROUP_MOBILE else GROUP_WIFI
 
     /** Через неделю адреса и блокировки успевают поменяться — держим список только как подсказку. */
     private const val MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000
@@ -42,7 +54,14 @@ object ConfigShortlist {
         val configText: String,
         val savedAt: Long,
         /** Вид сети на момент скана: «другая сеть» — полезная подсказка, если точка не поднялась. */
-        val network: String
+        val network: String,
+        /** Скорость через туннель этой точки при подборе, Кбит/с; -1 — не мерили. */
+        val speedKbps: Int = -1,
+        /**
+         * Как проверяли: true — только рукопожатием (мобильная сеть, подобранная с Wi-Fi: туннель
+         * через неё не поднять, не уходя с Wi-Fi), false — как обычно.
+         */
+        val handshakeOnly: Boolean = false
     )
 
     /**
@@ -72,28 +91,61 @@ object ConfigShortlist {
     }
 
     /**
-     * Список для показа: только свежие записи и только с читаемым конфигом. Порядок — как сохраняли,
-     * то есть от лучшего к третьему.
+     * Все свежие записи с читаемым конфигом: до трёх на каждую группу сетей. Порядок внутри
+     * группы — как сохраняли, то есть от лучшего к третьему.
      */
     fun load(context: Context): List<Entry> {
         val file = File(context.filesDir, FILE_NAME)
         if (!file.isFile) return emptyList()
         val raw = runCatching { file.readText() }.getOrNull() ?: return emptyList()
         val now = System.currentTimeMillis()
-        return raw.split(SEPARATOR).mapNotNull { block -> parse(block.trim()) }
+        val fresh = raw.split(SEPARATOR).mapNotNull { block -> parse(block.trim()) }
             .filter { now - it.savedAt <= MAX_AGE_MS }
             .filter { it.endpoint.isNotBlank() && it.configText.isNotBlank() }
-            .take(MAX)
+        val wifi = fresh.filter { group(it.network) == GROUP_WIFI }.take(MAX)
+        val mobile = fresh.filter { group(it.network) == GROUP_MOBILE }.take(MAX)
+        return wifi + mobile
+    }
+
+    /** Тройка одной группы сетей ([GROUP_WIFI] или [GROUP_MOBILE]). */
+    fun forGroup(context: Context, which: String): List<Entry> =
+        load(context).filter { group(it.network) == which }
+
+    /** Все записи, тройка текущей сети — первой: с неё и начинается перебор. */
+    fun ordered(context: Context, network: String): List<Entry> {
+        val all = load(context)
+        val mine = group(network)
+        return all.filter { group(it.network) == mine } + all.filter { group(it.network) != mine }
     }
 
     /**
-     * Запомнить тройку. Пишем через временный файл: если процесс убьют посреди записи, на месте
-     * останется либо старый список, либо новый, но не половина строки — иначе разбор конфига
-     * молча ломался бы, а «переключиться» переставало работать без всякой причины.
+     * Запомнить тройку подбора для её сети: тройка другой сети остаётся как была. Все записи
+     * [entries] — из одного подбора, то есть одной группы.
      */
     fun save(context: Context, entries: List<Entry>) {
         val list = entries.filter { it.endpoint.isNotBlank() && it.configText.isNotBlank() }.take(MAX)
         if (list.isEmpty()) return
+        val mine = group(list.first().network)
+        val others = load(context).filter { group(it.network) != mine }
+        write(context, list + others)
+    }
+
+    /** Переписать список целиком (например, без испорченной записи). */
+    fun saveAll(context: Context, entries: List<Entry>) {
+        val list = entries.filter { it.endpoint.isNotBlank() && it.configText.isNotBlank() }
+        if (list.isEmpty()) {
+            forget(context)
+            return
+        }
+        write(context, list)
+    }
+
+    /**
+     * Запись через временный файл: если процесс убьют посреди записи, на месте останется либо
+     * старый список, либо новый, но не половина строки — иначе разбор конфига молча ломался бы, а
+     * «переключиться» переставало работать без всякой причины.
+     */
+    private fun write(context: Context, list: List<Entry>) {
         val text = list.joinToString("\n$SEPARATOR\n") { e ->
             buildString {
                 append("endpoint=").append(e.endpoint).append('\n')
@@ -103,6 +155,8 @@ object ConfigShortlist {
                 append("total=").append(e.resourcesTotal).append('\n')
                 append("saved=").append(e.savedAt).append('\n')
                 append("network=").append(e.network).append('\n')
+                append("speed=").append(e.speedKbps).append('\n')
+                append("hsOnly=").append(if (e.handshakeOnly) 1 else 0).append('\n')
                 append("conf=").append(encode(e.configText)).append('\n')
             }
         }
@@ -141,7 +195,9 @@ object ConfigShortlist {
             resourcesTotal = map["total"]?.toIntOrNull() ?: 0,
             configText = text,
             savedAt = map["saved"]?.toLongOrNull() ?: 0L,
-            network = map["network"].orEmpty()
+            network = map["network"].orEmpty(),
+            speedKbps = map["speed"]?.toIntOrNull() ?: -1,
+            handshakeOnly = map["hsOnly"] == "1"
         )
     }
 

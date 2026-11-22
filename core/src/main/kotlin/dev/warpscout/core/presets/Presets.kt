@@ -5,18 +5,31 @@ import dev.warpscout.core.model.ResourceCheck
 /** Готовые наборы настроек — то, что обычно подбирают вручную в Telegram-ботах и на форуме. */
 object Presets {
 
-    data class DnsPreset(val name: String, val servers: List<String>, val note: String)
+    /**
+     * Набор DNS для конфига. [host] — имя сервиса: если задано, адреса берутся по нему (раз в
+     * сутки и при выборе), а [servers] остаются запасом на случай, когда имя не разрешилось.
+     * Так у «умных» DNS (они отдают адреса прокси для ChatGPT и Gemini) список не протухает:
+     * их адреса меняются, а имя остаётся.
+     */
+    data class DnsPreset(val name: String, val servers: List<String>, val note: String, val host: String = "")
 
+    // ВАЖНО: настройка хранит НОМЕР набора — новые добавляем только в конец, иначе у людей молча
+    // сменится выбранный DNS.
     val DNS = listOf(
         DnsPreset("Cloudflare", listOf("1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"),
             "по умолчанию у генератора"),
         DnsPreset("Google", listOf("8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844"), ""),
         DnsPreset("AdGuard", listOf("179.254.166.171", "164.5.224.81", "2a12:bec4:1bb0:27dd::2", "2a13:82c0:0:d::3"),
             "реклама + трекеры"),
-        DnsPreset("Безмежа.У", listOf("143.20.64.55", "31.58.216.201"), "российский DoH-фолбэк"),
+        DnsPreset("Безмежа.У", listOf("143.20.64.55", "31.58.216.201"), "ChatGPT/Gemini, российский DoH-фолбэк",
+            host = "dns.bezmezhau.com"),
         DnsPreset("GeoHide", listOf("5.175.161.3", "5.175.161.40", "37.221.93.141", "37.221.93.128",
-            "45.13.237.213", "31.25.239.132", "143.20.64.192"), ""),
-        DnsPreset("GeoDema", listOf("179.236.130.10", "179.236.130.11"), "")
+            "45.13.237.213", "31.25.239.132", "143.20.64.192"), "ChatGPT/Gemini", host = "dns.geohide.ru"),
+        DnsPreset("GeoDema", listOf("179.236.130.10", "179.236.130.11"), ""),
+        // «Умные» DNS из списка NetFix: адреса только по имени — своих запасных у нас нет.
+        DnsPreset("WLRus", emptyList(), "ChatGPT/Gemini · адрес по имени", host = "dns.wlrus.cfd"),
+        DnsPreset("Comss", emptyList(), "ChatGPT/Gemini · адрес по имени", host = "dns.comss.one"),
+        DnsPreset("Dagami", emptyList(), "ChatGPT/Gemini · адрес по имени", host = "dns.dagami.ru"),
     )
 
     /**

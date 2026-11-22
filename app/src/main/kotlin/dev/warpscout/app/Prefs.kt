@@ -50,6 +50,9 @@ class Prefs(private val context: Context) {
         get() = sp.getInt("dns", 0)
         set(v) = sp.edit().putInt("dns", v).apply()
 
+    /** Адреса выбранного DNS для конфига: найденные по имени и запасные (см. [DnsBook]). */
+    fun dnsServers(): List<String> = DnsBook.servers(context, dnsIndex)
+
     var keepalive: Int
         get() = sp.getInt("keepalive", 25)
         set(v) = sp.edit().putInt("keepalive", v.coerceIn(0, 120)).apply()
@@ -264,6 +267,9 @@ class Prefs(private val context: Context) {
     /**
      * Резервная точка, выбранная человеком в «Резервном» (host:port; пусто — не выбрана). Её же
      * получает сервис: если текущая точка замолчит, он перейдёт на неё первой.
+     *
+     * С 1.10.28 это резервная для Wi-Fi (и любой немобильной сети), а для мобильной — своя,
+     * [backupMobile]. Прежнее единственное значение остаётся здесь: выбирали его чаще всего дома.
      */
     var backupEndpoint: String
         get() = sp.getString("backupEndpoint", "").orEmpty()
@@ -271,6 +277,77 @@ class Prefs(private val context: Context) {
             sp.edit().putString("backupEndpoint", v.trim()).apply()
             pushToService()
         }
+
+    /** Резервная точка для мобильной сети (см. [backupEndpoint]). */
+    var backupMobile: String
+        get() = sp.getString("backupMobile", "").orEmpty()
+        set(v) {
+            sp.edit().putString("backupMobile", v.trim()).apply()
+            pushToService()
+        }
+
+    /** Резервная точка группы сетей (`ConfigShortlist.GROUP_WIFI` / `GROUP_MOBILE`). */
+    fun backupFor(group: String): String =
+        if (group == ConfigShortlist.GROUP_MOBILE) backupMobile else backupEndpoint
+
+    /**
+     * Отметить резервную для группы сетей. Только запоминает: туннель не трогается — переход
+     * сейчас делает отдельная кнопка «Перейти сейчас».
+     */
+    fun setBackupFor(group: String, endpoint: String) {
+        if (group == ConfigShortlist.GROUP_MOBILE) backupMobile = endpoint else backupEndpoint = endpoint
+    }
+
+    // ---------------------------------------------- переключатели новых функций
+    //
+    // Каждую новую автоматику можно выключить, не дожидаясь новой версии: если на каком-то
+    // телефоне или сети она ведёт себя плохо, человек сам решает, без неё лучше или с ней.
+    // По умолчанию всё включено. Читает их сервис — поэтому каждая запись уходит в его снимок.
+
+    /** Поднимать туннель самому после перезагрузки телефона и обновления приложения. */
+    var featAutoStart: Boolean
+        get() = sp.getBoolean("featAutoStart", true)
+        set(v) {
+            sp.edit().putBoolean("featAutoStart", v).apply()
+            pushToService()
+        }
+
+    /** Проверка связи дважды не прошла — переподключаться. */
+    var featLinkReconnect: Boolean
+        get() = sp.getBoolean("featLinkReconnect", true)
+        set(v) {
+            sp.edit().putBoolean("featLinkReconnect", v).apply()
+            pushToService()
+        }
+
+    /** Короткий замер скорости после подключения (он же ловит «заморозку»). */
+    var featSpeedAuto: Boolean
+        get() = sp.getBoolean("featSpeedAuto", true)
+        set(v) {
+            sp.edit().putBoolean("featSpeedAuto", v).apply()
+            pushToService()
+        }
+
+    /** Загрузка дважды «замёрзла» — переходить на другую точку. */
+    var featFreezeReconnect: Boolean
+        get() = sp.getBoolean("featFreezeReconnect", true)
+        set(v) {
+            sp.edit().putBoolean("featFreezeReconnect", v).apply()
+            pushToService()
+        }
+
+    /** В раздельном режиме отправлять DNS-запросы через туннель. */
+    var featDnsInTunnel: Boolean
+        get() = sp.getBoolean("featDnsInTunnel", true)
+        set(v) {
+            sp.edit().putBoolean("featDnsInTunnel", v).apply()
+            pushToService()
+        }
+
+    /** Перед переключением на выбранную точку спрашивать её пробой (рабочий туннель не трогая). */
+    var featProbeBeforeSwitch: Boolean
+        get() = sp.getBoolean("featProbeBeforeSwitch", true)
+        set(v) = sp.edit().putBoolean("featProbeBeforeSwitch", v).apply()
 
     /**
      * Вид главного экрана: [UI_SIMPLE] — одна кнопка, запасная точка и проверка связи;
@@ -432,17 +509,37 @@ class Prefs(private val context: Context) {
      * который переписывается здесь при каждом изменении.
      */
     private fun pushToService() {
-        dev.warpscout.app.status.ServiceSettingsStore.write(
-            context,
-            ServiceSettings(
-                secondExitOn = secondExitOn,
-                secondConf = secondConf,
-                secondCidrs = secondCidrs,
-                appsMode = appsMode,
-                appsSelected = appsSelected.toList().sorted(),
-                failover = failoverQueue,
-                backup = backupEndpoint,
-            )
+        dev.warpscout.app.status.ServiceSettingsStore.write(context, serviceSettings())
+    }
+
+    /**
+     * Снимок для сервиса — в одном месте. Раньше он собирался здесь и ещё раз в
+     * `ServiceSettingsStore.syncFromPrefs`, и новое поле легко было добавить только в одну копию.
+     */
+    fun serviceSettings(): ServiceSettings {
+        // Тройки подбора для каждой сети — сервис перебирает их сам, когда текущая точка замолчит.
+        val shortlist = runCatching { ConfigShortlist.load(context) }.getOrDefault(emptyList())
+        fun endpointsOf(group: String): List<String> = shortlist
+            .filter { ConfigShortlist.group(it.network) == group }
+            .map { it.endpoint.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        return ServiceSettings(
+            secondExitOn = secondExitOn,
+            secondConf = secondConf,
+            secondCidrs = secondCidrs,
+            appsMode = appsMode,
+            appsSelected = appsSelected.toList().sorted(),
+            failover = failoverQueue,
+            backup = backupEndpoint,
+            backupMobile = backupMobile,
+            listWifi = endpointsOf(ConfigShortlist.GROUP_WIFI),
+            listMobile = endpointsOf(ConfigShortlist.GROUP_MOBILE),
+            autoStart = featAutoStart,
+            linkReconnect = featLinkReconnect,
+            speedAuto = featSpeedAuto,
+            freezeReconnect = featFreezeReconnect,
+            dnsInTunnel = featDnsInTunnel,
         )
     }
 
@@ -464,7 +561,9 @@ class Prefs(private val context: Context) {
         junkProfiles = junkPool,
         net = NetSettings(attempts = attempts, timeoutMs = timeoutMs, concurrency = concurrency),
         resources = if (checkResources) Presets.RESOURCE_CHECKS + listChecks() else emptyList(),
-        dns = Presets.DNS[dnsIndex.coerceIn(0, Presets.DNS.size - 1)].servers,
+        // Адреса выбранного DNS — с учётом найденных по имени (см. DnsBook): у «умных» DNS они
+        // меняются, а без адресов набор подставил бы пустой список.
+        dns = dnsServers(),
         mtu = mtu,
         allowedIps = allowedIps(),
         keepalive = keepalive.takeIf { it > 0 },

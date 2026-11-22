@@ -26,31 +26,48 @@ object EndpointMemory {
 
     private const val FILE = "endpoint-memory.txt"
 
-    /** Видов сети единицы; ограничение нужно, чтобы файл не рос из-за случайных записей. */
-    private const val MAX_ENTRIES = 8
+    /**
+     * Сетей немного, но теперь ключ различает операторов и разные Wi-Fi (см. [NetIdentity]), так
+     * что записей больше, чем видов сети. Предел нужен, чтобы файл не рос из-за случайных сетей:
+     * при переполнении уходят самые давние.
+     */
+    private const val MAX_ENTRIES = 24
 
     private val lock = Any()
 
-    /** Адрес, который работал на таком виде сети (`Wi-Fi`, `мобильная`, `Ethernet`), или null. */
+    /**
+     * Адрес, который работал на этой сети, или null. Ключ — из [NetIdentity] («мобильная·25001»)
+     * или просто вид сети: сначала ищем точное совпадение (этот оператор, этот Wi-Fi), потом —
+     * по виду, как раньше.
+     */
     fun goodFor(context: Context, netKind: String): String? {
         if (netKind.isBlank()) return null
-        return read(file(context))[netKind]
+        val all = read(file(context))
+        return all[netKind] ?: all[NetIdentity.kindPart(netKind)]
     }
 
-    /** Запомнить рабочую пару «вид сети → адрес». */
+    /** Запомнить рабочую пару «сеть → адрес» — и для точного ключа, и для вида сети. */
     fun remember(context: Context, netKind: String, endpoint: String) {
         if (netKind.isBlank() || endpoint.isBlank()) return
+        val kind = NetIdentity.kindPart(netKind)
         synchronized(lock) {
             val target = file(context)
-            val all = read(target).toMutableMap()
-            if (all[netKind] == endpoint) return
+            val all = LinkedHashMap(read(target))
+            if (all[netKind] == endpoint && all[kind] == endpoint) return
+            // Удаляем и кладём заново: свежие записи — в конец, при переполнении уходят давние.
+            all.remove(netKind)
             all[netKind] = endpoint
+            if (kind.isNotEmpty() && kind != netKind) {
+                all.remove(kind)
+                all[kind] = endpoint
+            }
             runCatching {
                 val dir = target.parentFile ?: return
                 dir.mkdirs()
                 val text = all.entries
-                    .take(MAX_ENTRIES)
-                    .joinToString("\n") { (kind, ep) -> "$kind|$ep" } + "\n"
+                    .toList()
+                    .takeLast(MAX_ENTRIES)
+                    .joinToString("\n") { (key, ep) -> "$key|$ep" } + "\n"
                 val tmp = File(dir, target.name + ".tmp")
                 tmp.writeText(text)
                 if (!tmp.renameTo(target)) {

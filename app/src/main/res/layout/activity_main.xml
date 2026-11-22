@@ -571,6 +571,54 @@
                         android:text="@string/theme_dark" />
                 </com.google.android.material.button.MaterialButtonToggleGroup>
 
+                <!-- ── автоматика: каждую новую функцию можно выключить ── -->
+                <TextView
+                    style="@style/SectionHeader"
+                    android:text="@string/feat_title" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_hint"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:textColor="?attr/colorOnSurfaceVariant" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatAutoStart"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_autostart" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatLink"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_link" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatProbe"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_probe" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatSpeed"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_speed" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatFreeze"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_freeze" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatDns"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_dns" />
+
                 <!-- ── что туннелируем и как (переехало из вкладки «Туннель») ── -->
 
 
@@ -588,6 +636,29 @@
                     android:id="@+id/dnsSpinner"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content" />
+
+                <!-- Что сейчас пойдёт в конфиг: адреса по имени или запасные (см. DnsBook). -->
+                <TextView
+                    android:id="@+id/textDnsNote"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:textColor="?attr/colorOnSurfaceVariant"
+                    android:visibility="gone" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDnsCheck"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/dns_check_btn" />
+
+                <TextView
+                    android:id="@+id/textDnsCheck"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:visibility="gone" />
 
                 <LinearLayout
                     android:layout_width="match_parent"

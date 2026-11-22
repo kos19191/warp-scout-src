@@ -44,14 +44,19 @@ object ConfigComposer {
         } else {
             withServer
         }
+        // DNS — тот, что выбран в настройках сейчас (с адресами, найденными по имени), а не тот,
+        // что стоял во время подбора: раньше смена DNS доходила до туннеля только после нового
+        // подбора, хотя «Сохранить и применить» обещало применить её сразу.
+        val dns = runCatching { prefs.dnsServers() }.getOrDefault(emptyList())
+        val withDns = if (dns.isNotEmpty() && dns != withJunk.dns) withJunk.copy(dns = dns) else withJunk
         val allowed = prefs.allowedIps()
-        val routesChanged = allowed.trim() != withJunk.allowedIps.trim()
+        val routesChanged = allowed.trim() != withDns.allowedIps.trim()
         val note = if (routesChanged && prefs.routesMode != 0) {
-            withJunk.comments + "каналы: ${prefs.routesModeName()} (${SplitRoutes.prefixesOf(allowed).size} маршрутов)"
+            withDns.comments + "каналы: ${prefs.routesModeName()} (${SplitRoutes.prefixesOf(allowed).size} маршрутов)"
         } else {
-            withJunk.comments
+            withDns.comments
         }
-        return withJunk.copy(allowedIps = allowed, comments = note)
+        return withDns.copy(allowedIps = allowed, comments = note)
     }
 
     fun target(prefs: Prefs): ConfTarget = prefs.confTargetEnum()

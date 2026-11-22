@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RES = ROOT / "app/src/main/res"
 KOTLIN_DIRS = [ROOT / "app/src/main/kotlin", ROOT / "app/src/scout/kotlin", ROOT / "app/src/tunnel/kotlin"]
 # Типы ресурсов, которые живут в values*.xml тегом, а не отдельным файлом.
-VALUE_KINDS = ["string", "color", "dimen", "style", "bool", "integer"]
+VALUE_KINDS = ["string", "plurals", "color", "dimen", "style", "bool", "integer"]
 FILE_KINDS = {"drawable": ["drawable", "drawable-night", "mipmap"], "xml": ["xml"], "layout": ["layout"], "menu": ["menu"]}
 # mipmap-anydpi-v26 и подобные: адаптивные иконки живут в каталогах с квалификаторами.
 QUALIFIED_DIRS = {"mipmap": "mipmap", "drawable": "drawable"}

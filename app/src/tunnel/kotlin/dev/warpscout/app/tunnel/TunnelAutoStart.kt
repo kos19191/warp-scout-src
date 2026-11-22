@@ -39,6 +39,12 @@ class TunnelAutoStart : BroadcastReceiver() {
             }
             // Туннель не был включён — и говорить не о чем: журнал не засоряем.
             if (!snap.wanted && !snap.up) return
+            // Автоподъём выключен в настройках (переключатель в расширенном режиме).
+            val settings = dev.warpscout.app.status.ServiceSettingsStore.read(context)
+            if (settings != null && !settings.autoStart) {
+                TunnelDebug.stage("$reason: туннель был включён, но автоподъём выключен в настройках — сам не включаю")
+                return
+            }
             if (runCatching { VpnService.prepare(context) }.getOrNull() != null) {
                 TunnelDebug.error(
                     "$reason: туннель был включён, но разрешения на VPN больше нет",

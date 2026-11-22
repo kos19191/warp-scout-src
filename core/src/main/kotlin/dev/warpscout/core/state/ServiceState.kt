@@ -98,6 +98,23 @@ data class TunnelStatus(
     val linkTgMs: Int = -1,
     /** Откуда виден выход по ответу Cloudflare: «FRA · 2a09:…». */
     val linkExit: String = "",
+    /**
+     * Замер скорости через туннель: когда закончился (0 — не мерили в этой сессии). Автозамер
+     * после подъёма заодно ловит «заморозку» — данные идут первые килобайты и встают.
+     */
+    val speedAt: Long = 0L,
+    /** Итог замера: [SPEED_UNKNOWN], [SPEED_OK], [SPEED_FROZEN], [SPEED_FAIL], [SPEED_BYPASS]. */
+    val speedState: Int = SPEED_UNKNOWN,
+    /** Скорость загрузки, Кбит/с (-1 — не посчитать). */
+    val speedKbps: Int = -1,
+    /** Задержка канала (время TCP-соединения через туннель), мс; -1 — не мерили. */
+    val speedPingMs: Int = -1,
+    /** Сколько байт скачал замер. */
+    val speedBytes: Long = 0L,
+    /** Замер был полным (по нажатию), а не коротким автозамером. */
+    val speedFull: Boolean = false,
+    /** Замер идёт с этого момента (0 — не идёт): экран пишет «замеряю…», а не прошлое число. */
+    val speedRunningSince: Long = 0L,
 ) {
 
     val isStarting: Boolean get() = phase == PHASE_STARTING || phase == PHASE_RECONNECTING
@@ -131,6 +148,13 @@ data class TunnelStatus(
         "linkTg" to JsonVal.num(linkTg),
         "linkTgMs" to JsonVal.num(linkTgMs),
         "linkExit" to JsonVal.str(linkExit),
+        "speedAt" to JsonVal.num(speedAt),
+        "speedState" to JsonVal.num(speedState),
+        "speedKbps" to JsonVal.num(speedKbps),
+        "speedPingMs" to JsonVal.num(speedPingMs),
+        "speedBytes" to JsonVal.num(speedBytes),
+        "speedFull" to JsonVal.bool(speedFull),
+        "speedRunningSince" to JsonVal.num(speedRunningSince),
     ).render()
 
     companion object {
@@ -150,6 +174,17 @@ data class TunnelStatus(
          * выбранные приложения»). Про сам туннель такая проверка ничего не говорит.
          */
         const val LINK_BYPASS = 3
+
+        /** Замера скорости ещё не было в этой сессии. */
+        const val SPEED_UNKNOWN = 0
+        /** Загрузка прошла, скорость посчитана. */
+        const val SPEED_OK = 1
+        /** Данные пошли и встали: «заморозка» (или соединение оборвали посреди загрузки). */
+        const val SPEED_FROZEN = 2
+        /** Ни байта: сервер замера не ответил. */
+        const val SPEED_FAIL = 3
+        /** Адрес замера не входит в маршруты туннеля — про туннель такой замер ничего не скажет. */
+        const val SPEED_BYPASS = 4
 
         /** Проверка точки: туннеля нет — проверять нечем, подключаемся как обычно. */
         const val PROBE_NONE = 0
@@ -211,6 +246,13 @@ data class TunnelStatus(
                 linkTg = obj.lng("linkTg").toInt(),
                 linkTgMs = if (obj.fields.containsKey("linkTgMs")) obj.lng("linkTgMs").toInt() else -1,
                 linkExit = obj.str("linkExit").orEmpty(),
+                speedAt = obj.lng("speedAt"),
+                speedState = obj.lng("speedState").toInt(),
+                speedKbps = if (obj.fields.containsKey("speedKbps")) obj.lng("speedKbps").toInt() else -1,
+                speedPingMs = if (obj.fields.containsKey("speedPingMs")) obj.lng("speedPingMs").toInt() else -1,
+                speedBytes = obj.lng("speedBytes"),
+                speedFull = obj.bool("speedFull") ?: false,
+                speedRunningSince = obj.lng("speedRunningSince"),
             )
         }
     }
@@ -247,8 +289,31 @@ data class ServiceSettings(
     /**
      * Резервная точка, выбранная человеком (host:port; пусто — не выбрана). Если текущая точка
      * замолчит, сервис перейдёт на неё первой — раньше любой точки из памяти или очереди.
+     * Это резервная для Wi-Fi (и любой немобильной сети); для мобильной — [backupMobile].
      */
     val backup: String = "",
+    /**
+     * Резервная точка для мобильной сети. Отдельно, потому что адреса Cloudflare не универсальны:
+     * точка, живая на домашнем Wi-Fi, на мобильной сети часто молчит — и наоборот.
+     */
+    val backupMobile: String = "",
+    /** Лучшие точки подбора для Wi-Fi (host:port, лучшая первой) — для перебора на этой сети. */
+    val listWifi: List<String> = emptyList(),
+    /** То же для мобильной сети (её можно подобрать, не уходя с Wi-Fi). */
+    val listMobile: List<String> = emptyList(),
+    // Переключатели новых функций — каждую можно выключить, не дожидаясь новой версии, если она
+    // на каком-то телефоне или сети ведёт себя плохо. По умолчанию всё включено.
+
+    /** Поднимать туннель самому после перезагрузки и обновления (если он был включён). */
+    val autoStart: Boolean = true,
+    /** Проверка связи не прошла дважды — переподключаться. */
+    val linkReconnect: Boolean = true,
+    /** Короткий замер скорости после подключения (он же ловит «заморозку»). */
+    val speedAuto: Boolean = true,
+    /** Загрузка «замёрзла» дважды подряд — уходить на другую точку. */
+    val freezeReconnect: Boolean = true,
+    /** В раздельном режиме отправлять запросы к DNS через туннель (см. SplitRoutes.withDns). */
+    val dnsInTunnel: Boolean = true,
 ) {
 
     fun toJson(): String = JsonVal.obj(
@@ -260,6 +325,14 @@ data class ServiceSettings(
         "appsSelected" to JsonVal.arr(appsSelected.map { JsonVal.str(it) }),
         "failover" to JsonVal.arr(failover.map { JsonVal.str(it) }),
         "backup" to JsonVal.str(backup),
+        "backupMobile" to JsonVal.str(backupMobile),
+        "listWifi" to JsonVal.arr(listWifi.map { JsonVal.str(it) }),
+        "listMobile" to JsonVal.arr(listMobile.map { JsonVal.str(it) }),
+        "autoStart" to JsonVal.bool(autoStart),
+        "linkReconnect" to JsonVal.bool(linkReconnect),
+        "speedAuto" to JsonVal.bool(speedAuto),
+        "freezeReconnect" to JsonVal.bool(freezeReconnect),
+        "dnsInTunnel" to JsonVal.bool(dnsInTunnel),
     ).render()
 
     companion object {
@@ -285,10 +358,25 @@ data class ServiceSettings(
                     .mapNotNull { (it as? JsonVal.Str)?.v }
                     .filter { it.isNotBlank() },
                 backup = obj.str("backup").orEmpty().trim(),
+                backupMobile = obj.str("backupMobile").orEmpty().trim(),
+                listWifi = strings(obj, "listWifi"),
+                listMobile = strings(obj, "listMobile"),
+                // Нет поля (снимок от старой версии) — функция включена, как и по умолчанию.
+                autoStart = obj.bool("autoStart") ?: true,
+                linkReconnect = obj.bool("linkReconnect") ?: true,
+                speedAuto = obj.bool("speedAuto") ?: true,
+                freezeReconnect = obj.bool("freezeReconnect") ?: true,
+                dnsInTunnel = obj.bool("dnsInTunnel") ?: true,
             )
         }
     }
 }
+
+/** Массив строк из JSON без пустых: отсутствующее поле — пустой список. */
+private fun strings(obj: JsonVal.Obj, key: String): List<String> =
+    (obj.fields[key] as? JsonVal.Arr)?.items.orEmpty()
+        .mapNotNull { (it as? JsonVal.Str)?.v?.trim() }
+        .filter { it.isNotEmpty() }
 
 /**
  * Число из JSON целым. Через `raw` (исходный текст), а не через `Double`: миллисекунды и счётчики

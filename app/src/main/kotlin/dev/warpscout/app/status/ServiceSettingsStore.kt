@@ -50,18 +50,8 @@ object ServiceSettingsStore {
      * по приложениям и работал бы «как по умолчанию».
      */
     fun syncFromPrefs(context: Context) {
-        val prefs = Prefs(context)
-        write(
-            context,
-            ServiceSettings(
-                secondExitOn = prefs.secondExitOn,
-                secondConf = prefs.secondConf,
-                secondCidrs = prefs.secondCidrs,
-                appsMode = prefs.appsMode,
-                appsSelected = prefs.appsSelected.toList().sorted(),
-                failover = prefs.failoverQueue,
-                backup = prefs.backupEndpoint,
-            )
-        )
+        // Снимок собирает сам Prefs — одна копия списка полей, а не две (раньше новое поле легко
+        // было добавить только в одну из них).
+        write(context, Prefs(context).serviceSettings())
     }
 }

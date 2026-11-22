@@ -95,6 +95,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("топ-3 конфига для переключения") {
             shortlistPick()
         }
+        section("скорость через туннель, DNS и две тройки (1.10.28)") {
+            speedAndDns()
+        }
         section("расход батареи: интервал keepalive") {
             keepalivePolicy()
         }
@@ -616,6 +619,169 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         expect("топ-3: проверенный изнутри выше более «балльного»", ordered.single().resourcesOk, 7)
 
         check("топ-3: пустой отчёт не ломает отбор", Shortlist.pick(emptyList()).isEmpty())
+    }
+
+    /**
+     * 1.10.28: замер скорости (и «заморозка»), DNS в маршрутах туннеля, проверка «умного» DNS,
+     * новые поля снимков. Всё без сети: потоки и пакеты — подставные.
+     */
+    private fun speedAndDns() {
+        val st = dev.warpscout.core.net.SpeedTest
+        // Поток, который отдаёт [give] байт и потом молчит (таймаут сокета) — «заморозка».
+        class FreezingStream(private val give: Int) : java.io.InputStream() {
+            private var sent = 0
+            override fun read(): Int {
+                if (sent >= give) throw java.net.SocketTimeoutException("тишина")
+                sent++
+                return 0
+            }
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                if (sent >= give) throw java.net.SocketTimeoutException("тишина")
+                val n = minOf(len, give - sent)
+                sent += n
+                return n
+            }
+        }
+        val full = st.drain(java.io.ByteArrayInputStream(ByteArray(300_000)), 300_000, 1_000_000, 10_000)
+        expect("скорость: тело дочитано — замер прошёл", full.state, st.OK)
+        expect("скорость: прочитано всё обещанное", full.bytes, 300_000L)
+        check("скорость: посчитана", full.kbps > 0, "${full.kbps}")
+        val frozen = st.drain(FreezingStream(20 * 1024), 512 * 1024, 512 * 1024, 10_000)
+        expect("скорость: 20 КБ и тишина — это «заморозка»", frozen.state, st.FROZEN)
+        expect("скорость: при заморозке видно, сколько успело прийти", frozen.bytes, 20L * 1024)
+        val silent = st.drain(FreezingStream(0), 512 * 1024, 512 * 1024, 10_000)
+        expect("скорость: ни байта — это провал, а не заморозка", silent.state, st.FAIL)
+        val cut = st.drain(java.io.ByteArrayInputStream(ByteArray(10_000)), 100_000, 1_000_000, 10_000)
+        expect("скорость: оборванное посреди тело — тоже заморозка", cut.state, st.FROZEN)
+        val noLength = st.drain(java.io.ByteArrayInputStream(ByteArray(50_000)), -1, 1_000_000, 10_000)
+        expect("скорость: без Content-Length читаем до конца", noLength.state, st.OK)
+        expect("скорость: без Content-Length — все байты", noLength.bytes, 50_000L)
+        val capped = st.drain(java.io.ByteArrayInputStream(ByteArray(300_000)), 1_000_000, 100_000, 10_000)
+        expect("скорость: предел байт соблюдается", capped.bytes, 100_000L)
+        expect("скорость: предел байт — не заморозка", capped.state, st.OK)
+        expect("скорость: Кбит/с из байт и мс", st.kbpsOf(1_000_000, 1_000), 8_000)
+        expect("скорость: слишком короткое окно не даёт «тысячу мегабит»", st.kbpsOf(1_000, 0), 400)
+        expect("скорость: нет байт — нет скорости", st.kbpsOf(0, 100), -1)
+        expect("скорость: ступень — не мерили", st.bucket(-1), 0)
+        expect("скорость: ступень — меньше мегабита", st.bucket(500), 1)
+        expect("скорость: ступень — 1–2 Мбит/с", st.bucket(1_500), 2)
+        expect("скорость: ступень — 3 Мбит/с выше 2", st.bucket(3_000), 3)
+        check("скорость: ступени растут со скоростью", st.bucket(50_000) > st.bucket(10_000))
+        expect("скорость: подпись в Кбит/с", st.human(850), "850 Кбит/с")
+        expect("скорость: подпись с запятой", st.human(24_500), "24,5 Мбит/с")
+        expect("скорость: большие — без дробной части", st.human(150_000), "150 Мбит/с")
+        expect("скорость: нет замера — прочерк", st.human(-1), "—")
+
+        // DNS в маршрутах туннеля: только при раздельных маршрутах и только то, что не покрыто.
+        expect(
+            "DNS в туннеле: весь трафик — маршруты не меняются",
+            SplitRoutes.withDns("0.0.0.0/0, ::/0", listOf("1.1.1.1", "2606:4700:4700::1111")),
+            "0.0.0.0/0, ::/0"
+        )
+        expect(
+            "DNS в туннеле: раздельные — добавляются /32 и /128",
+            SplitRoutes.withDns("10.0.0.0/8, 8.8.8.0/24", listOf("8.8.8.8", "1.1.1.1", "2606:4700:4700::1111")),
+            "10.0.0.0/8, 8.8.8.0/24, 1.1.1.1/32, 2606:4700:4700::1111/128"
+        )
+        expect(
+            "DNS в туннеле: адрес внутри подсети не дублируется",
+            SplitRoutes.withDns("1.0.0.0/8", listOf("1.1.1.1")),
+            "1.0.0.0/8"
+        )
+        expect("DNS в туннеле: без маршрутов ничего не придумываем", SplitRoutes.withDns("", listOf("1.1.1.1")), "")
+
+        // Проверка «умного» DNS: запрос A-записи и разбор ответа.
+        val q = dev.warpscout.core.net.SmartDnsCheck.buildQuery(0x1234, "chatgpt.com")
+        expect("DNS-запрос: длина", q.size, 29)
+        expect("DNS-запрос: номер", ((q[0].toInt() and 0xFF) shl 8) or (q[1].toInt() and 0xFF), 0x1234)
+        val answer = java.io.ByteArrayOutputStream().apply {
+            write(byteArrayOf(0x12, 0x34, 0x81.toByte(), 0x80.toByte(), 0, 1, 0, 2, 0, 0, 0, 0))
+            write(q, 12, q.size - 12)
+            // CNAME на то же имя (указатель на вопрос) — пропускается
+            write(byteArrayOf(0xC0.toByte(), 0x0C, 0, 5, 0, 1, 0, 0, 0, 60, 0, 2, 0xC0.toByte(), 0x0C))
+            // A 104.18.32.47
+            write(byteArrayOf(0xC0.toByte(), 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 104, 18, 32, 47))
+        }.toByteArray()
+        expect(
+            "DNS-ответ: адрес из A-записи, CNAME пропущен",
+            dev.warpscout.core.net.SmartDnsCheck.parseA(answer, answer.size, 0x1234),
+            listOf("104.18.32.47")
+        )
+        expect(
+            "DNS-ответ: чужой номер запроса — пусто",
+            dev.warpscout.core.net.SmartDnsCheck.parseA(answer, answer.size, 0x4321),
+            emptyList<String>()
+        )
+        expect(
+            "DNS-ответ: обрезанный пакет не роняет разбор",
+            dev.warpscout.core.net.SmartDnsCheck.parseA(answer, 40, 0x1234),
+            emptyList<String>()
+        )
+        val nx = answer.copyOf().also { it[3] = 0x83.toByte() }
+        expect(
+            "DNS-ответ: ошибка сервера — пусто",
+            dev.warpscout.core.net.SmartDnsCheck.parseA(nx, nx.size, 0x1234),
+            emptyList<String>()
+        )
+        expect(
+            "trace: страна и площадка",
+            dev.warpscout.core.net.SmartDnsCheck.traceFields("fl=1\nh=chatgpt.com\nloc=DE\ncolo=FRA\n"),
+            "DE" to "FRA"
+        )
+        check(
+            "ChatGPT: выход RU — не откроется",
+            !dev.warpscout.core.net.SmartDnsCheck.Result(true, "1.2.3.4", "RU", "DME", "").opens
+        )
+        check(
+            "ChatGPT: выход DE — откроется",
+            dev.warpscout.core.net.SmartDnsCheck.Result(true, "1.2.3.4", "DE", "FRA", "").opens
+        )
+
+        // Снимок: замер скорости переживает передачу между процессами.
+        val speedSnap = TunnelStatus(
+            speedAt = 1_758_000_100_000L, speedState = TunnelStatus.SPEED_FROZEN, speedKbps = 1234,
+            speedPingMs = 48, speedBytes = 20_480L, speedFull = true, speedRunningSince = 1_758_000_099_000L
+        )
+        expect("снимок: замер скорости без потерь", TunnelStatus.fromJson(speedSnap.toJson()), speedSnap)
+        expect("снимок: старый формат — скорости нет", TunnelStatus.fromJson("{}")?.speedKbps, -1)
+
+        // Настройки сервиса: резервные и тройки по сетям, переключатели функций.
+        val perNet = ServiceSettings(
+            backup = "162.159.192.1:2408",
+            backupMobile = "188.114.97.1:500",
+            listWifi = listOf("162.159.192.1:2408", "162.159.195.1:1701"),
+            listMobile = listOf("188.114.97.1:500"),
+            autoStart = false,
+            linkReconnect = false,
+            speedAuto = false,
+            freezeReconnect = false,
+            dnsInTunnel = false,
+        )
+        expect("настройки сервиса: резервные и тройки по сетям", ServiceSettings.fromJson(perNet.toJson()), perNet)
+        val oldSettings = ServiceSettings.fromJson("""{"ver":1,"backup":"1.2.3.4:500"}""")
+        expect("настройки сервиса: старый снимок — мобильной резервной нет", oldSettings?.backupMobile, "")
+        expect("настройки сервиса: старый снимок — автоподъём включён", oldSettings?.autoStart, true)
+        expect("настройки сервиса: старый снимок — DNS через туннель", oldSettings?.dnsInTunnel, true)
+
+        // Подбор: из одинаково открывшихся выше та, через которую быстрее качается.
+        fun fast(host: String, kbps: Int): Candidate {
+            val cfg = WarpConfig(
+                name = "тест",
+                account = WarpAccount("a=", "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=", "172.16.0.2", "2606::1"),
+                endpoint = Endpoint(host, 2408),
+                junk = JunkLibrary.tlsFixed(),
+                allowedIps = "0.0.0.0/0, ::/0"
+            )
+            val es = EndpointStats(cfg.endpoint, emptyList(), Verdict.HANDSHAKE_OK, 1, 1)
+            return Candidate(cfg, es, Scoring.evaluate(es, true, 9, 9), emptyList(), 9, 9, kbps)
+        }
+        val slow = fast("162.159.192.5", 900)
+        val quick = fast("162.159.192.6", 40_000)
+        expect(
+            "топ-3: при равных сайтах первой идёт более быстрая",
+            Shortlist.pick(listOf(slow, quick), limit = 1).single().config.endpoint.host,
+            "162.159.192.6"
+        )
     }
 
     /**

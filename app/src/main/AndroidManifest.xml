@@ -9,6 +9,9 @@
         <package android:name="io.github.dovecoteescapee.byedpi" />
     </queries>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Подбор точек для мобильной сети, не уходя с Wi-Fi: попросить у системы мобильную сеть
+         рядом с Wi-Fi (requestNetwork). Обычное разрешение, отдельного согласия не нужно. -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
 
     <!-- Android 11+ скрывает список приложений. Он нужен вкладке «Приложения»: выбрать, что
          пускать через туннель, а что мимо (как в Amnezia). Для сайдлоада это нормально;

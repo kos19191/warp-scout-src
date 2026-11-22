@@ -9,6 +9,7 @@ import dev.warpscout.core.model.ResourceCheck
 import dev.warpscout.core.model.ResourceResult
 import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.net.ResourceProber
+import dev.warpscout.core.net.SpeedTest
 import dev.warpscout.core.tune.TunnelVerifier
 
 class VpnTunnelController(private val context: Context) : TunnelController {
@@ -160,6 +161,8 @@ class VpnTunnelController(private val context: Context) : TunnelController {
 
     override fun requestLinkCheck() = WarpVpnService.requestLinkCheck(context)
 
+    override fun requestSpeedTest() = WarpVpnService.requestSpeedTest(context)
+
     // Причину отказа называет сервис, а живёт она в снимке его состояния: в процессе интерфейса
     // TunnelDebug.lastError почти всегда пуст, и вместо причины показывалось «нет ответа».
     override fun lastError(): String? = TunnelState.error ?: TunnelDebug.lastError
@@ -182,7 +185,13 @@ class VpnTunnelVerifier(private val context: Context) : TunnelVerifier {
 
     private val prober = ResourceProber()
 
+    /** Скорость через туннель последней проверенной точки (см. [lastSpeedKbps]). */
+    @Volatile
+    private var lastSpeed = -1
+
     override val title: String get() = "собственный туннель WarpScout"
+
+    override fun lastSpeedKbps(): Int = lastSpeed
 
     override fun verify(config: WarpConfig, checks: List<ResourceCheck>, settleMs: Int): List<ResourceResult> =
         verify(config, checks, settleMs) { false }
@@ -197,6 +206,7 @@ class VpnTunnelVerifier(private val context: Context) : TunnelVerifier {
         settleMs: Int,
         isCancelled: () -> Boolean
     ): List<ResourceResult> {
+        lastSpeed = -1
         if (checks.isEmpty() || isCancelled()) return emptyList()
         // Проверка «из-под туннеля» должна идти ЧЕРЕЗ туннель: снимаем привязку к non-VPN сети,
         // иначе CleanNetwork вернул бы нам ту же самую чистую сеть и смысл проверки пропал.
@@ -214,6 +224,22 @@ class VpnTunnelVerifier(private val context: Context) : TunnelVerifier {
                 if (isCancelled()) break
                 out.add(prober.check(check, "tunnel"))
             }
+            // Скорость через эту точку: из двух, открывших одинаково много сайтов, лучше та, через
+            // которую быстрее качается. Короткая загрузка (четверть мегабайта) заодно ловит
+            // «заморозку» — такая точка получает 0 и уходит вниз списка.
+            if (!isCancelled() && fullTunnel(config)) {
+                val r = runCatching {
+                    SpeedTest.run(
+                        SpeedTest.cloudflareUrl(SpeedTest.SCAN_BYTES), SpeedTest.SCAN_BYTES,
+                        maxMs = 5_000L, stallMs = 3_000
+                    )
+                }.getOrNull()
+                lastSpeed = when (r?.state) {
+                    SpeedTest.OK -> r?.kbps ?: -1
+                    SpeedTest.FROZEN -> 0
+                    else -> -1
+                }
+            }
             out
         } finally {
             WarpVpnService.stop(context)
@@ -222,4 +248,9 @@ class VpnTunnelVerifier(private val context: Context) : TunnelVerifier {
     }
 
     override fun stop() = WarpVpnService.stop(context)
+
+    /** Весь трафик в туннеле: иначе адрес замера мог оказаться вне маршрутов и мерил бы не то. */
+    private fun fullTunnel(config: WarpConfig): Boolean =
+        dev.warpscout.core.config.SplitRoutes.prefixesOf(config.allowedIps)
+            .any { it.replace(" ", "") == "0.0.0.0/0" }
 }

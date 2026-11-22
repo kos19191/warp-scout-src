@@ -52,6 +52,8 @@ object Shortlist {
     private fun rank(): Comparator<Candidate> =
         compareByDescending<Candidate> { it.resourcesTotal > 0 }
             .thenByDescending { it.resourcesOk }
+            // Одинаково открывшиеся — по ступени скорости через туннель (см. SpeedTest.bucket).
+            .thenByDescending { dev.warpscout.core.net.SpeedTest.bucket(it.speedKbps) }
             .thenByDescending { it.score }
 
     private fun key(c: Candidate): String = c.config.endpoint.render() + "|" + c.config.junk.name

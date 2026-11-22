@@ -21,6 +21,7 @@ import dev.warpscout.core.model.Endpoint
 import dev.warpscout.core.model.Verdict
 import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.net.NetSettings
+import dev.warpscout.core.net.SpeedTest
 import dev.warpscout.core.net.UdpSocketFactory
 import dev.warpscout.core.net.WgProber
 import dev.warpscout.core.state.TunnelStatus
@@ -673,6 +674,10 @@ class WarpVpnService : VpnService() {
             handleCheckRequest(startId)
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_SPEED) {
+            handleSpeedRequest(startId)
+            return START_NOT_STICKY
+        }
         // ГЛАВНОЕ ПРАВИЛО ANDROID: после startForegroundService() сервис обязан вызвать
         // startForeground() примерно за 5 секунд, иначе процесс убивают с
         // ForegroundServiceDidNotStartInTimeException — без записи в журнал, и туннель умирает
@@ -786,6 +791,9 @@ class WarpVpnService : VpnService() {
         }
         lastConfigText = text
         lastStartId = startId
+        // Проверочный подъём подбора (см. startAndWait): ему не нужен автозамер скорости — он
+        // мерит сам, и два замера разом мешали бы друг другу.
+        quietSession = explicit != null && intent?.getBooleanExtra(EXTRA_QUIET, false) == true
         // Подключение по кнопке/плитке — не автопереподъём: при неудаче сервис снимает себя, как
         // и раньше, иначе следующее ручное нажатие упрётся в «уже поднимается».
         autoRebind = false
@@ -882,8 +890,10 @@ class WarpVpnService : VpnService() {
         TunnelState.gaveUp = false
         TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_STARTING
         TunnelState.startedAt = System.currentTimeMillis()
-        // Итог проверки связи — про прошлую сессию; у новой его ещё нет.
+        // Итог проверки связи и замер скорости — про прошлую сессию; у новой их ещё нет.
         TunnelState.clearLink()
+        TunnelState.clearSpeed()
+        freezeStreak = 0
         TunnelDebug.reset()
         createChannel()
         postNotification(getString(R.string.notif_starting))
@@ -1259,7 +1269,7 @@ class WarpVpnService : VpnService() {
                 // «Подключено» — только когда данные ходят. Через полторы секунды после подъёма
                 // (приложения как раз начинают переподключаться) проверяем это запросом через
                 // туннель; два провала подряд — сессия мертва, переподключаемся.
-                startLinkCheck(myEpoch, "после подъёма", 1_500L, reconnectOnFail = true)
+                startLinkCheck(myEpoch, "после подъёма", 1_500L, reconnectOnFail = true, autoSpeed = true)
             }
         }.apply { isDaemon = true; name = "warpscout-vpn-watch"; start() }
     }
@@ -1335,7 +1345,13 @@ class WarpVpnService : VpnService() {
      * ответа, сессия мертва: переподнимаем туннель тем же путём, что и после обрыва (с его
      * лимитами — бесконечного цикла переподключений не будет).
      */
-    private fun startLinkCheck(myEpoch: Int, reason: String, delayMs: Long, reconnectOnFail: Boolean) {
+    private fun startLinkCheck(
+        myEpoch: Int,
+        reason: String,
+        delayMs: Long,
+        reconnectOnFail: Boolean,
+        autoSpeed: Boolean = false,
+    ) {
         if (!linkCheckBusy.compareAndSet(false, true)) return
         val thread = Thread({
             try {
@@ -1352,8 +1368,17 @@ class WarpVpnService : VpnService() {
                 if (!linkAlive(myEpoch)) return@Thread
                 TunnelState.setLink(System.currentTimeMillis(), result.web, result.webMs, result.tg, result.tgMs, result.exit)
                 reportLink(reason, result)
+                val settings = serviceSettings()
                 if (result.web == TunnelStatus.LINK_FAIL && reconnectOnFail && wanted && linkAlive(myEpoch)) {
-                    restartAfterNetworkChange("проверка связи: через туннель нет ответа", R.string.status_reconnect_silent)
+                    if (settings.linkReconnect) {
+                        restartAfterNetworkChange("проверка связи: через туннель нет ответа", R.string.status_reconnect_silent)
+                    } else {
+                        TunnelDebug.stage("переподключение по проверке связи выключено в настройках — туннель не трогаю")
+                    }
+                } else if (result.web != TunnelStatus.LINK_FAIL && autoSpeed && settings.speedAuto && !quietSession) {
+                    // Связь есть — заодно проверим, что данные не встают через пару десятков
+                    // килобайт («заморозка»), и покажем примерную скорость.
+                    startSpeedTest(myEpoch, "после подъёма", full = false, delayMs = 400L)
                 }
             } catch (e: InterruptedException) {
                 // штатная остановка вместе с сервисом
@@ -1380,12 +1405,9 @@ class WarpVpnService : VpnService() {
         val routes = lastConfigText
             ?.let { text -> runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull() }
             ?.let { cfg -> runCatching { ExitRouter.of(SplitRoutes.prefixesOf(cfg.allowedIps)) }.getOrNull() }
-        val settings = serviceSettings()
-        // В режиме «только выбранные» сам WarpScout в туннель не входит — его запросы идут мимо.
-        val selfOutside = settings.appsMode == dev.warpscout.core.state.ServiceSettings.APPS_ONLY &&
-            settings.appsSelected.any { it != packageName }
-        fun ipBytes(ip: String): ByteArray = ip.split('.').map { it.toInt().toByte() }.toByteArray()
-        fun routed(ip: String): Boolean = !selfOutside && (routes == null || routes.route(ipBytes(ip)) == 1)
+        // С 1.10.28 сам WarpScout входит в туннель и в режиме «только выбранные» (см.
+        // applyAppSplit) — мимо идут только адреса вне маршрутов.
+        fun routed(ip: String): Boolean = routedIp(routes, ip)
 
         var web = TunnelStatus.LINK_FAIL
         var webMs = -1
@@ -1393,7 +1415,7 @@ class WarpVpnService : VpnService() {
         var webNote = ""
         if (!routed("1.1.1.1")) {
             web = TunnelStatus.LINK_BYPASS
-            webNote = if (selfOutside) "WarpScout вне туннеля — режим «только выбранные»" else "адрес проверки не в маршрутах туннеля"
+            webNote = "адрес проверки не в маршрутах туннеля"
         } else {
             val t0 = android.os.SystemClock.elapsedRealtime()
             val body = runCatching { httpGetSmall(dev.warpscout.core.net.CfTrace.URL_BY_IP, 5_000) }
@@ -1502,6 +1524,165 @@ class WarpVpnService : VpnService() {
         if (!wanted && plane == null && !starting) runCatching { stopSelf(startId) }
     }
 
+    // ------------------------------------------------------------ скорость через туннель
+    //
+    // Проверка связи отвечает на «ходят ли данные», но не на «сколько». А главное — она не видит
+    // «заморозку»: оператор пропускает начало соединения и останавливает его после 16–20 КБ (так
+    // режут Cloudflare в части российских сетей). Короткий trace проходит, экран честно пишет
+    // «подключено», а видео стоит. Загрузка в сотни килобайт с проверкой, что тело дочитано до
+    // конца, видит и это, и реальную скорость. Мерим обычным сокетом — то есть через сам туннель.
+
+    /** Замер уже идёт — второй параллельно не запускаем. */
+    private val speedBusy = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Сколько автозамеров подряд «замёрзли» в этой сессии. */
+    @Volatile
+    private var freezeStreak = 0
+
+    /** Подъём для проверки в подборе: автозамера не будет (см. EXTRA_QUIET). */
+    @Volatile
+    private var quietSession = false
+
+    /** Адрес IPv4 в маршрутах туннеля (null — маршрутов не знаем, считаем «весь трафик»). */
+    private fun routedIp(routes: ExitRouter?, ip: String): Boolean {
+        if (routes == null) return true
+        val bytes = runCatching { ip.split('.').map { it.toInt().toByte() }.toByteArray() }.getOrNull() ?: return false
+        return bytes.size == 4 && routes.route(bytes) == 1
+    }
+
+    private fun currentRoutes(): ExitRouter? = lastConfigText
+        ?.let { text -> runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull() }
+        ?.let { cfg -> runCatching { ExitRouter.of(SplitRoutes.prefixesOf(cfg.allowedIps)) }.getOrNull() }
+
+    /**
+     * Замер в своём потоке. [full] — по нажатию (до 10 МБ / 6 с), иначе короткий (полмегабайта).
+     * Короткий, «замёрзший» дважды подряд, — повод сменить точку (если это не выключено).
+     */
+    private fun startSpeedTest(myEpoch: Int, reason: String, full: Boolean, delayMs: Long) {
+        if (!speedBusy.compareAndSet(false, true)) return
+        val thread = Thread({
+            try {
+                if (delayMs > 0L) Thread.sleep(delayMs)
+                if (!linkAlive(myEpoch)) return@Thread
+                TunnelState.setSpeedRunning(System.currentTimeMillis())
+                var r = runSpeedTest(full)
+                if (!full && r.state == SpeedTest.FROZEN && linkAlive(myEpoch)) {
+                    // Одна остановка — ещё не диагноз (мог дёрнуться радиоканал): повтор через 5 с.
+                    TunnelDebug.stage("замер скорости: ${r.note} — повторю через 5 с")
+                    Thread.sleep(5_000L)
+                    if (!linkAlive(myEpoch)) return@Thread
+                    r = runSpeedTest(false)
+                }
+                if (!linkAlive(myEpoch)) return@Thread
+                val state = when (r.state) {
+                    SpeedTest.OK -> TunnelStatus.SPEED_OK
+                    SpeedTest.FROZEN -> TunnelStatus.SPEED_FROZEN
+                    SPEED_BYPASS_CODE -> TunnelStatus.SPEED_BYPASS
+                    else -> TunnelStatus.SPEED_FAIL
+                }
+                TunnelState.setSpeed(System.currentTimeMillis(), state, r.kbps, r.ttfbMs, r.bytes, full)
+                reportSpeed(reason, r, full)
+                if (state == TunnelStatus.SPEED_FROZEN && !full) {
+                    freezeStreak += 1
+                    val settings = serviceSettings()
+                    if (settings.freezeReconnect && wanted && linkAlive(myEpoch)) {
+                        switchAfterFreeze(r.note)
+                    } else if (!settings.freezeReconnect) {
+                        TunnelDebug.stage("смена точки при «заморозке» выключена в настройках — туннель не трогаю")
+                    }
+                } else if (state == TunnelStatus.SPEED_OK) {
+                    freezeStreak = 0
+                }
+            } catch (e: InterruptedException) {
+                // штатная остановка вместе с сервисом
+            } catch (e: Throwable) {
+                runCatching {
+                    TunnelDebug.stage("замер скорости не удался: ${e.javaClass.simpleName} ${e.message.orEmpty().take(80)}")
+                }
+            } finally {
+                if (TunnelState.speedRunningSince != 0L) TunnelState.setSpeedRunning(0L)
+                speedBusy.set(false)
+            }
+        }, "warpscout-speed")
+        thread.isDaemon = true
+        thread.priority = Thread.MIN_PRIORITY
+        thread.start()
+    }
+
+    /**
+     * Одна загрузка через туннель плюс пинг (время TCP-соединения с 1.1.1.1:443 — один круг через
+     * туннель). Пинг кладём в `ttfbMs` результата: экрану нужны два числа, а не заголовки HTTP.
+     */
+    private fun runSpeedTest(full: Boolean): SpeedTest.Result {
+        val routes = currentRoutes()
+        // Адрес замера (Cloudflare) должен идти через туннель. В раздельном режиме он может быть
+        // вне маршрутов — тогда мерили бы обычный интернет и выдавали его за туннель.
+        val speedIp = runCatching {
+            java.net.InetAddress.getAllByName("speed.cloudflare.com")
+                .filterIsInstance<java.net.Inet4Address>()
+                .firstOrNull()?.hostAddress
+        }.getOrNull()
+        if (routes != null && speedIp != null && !routedIp(routes, speedIp)) {
+            return SpeedTest.Result(SPEED_BYPASS_CODE, 0L, 0L, -1, note = "адрес замера не в маршрутах туннеля")
+        }
+        val ping = if (routedIp(routes, "1.1.1.1")) SpeedTest.tcpPing("1.1.1.1", 443, 3_000) else -1
+        val bytes = if (full) SpeedTest.FULL_BYTES else SpeedTest.AUTO_BYTES
+        val maxMs = if (full) SpeedTest.FULL_MS else 8_000L
+        val r = SpeedTest.run(SpeedTest.cloudflareUrl(bytes), bytes, maxMs, stallMs = 4_000)
+        return r.copy(ttfbMs = ping)
+    }
+
+    private fun reportSpeed(reason: String, r: SpeedTest.Result, full: Boolean) {
+        val kind = if (full) "полный" else "короткий"
+        val ping = if (r.ttfbMs >= 0) ", пинг ${r.ttfbMs} мс" else ""
+        val line = "замер скорости ($reason, $kind): " + when (r.state) {
+            SpeedTest.OK -> "${SpeedTest.human(r.kbps)} — ${r.bytes / 1024} КБ за ${r.ms} мс$ping"
+            SpeedTest.FROZEN -> "загрузка встала: ${r.note}$ping"
+            SPEED_BYPASS_CODE -> "не мерил — ${r.note}"
+            else -> "не получилось: ${r.note}$ping"
+        }
+        when (r.state) {
+            SpeedTest.FROZEN -> TunnelDebug.error(line, "похоже на «заморозку»: данные идут первые килобайты и встают")
+            SpeedTest.OK -> TunnelDebug.ok(line)
+            else -> TunnelDebug.stage(line)
+        }
+    }
+
+    /**
+     * Загрузка через туннель встала дважды подряд — точка «замерзает». Переходим на следующую из
+     * перебора этой сети (резервная — первой). Не на что переходить — переподключаемся к той же:
+     * новое соединение с другого порта иногда снимает «заморозку».
+     */
+    private fun switchAfterFreeze(why: String) {
+        val oldPoint = currentEndpointLine().orEmpty()
+        // Точку, на которой встала загрузка, на этой сети пока обходим (как дважды молчавшую).
+        if (oldPoint.isNotEmpty()) sentryMarkDead(oldPoint)
+        failoverOrder = emptyList()
+        rebuildFailoverOrder()
+        val next = nextFailoverEndpoint()
+        if (next != null && next.first != oldPoint) {
+            lastConfigText = next.second
+            // Чтобы переподъём не вернул «работавшую на этой сети» — ту самую замёрзшую точку.
+            rotationsSinceUp += 1
+            forceFastRetry = true
+            TunnelDebug.stage("$oldPoint: загрузка встала ($why) — перехожу на ${next.first}")
+            restartAfterNetworkChange("загрузка через туннель встала — переход на ${next.first}", R.string.status_reconnect_frozen)
+        } else {
+            TunnelDebug.stage("$oldPoint: загрузка встала ($why), других точек нет — переподключаюсь к ней же")
+            restartAfterNetworkChange("загрузка через туннель встала", R.string.status_reconnect_frozen)
+        }
+    }
+
+    /** Экран попросил замерить скорость (нажатие на «Скорость»). */
+    private fun handleSpeedRequest(startId: Int) {
+        val running = plane != null && worker?.isAlive == true && TunnelState.up
+        if (!running) {
+            idleStop(startId)
+            return
+        }
+        startSpeedTest(epoch.get(), "по нажатию", full = true, delayMs = 0L)
+    }
+
     // ------------------------------------------------------------ проба точки по просьбе экрана
 
     /**
@@ -1603,6 +1784,13 @@ class WarpVpnService : VpnService() {
         }
         if (TunnelState.stoppedByUser) {
             TunnelDebug.stage("$why: туннель выключен вручную — сам не включаю, пока не нажмёшь «Включить»")
+            return null
+        }
+        // Автоподъём после загрузки и обновления можно выключить в настройках. «Постоянный VPN»
+        // и перезапуск системой — не про него: первое включил сам человек в настройках Android,
+        // второе — восстановление после обрыва без его участия.
+        if (action == ACTION_AUTOSTART && !runCatching { serviceSettings().autoStart }.getOrDefault(true)) {
+            TunnelDebug.stage("$why: автоподъём выключен в настройках — сам не включаю")
             return null
         }
         val previous = bootSnapshot
@@ -1754,7 +1942,19 @@ class WarpVpnService : VpnService() {
         val v6 = cfg.account.ipv6?.takeIf { cfg.enableIpv6Address && it.isNotBlank() }
         if (v6 != null) runCatching { builder.addAddress(v6.substringBefore('/'), 128) }
         cfg.dns.forEach { if (it.isNotBlank()) runCatching { builder.addDnsServer(it.trim()) } }
-        cfg.allowedIps.split(',').map { it.trim() }.filter { it.contains('/') }.forEach { cidr ->
+        // Раздельные маршруты: адреса DNS — тоже в туннель (см. SplitRoutes.withDns). Иначе запросы
+        // имён шли мимо туннеля, и подменённый оператором ответ уводил «сайт из списка» на чужой
+        // адрес — маршрут к настоящему адресу уже не помогал.
+        val routeText = if (runCatching { serviceSettings().dnsInTunnel }.getOrDefault(true)) {
+            runCatching { SplitRoutes.withDns(cfg.allowedIps, cfg.dns) }.getOrDefault(cfg.allowedIps)
+        } else {
+            cfg.allowedIps
+        }
+        if (routeText != cfg.allowedIps) {
+            val added = SplitRoutes.prefixesOf(routeText).size - SplitRoutes.prefixesOf(cfg.allowedIps).size
+            TunnelDebug.stage("DNS через туннель: +$added маршрута к ${cfg.dns.joinToString(", ")}")
+        }
+        routeText.split(',').map { it.trim() }.filter { it.contains('/') }.forEach { cidr ->
             // IPv6-маршрут без IPv6-адреса на интерфейсе — чёрная дыра (пакеты уходят в tun и
             // пропадают). Проверено на живом запросе: с таким маршрутом Telegram и браузер
             // «открывались наполовину». Поэтому v6-маршруты добавляем только с адресом.
@@ -1784,7 +1984,11 @@ class WarpVpnService : VpnService() {
                     TunnelDebug.stage("приложения: режим «только выбранные», но список пуст — идут все")
                 } else {
                     selected.forEach { runCatching { builder.addAllowedApplication(it) } }
-                    TunnelDebug.stage("приложения: только выбранные (${selected.size})")
+                    // Сам WarpScout — тоже в туннель: иначе проверка связи и замер скорости шли
+                    // мимо него и показывали скорость обычного интернета, а не туннеля, через
+                    // который идут выбранные приложения.
+                    runCatching { builder.addAllowedApplication(packageName) }
+                    TunnelDebug.stage("приложения: только выбранные (${selected.size}) и сам WarpScout — для проверок")
                 }
             }
 
@@ -1998,7 +2202,8 @@ class WarpVpnService : VpnService() {
                 // Модем перестроился: сменилась полоса, качество, набор возможностей. Считаем —
                 // частые перестройки на LTE и есть та работа, которая греет модем в кармане.
                 capsChanges.incrementAndGet()
-                val kind = kindOf(caps)
+                val kind = runCatching { dev.warpscout.app.NetIdentity.keyOf(this@WarpVpnService, network, caps) }
+                    .getOrDefault(kindOf(caps))
                 if (kind.isNotEmpty()) lastNetKind = kind
             }
 
@@ -2572,9 +2777,12 @@ class WarpVpnService : VpnService() {
         failoverOrder = orderedCandidates()
         failoverNet = kind
         failoverPos = current?.let { failoverOrder.indexOf(it) } ?: -1
-        val backup = runCatching { serviceSettings().backup }.getOrDefault("").trim()
+        val backup = runCatching { backupFor(serviceSettings(), kind) }.getOrDefault("").trim()
         if (backup.isNotEmpty() && backup != current && !sentryDead(kind, backup)) {
-            TunnelDebug.stage("резервная точка, выбранная вручную: $backup — она в переборе вторая")
+            TunnelDebug.stage(
+                "резервная точка ${if (dev.warpscout.app.NetIdentity.isMobile(kind)) "мобильной сети" else "Wi-Fi"}, " +
+                    "выбранная вручную: $backup — она в переборе вторая"
+            )
         } else if (remembered != null && remembered != current && !sentryDead(kind, remembered)) {
             TunnelDebug.stage("на сети «$kind» работала $remembered — она в переборе вторая")
         }
@@ -2598,13 +2806,18 @@ class WarpVpnService : VpnService() {
     private fun orderedCandidates(): List<String> {
         val kind = memoryNetKind()
         val now = System.currentTimeMillis()
-        val queue = runCatching { serviceSettings().failover }.getOrDefault(emptyList())
+        val settings = runCatching { serviceSettings() }.getOrDefault(dev.warpscout.core.state.ServiceSettings())
+        val queue = settings.failover
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        // Тройка подбора именно для этой сети (Wi-Fi или мобильной) — раньше общей очереди.
+        val netList = (if (dev.warpscout.app.NetIdentity.isMobile(kind)) settings.listMobile else settings.listWifi)
             .map { it.trim() }
             .filter { it.isNotEmpty() }
         val current = currentEndpointLine()
         val remembered = runCatching { EndpointMemory.goodFor(this, kind) }.getOrNull()
-        // Резервная точка, выбранная человеком: на неё — первой после текущей.
-        val backup = runCatching { serviceSettings().backup }.getOrDefault("").trim().takeIf { it.isNotEmpty() }
+        // Резервная точка этой сети, выбранная человеком: на неё — первой после текущей.
+        val backup = backupFor(settings, kind).trim().takeIf { it.isNotEmpty() }
         val prefix = "$kind|"
         val fresh = sentryMarks.entries
             .filter { (key, mark) ->
@@ -2617,11 +2830,16 @@ class WarpVpnService : VpnService() {
             if (backup != null) add(backup)
             if (remembered != null) add(remembered)
             addAll(fresh)
+            addAll(netList)
             addAll(queue)
         }.distinct()
         val (dead, alive) = all.partition { it != current && sentryDead(kind, it, now) }
         return alive + dead
     }
+
+    /** Резервная точка для сети [kind]: своя у мобильной, своя у Wi-Fi (и прочих). */
+    private fun backupFor(settings: dev.warpscout.core.state.ServiceSettings, kind: String): String =
+        if (dev.warpscout.app.NetIdentity.isMobile(kind)) settings.backupMobile else settings.backup
 
     /** Точка не поднялась при переподключении: для перебора это то же, что две неудачные пробы. */
     private fun sentryMarkDead(endpoint: String) {
@@ -2890,17 +3108,22 @@ class WarpVpnService : VpnService() {
         else -> ""
     }
 
-    /** Запомнить вид сети, на которой поднимались: по нему выбирается первая точка. */
+    /**
+     * Запомнить сеть, на которой поднимались: по ней выбирается первая точка. Ключ — с оператором
+     * или шлюзом (см. NetIdentity): у двух операторов разные фильтры, и точки помнятся отдельно.
+     */
     private fun rememberNetKind(network: android.net.Network) {
         val kind = runCatching {
             val cm = getSystemService(android.net.ConnectivityManager::class.java)
-            kindOf(cm?.getNetworkCapabilities(network))
+            dev.warpscout.app.NetIdentity.keyOf(this, network, cm?.getNetworkCapabilities(network))
         }.getOrDefault("")
         if (kind.isNotEmpty()) lastNetKind = kind
     }
 
     /** Вид сети для памяти точек: последний известный, иначе — по активной сети. */
-    private fun memoryNetKind(): String = lastNetKind.ifBlank { netKind() }
+    private fun memoryNetKind(): String = lastNetKind.ifBlank {
+        runCatching { dev.warpscout.app.NetIdentity.currentKey(this) }.getOrDefault("").ifBlank { netKind() }
+    }
 
     /**
      * Сеть, через которую сейчас пойдёт защищённый сокет: системная сеть по умолчанию, если это не
@@ -3004,6 +3227,15 @@ class WarpVpnService : VpnService() {
 
         /** Поднять последнюю рабочую конфигурацию: после загрузки и обновления (см. TunnelAutoStart). */
         const val ACTION_AUTOSTART = "dev.warpscout.app.tunnel.AUTOSTART"
+
+        /** Замерить скорость через туннель полной загрузкой (см. handleSpeedRequest). */
+        const val ACTION_SPEED = "dev.warpscout.app.tunnel.SPEED"
+
+        /** Старт для проверки в подборе: без автозамера скорости (подбор мерит сам). */
+        const val EXTRA_QUIET = "quiet"
+
+        /** Внутренний код «адрес замера вне туннеля» для SpeedTest.Result.state. */
+        private const val SPEED_BYPASS_CODE = 99
         const val EXTRA_CONF = "conf"
         const val EXTRA_ENDPOINT = "endpoint"
         const val EXTRA_PROBE_ID = "probeId"
@@ -3021,15 +3253,15 @@ class WarpVpnService : VpnService() {
         private const val LEGACY_CHANNEL = "warpscout.tunnel"
         private const val NOTIF_ID = 4200
 
-        fun start(context: Context, config: WarpConfig, requestedAt: Long = 0L) =
-            startWithText(context, WgConf.render(config), requestedAt)
+        fun start(context: Context, config: WarpConfig, requestedAt: Long = 0L, quiet: Boolean = false) =
+            startWithText(context, WgConf.render(config), requestedAt, quiet)
 
         /**
          * Запуск готовым текстом конфига. Нужен плитке быстрых настроек: она не собирает конфиг
          * заново, а берёт последний использованный ([Prefs.lastConfigText]) — то есть ровно то,
          * что в последний раз реально работало.
          */
-        fun startWithText(context: Context, text: String, requestedAt: Long = 0L) {
+        fun startWithText(context: Context, text: String, requestedAt: Long = 0L, quiet: Boolean = false) {
             // Новая попытка: результат прежней не должен влиять на неё. Без этого интерфейс
             // успевал прочитать старое «туннель работает» или «сдался» из предыдущего снимка и
             // делал вывод по устаревшим данным. Здесь это покрывает все пути запуска: кнопку,
@@ -3039,6 +3271,7 @@ class WarpVpnService : VpnService() {
                 action = ACTION_START
                 putExtra(EXTRA_CONF, text)
                 if (requestedAt > 0L) putExtra(EXTRA_REQUESTED_AT, requestedAt)
+                if (quiet) putExtra(EXTRA_QUIET, true)
             }
             // startForegroundService из фона на Android 12+ может быть запрещён
             // (ForegroundServiceStartNotAllowedException). Тогда пробуем обычный startService:
@@ -3075,6 +3308,13 @@ class WarpVpnService : VpnService() {
         fun requestLinkCheck(context: Context) {
             runCatching {
                 context.startService(Intent(context, WarpVpnService::class.java).apply { action = ACTION_CHECK })
+            }
+        }
+
+        /** Попросить полный замер скорости через туннель (итог придёт в снимке состояния). */
+        fun requestSpeedTest(context: Context) {
+            runCatching {
+                context.startService(Intent(context, WarpVpnService::class.java).apply { action = ACTION_SPEED })
             }
         }
 
@@ -3131,7 +3371,7 @@ class WarpVpnService : VpnService() {
             timeoutMs: Int,
             isCancelled: () -> Boolean = { false }
         ): Boolean {
-            start(context, config)
+            start(context, config, quiet = true)
             val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(2000)
             while (System.currentTimeMillis() < deadline && !isCancelled()) {
                 if (TunnelState.up) return true

@@ -184,6 +184,64 @@ object TunnelState {
         publishNow(urgent = true)
     }
 
+    /**
+     * Замер скорости через туннель (см. `TunnelStatus.speedState` и соседние поля). Как и проверка
+     * связи, пишется одним вызовом [setSpeed]: снимок не должен уйти с числом от одного замера и
+     * итогом от другого.
+     */
+    @Volatile
+    var speedAt: Long = 0L
+        private set
+    @Volatile
+    var speedState: Int = TunnelStatus.SPEED_UNKNOWN
+        private set
+    @Volatile
+    var speedKbps: Int = -1
+        private set
+    @Volatile
+    var speedPingMs: Int = -1
+        private set
+    @Volatile
+    var speedBytes: Long = 0L
+        private set
+    @Volatile
+    var speedFull: Boolean = false
+        private set
+    @Volatile
+    var speedRunningSince: Long = 0L
+        private set
+
+    fun setSpeed(at: Long, state: Int, kbps: Int, pingMs: Int, bytes: Long, full: Boolean) {
+        speedAt = at
+        speedState = state
+        speedKbps = kbps
+        speedPingMs = pingMs
+        speedBytes = bytes
+        speedFull = full
+        speedRunningSince = 0L
+        publishNow(urgent = true)
+    }
+
+    /** Замер начался (экран пишет «замеряю…») или закончился ничем (0). */
+    fun setSpeedRunning(since: Long) {
+        if (speedRunningSince == since) return
+        speedRunningSince = since
+        publishNow(urgent = true)
+    }
+
+    /** Новая сессия — число от прошлой точки к ней не относится. */
+    fun clearSpeed() {
+        if (speedAt == 0L && speedRunningSince == 0L && speedState == TunnelStatus.SPEED_UNKNOWN) return
+        speedAt = 0L
+        speedState = TunnelStatus.SPEED_UNKNOWN
+        speedKbps = -1
+        speedPingMs = -1
+        speedBytes = 0L
+        speedFull = false
+        speedRunningSince = 0L
+        publishNow(urgent = false)
+    }
+
     /** Новая сессия — прежний итог проверки связи к ней не относится. */
     fun clearLink() {
         if (linkAt == 0L && linkWeb == TunnelStatus.LINK_UNKNOWN && linkTg == TunnelStatus.LINK_UNKNOWN) return
@@ -221,6 +279,13 @@ object TunnelState {
         linkTg = linkTg,
         linkTgMs = linkTgMs,
         linkExit = linkExit,
+        speedAt = speedAt,
+        speedState = speedState,
+        speedKbps = speedKbps,
+        speedPingMs = speedPingMs,
+        speedBytes = speedBytes,
+        speedFull = speedFull,
+        speedRunningSince = speedRunningSince,
         bytesUp = TunnelDebug.bytesUp,
         bytesDown = TunnelDebug.bytesDown,
         handshakeAttempts = TunnelDebug.handshakeAttempts,
@@ -247,6 +312,13 @@ object TunnelState {
             probe = snapshot.probe
             marks = snapshot.marks
             setLink(snapshot.linkAt, snapshot.linkWeb, snapshot.linkMs, snapshot.linkTg, snapshot.linkTgMs, snapshot.linkExit)
+            speedAt = snapshot.speedAt
+            speedState = snapshot.speedState
+            speedKbps = snapshot.speedKbps
+            speedPingMs = snapshot.speedPingMs
+            speedBytes = snapshot.speedBytes
+            speedFull = snapshot.speedFull
+            speedRunningSince = snapshot.speedRunningSince
         } finally {
             mirroring = false
         }

@@ -31,6 +31,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 class Engine(private val context: Context) {
 
     companion object {
+        /** Режимы подбора (см. [start]). */
+        const val SCAN_CURRENT = 0
+        const val SCAN_MOBILE = 1
+        const val SCAN_BOTH = 2
+
         @Volatile
         private var shared: Engine? = null
 
@@ -83,6 +88,11 @@ class Engine(private val context: Context) {
         manual: WarpConfig?,
         sink: ProgressSink,
         allowAutoApply: Boolean = true,
+        /**
+         * Что подбирать: [SCAN_CURRENT] — текущую сеть (как всегда), [SCAN_MOBILE] — только
+         * мобильную, не уходя с Wi-Fi, [SCAN_BOTH] — текущую, а потом мобильную.
+         */
+        mode: Int = SCAN_CURRENT,
         onDone: (TuningResult?, String?) -> Unit
     ) {
         if (running) {
@@ -121,7 +131,21 @@ class Engine(private val context: Context) {
             val wasUp = runCatching { before.supported && before.isUp }.getOrDefault(false)
             val previousText = if (wasUp) previousTunnelText(guard) else ""
             tunnelBackUp = false
-            val outcome = runCatching { runOnce(spec, manual, watched, allowAutoApply) }
+            val outcome = runCatching {
+                when (mode) {
+                    SCAN_MOBILE -> runMobileOnce(spec, watched)
+                    SCAN_BOTH -> {
+                        val currentNet = runOnce(spec, manual, watched, allowAutoApply)
+                        // Мобильная — вторым проходом: только если первый не остановили.
+                        if (!watched.isCancelled()) {
+                            runCatching { runMobileOnce(spec, watched) }
+                                .onFailure { watched.log("подбор для мобильной сети: " + describe(it)) }
+                        }
+                        currentNet
+                    }
+                    else -> runOnce(spec, manual, watched, allowAutoApply)
+                }
+            }
             if (wasUp && !tunnelBackUp) restoreTunnel(before, previousText, watched)
             ScanGuard.stop(guard)
             main.post {
@@ -141,7 +165,7 @@ class Engine(private val context: Context) {
     ): TuningResult? {
         val latch = CountDownLatch(1)
         var result: TuningResult? = null
-        start(spec, manual, sink, allowAutoApply, { r, _ -> result = r; latch.countDown() })
+        start(spec, manual, sink, allowAutoApply, onDone = { r, _ -> result = r; latch.countDown() })
         latch.await(limitMs, TimeUnit.MILLISECONDS)
         return result
     }
@@ -242,38 +266,7 @@ class Engine(private val context: Context) {
 
         // 2b) Топ-3: не только победитель, но и две готовые замены. Сеть режет адреса выборочно и
         // без предупреждения — «переключиться на второй» должно быть нажатием, а не новым сканом.
-        runCatching {
-            val picked = Shortlist.pick(result.report.candidates)
-            val network = TuningCache.transportOf(context)
-            val savedAt = System.currentTimeMillis()
-            val entries = picked.mapNotNull { cand ->
-                val composed = ConfigComposer.applyPrefs(cand.config, prefs, prefs.junkPool)
-                // Ручной сервер из настроек свёл бы всю тройку в один адрес, и список замен стал бы
-                // бесполезным: три строки, которые падают вместе. В тройке остаётся адрес подбора —
-                // именно он и есть альтернатива текущей точке.
-                val restoreEndpoint = if (composed.endpoint != cand.config.endpoint) {
-                    composed.copy(endpoint = cand.config.endpoint)
-                } else {
-                    composed
-                }
-                val text = ConfigComposer.render(restoreEndpoint, prefs)
-                if (text.isBlank()) return@mapNotNull null
-                ConfigShortlist.Entry(
-                    endpoint = restoreEndpoint.endpoint.render(),
-                    junk = restoreEndpoint.junk.name,
-                    score = cand.score,
-                    resourcesOk = cand.resourcesOk,
-                    resourcesTotal = cand.resourcesTotal,
-                    configText = text,
-                    savedAt = savedAt,
-                    network = network
-                )
-            }.distinctBy { it.endpoint + "|" + it.junk }
-            if (entries.isNotEmpty()) {
-                ConfigShortlist.save(context, entries)
-                sink.log("топ-${entries.size} для переключения: " + entries.joinToString { it.endpoint })
-            }
-        }
+        saveShortlist(result, TuningCache.transportOf(context), handshakeOnly = false, sink = sink)
 
         // 3) Авто-применение: либо по галочке, либо восстанавливаем только что остановленный туннель.
         val best = result.best
@@ -308,6 +301,115 @@ class Engine(private val context: Context) {
             }
         }
         return result
+    }
+
+    /**
+     * Тройка лучших для переключения — в список своей сети (тройка другой сети остаётся).
+     * Сервису — сразу: он перебирает эту тройку сам, когда текущая точка замолчит.
+     */
+    private fun saveShortlist(result: TuningResult, network: String, handshakeOnly: Boolean, sink: ProgressSink) {
+        val prefs = Prefs(context)
+        runCatching {
+            val picked = Shortlist.pick(result.report.candidates)
+            val savedAt = System.currentTimeMillis()
+            val entries = picked.mapNotNull { cand ->
+                val composed = ConfigComposer.applyPrefs(cand.config, prefs, prefs.junkPool)
+                // Ручной сервер из настроек свёл бы всю тройку в один адрес, и список замен стал бы
+                // бесполезным: три строки, которые падают вместе. В тройке остаётся адрес подбора —
+                // именно он и есть альтернатива текущей точке.
+                val restoreEndpoint = if (composed.endpoint != cand.config.endpoint) {
+                    composed.copy(endpoint = cand.config.endpoint)
+                } else {
+                    composed
+                }
+                val text = ConfigComposer.render(restoreEndpoint, prefs)
+                if (text.isBlank()) return@mapNotNull null
+                ConfigShortlist.Entry(
+                    endpoint = restoreEndpoint.endpoint.render(),
+                    junk = restoreEndpoint.junk.name,
+                    score = cand.score,
+                    resourcesOk = cand.resourcesOk,
+                    resourcesTotal = cand.resourcesTotal,
+                    configText = text,
+                    savedAt = savedAt,
+                    network = network,
+                    speedKbps = cand.speedKbps,
+                    handshakeOnly = handshakeOnly
+                )
+            }.distinctBy { it.endpoint + "|" + it.junk }
+            if (entries.isNotEmpty()) {
+                ConfigShortlist.save(context, entries)
+                val where = if (ConfigShortlist.group(network) == ConfigShortlist.GROUP_MOBILE) "мобильной сети" else "Wi-Fi"
+                sink.log("топ-${entries.size} для $where: " + entries.joinToString { it.endpoint })
+                runCatching { dev.warpscout.app.status.ServiceSettingsStore.syncFromPrefs(context) }
+            }
+        }.onFailure { t -> sink.log("тройка лучших не сохранилась: " + describe(t)) }
+    }
+
+    /**
+     * Подбор для мобильной сети, не уходя с Wi-Fi: пробы рукопожатием через мобильную сеть,
+     * которую система держит поднятой по нашему запросу (см. CellularNetwork).
+     *
+     * Свой туннель на это время гасим и потом возвращаем: пробы идут тем же ключом, и удачное
+     * рукопожатие с мобильного адреса увело бы сессию работающего туннеля к себе — WireGuard
+     * «переезжает» на адрес, с которого пришло последнее рукопожатие.
+     */
+    private fun runMobileOnce(spec: TuningSpec, sink: ProgressSink): TuningResult? {
+        val tunnel = TunnelFactory.create(context)
+        val wasUp = runCatching { tunnel.supported && tunnel.isUp }.getOrDefault(false)
+        val previousText = if (wasUp) previousTunnelText(context) else ""
+        if (wasUp) {
+            tunnel.stop()
+            runCatching { tunnel.waitStopped(3000) }
+            sink.log("подбор для мобильной сети: собственный туннель приостановлен")
+        }
+        try {
+            if (!CellularNetwork.maybeAvailable(context)) {
+                sink.log("подбор для мобильной сети пропущен: SIM-карта не готова")
+                return null
+            }
+            val cell = CellularNetwork.acquire(context)
+            if (cell == null) {
+                sink.log("подбор для мобильной сети пропущен: система не дала мобильную сеть (выключены мобильные данные?)")
+                return null
+            }
+            try {
+                sink.log("мобильная сеть получена: ${CellularNetwork.describe(context)} — проверяю точки через неё, не уходя с Wi-Fi")
+                val (udp, tcp) = CellularNetwork.factories(cell.first)
+                val tuned = spec.copy(
+                    net = spec.net.copy(udpFactory = udp, tcpFactory = tcp),
+                    resources = emptyList(),
+                    checkBaselineResources = false,
+                    verifyThroughTunnel = false,
+                    cachedStart = null
+                )
+                val vault = KeyVault(context)
+                val keySource = KeySource(
+                    http = HttpClient(timeoutMs = 4000),
+                    store = vault.accountStore(),
+                    config = KeySourceConfig(),
+                    manual = null
+                )
+                val tuner = AutoTuner(
+                    keySource = keySource,
+                    wgProber = WgProber(tuned.net),
+                    tlsProber = TlsProber(tuned.net),
+                    resources = ResourceProber(HttpClient(6000)),
+                    tunnel = null
+                )
+                val result = tuner.run(tuned, sink)
+                if (sink.isCancelled()) {
+                    sink.log("подбор для мобильной сети остановлен — результат не сохраняю")
+                    return null
+                }
+                saveShortlist(result, ConfigShortlist.GROUP_MOBILE, handshakeOnly = true, sink = sink)
+                return result
+            } finally {
+                CellularNetwork.release(context, cell.second)
+            }
+        } finally {
+            if (wasUp) restoreTunnel(tunnel, previousText, sink)
+        }
     }
 
     /**

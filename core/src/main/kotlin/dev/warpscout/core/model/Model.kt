@@ -228,7 +228,13 @@ data class Candidate(
      */
     val resourcesOk: Int = -1,
     /** Сколько ресурсов проверяли (0 — не проверяли). */
-    val resourcesTotal: Int = 0
+    val resourcesTotal: Int = 0,
+    /**
+     * Скорость загрузки через туннель этого кандидата, Кбит/с (-1 — не мерили). Из двух точек,
+     * открывших одинаково много сайтов, лучше та, через которую быстрее качается: «открылось» не
+     * отличает 50 Мбит/с от 300 Кбит/с.
+     */
+    val speedKbps: Int = -1
 ) {
     val score: Int get() = parts.total
     val junk: dev.warpscout.core.model.JunkProfile get() = config.junk
