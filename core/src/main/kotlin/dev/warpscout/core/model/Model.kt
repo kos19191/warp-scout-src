@@ -68,7 +68,16 @@ data class ProbeSample(
      */
     val dataTried: Boolean = false,
     /** За сколько пришёл ответ на этот запрос, мс; null — не пришёл (или не проверяли). */
-    val dataMs: Double? = null
+    val dataMs: Double? = null,
+    /**
+     * Данные пошли и встали: на первый запрос ответ пришёл, а на запросы через полторы секунды и
+     * позже — нет. Так сеть режет «опознанный» туннель: пропускает рукопожатие и первые пакеты, а
+     * дальше молчит (журнал 22.11 19:04–19:10: «данные идут: ответ за 82 мс», а приложениям за 8 с
+     * не пришло ни байта и проверка связи провалилась на каждой точке без шума).
+     */
+    val dataFrozen: Boolean = false,
+    /** Данные идут и через полторы секунды после начала: поздние запросы тоже получили ответ. */
+    val dataSustained: Boolean = false
 )
 
 /** Агрегированная статистика по конечной точке. */
@@ -94,8 +103,20 @@ data class EndpointStats(
     /** Лучшее время ответа через туннель, мс (null — ответа не было или не проверяли). */
     val dataMs: Double? get() = samples.mapNotNull { it.dataMs }.minOrNull()
 
-    /** Рукопожатие было, а данные не пошли: ровно «вверх есть, вниз 0». */
-    val dataBlocked: Boolean get() = dataTried > 0 && dataReplies == 0
+    /**
+     * Данные встали через секунду-другую (см. [ProbeSample.dataFrozen]) и ни одна долгая проверка
+     * этой точки с этим шумом не показала обратного.
+     */
+    val dataFrozen: Boolean get() = samples.any { it.dataFrozen } && samples.none { it.dataSustained }
+
+    /** Долгая проверка показала: данные идут и через полторы секунды после начала. */
+    val dataSustained: Boolean get() = samples.any { it.dataSustained }
+
+    /**
+     * Рукопожатие было, а данные не пошли: ровно «вверх есть, вниз 0». С 1.10.30 сюда же — «пошли и
+     * встали»: для человека это тот же нерабочий туннель, только обман длится на секунду дольше.
+     */
+    val dataBlocked: Boolean get() = dataTried > 0 && (dataReplies == 0 || dataFrozen)
 
     /** Джиттер = среднее отклонение от медианы (в мс). */
     val jitterMs: Double?
@@ -228,9 +249,15 @@ data class ScoreParts(
      * Данные после рукопожатия: плюс, если ответ через туннель пришёл, большой минус, если нет
      * (см. [dev.warpscout.core.tune.Weights.dataBlocked]), ноль — не проверяли.
      */
-    val dataPath: Int = 0
+    val dataPath: Int = 0,
+    /**
+     * Маскировка: минус варианту без шума (чистый WireGuard), плюс — данным, которые идут и после
+     * первых секунд. С 1.10.30: «без шума» выигрывал подбор за подбором на одном пинге, а на сети
+     * человека он замерзает через секунду — работала только маскировка (журнал 22.11).
+     */
+    val masking: Int = 0
 ) {
-    val total: Int get() = confirmed + latency + stability + jitter + junkSurvival + resourceBonus - penalty + dataPath
+    val total: Int get() = confirmed + latency + stability + jitter + junkSurvival + resourceBonus - penalty + dataPath + masking
     fun asMap(): Map<String, Int> = linkedMapOf(
         "confirmed" to confirmed,
         "latency" to latency,
@@ -239,7 +266,8 @@ data class ScoreParts(
         "junk_survival" to junkSurvival,
         "resource_bonus" to resourceBonus,
         "penalty" to -penalty,
-        "data_path" to dataPath
+        "data_path" to dataPath,
+        "masking" to masking
     )
 }
 
@@ -280,7 +308,12 @@ data class TuningReport(
     val candidates: List<Candidate>,
     val resources: List<ResourceResult>,
     val endpointsTested: Int,
-    val notes: List<String> = emptyList()
+    val notes: List<String> = emptyList(),
+    /**
+     * Профили шума, на которых данные пошли и встали (по одной записи на каждую такую точку). По
+     * ним приложение запоминает, что на этой сети такой шум не годится (см. NoiseMemory).
+     */
+    val frozenProfiles: List<String> = emptyList()
 ) {
     /**
      * Лучший из годных (см. [Candidate.usable]). Раньше — просто максимум балла, и при «живых 0»

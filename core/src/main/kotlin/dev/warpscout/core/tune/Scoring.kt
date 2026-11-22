@@ -20,6 +20,12 @@ import dev.warpscout.core.model.Verdict
  *  • data_path      — после рукопожатия пришёл ответ через туннель (+300) или нет (−900). Минус
  *                     больше любого набора прочих плюсов: «рукопожатие есть, данных нет» не должно
  *                     обгонять точку, через которую данные идут (журнал 22.11: «вверх 5542, вниз 0»).
+ *                     С 1.10.30 «данные пошли и встали» — тоже −900;
+ *  • masking        — чистому WireGuard (без шума) −150, данным, которые идут и после первых секунд,
+ *                     +200. Без этого «none» выигрывал на одном пинге: шума у него нет, значит и
+ *                     рукопожатие на долю секунды быстрее. А на сети человека чистый WireGuard
+ *                     замерзает через секунду, и работает только маскировка (журнал 22.11: с ней
+ *                     туннель держался 12 часов, без неё не поднялся ни разу).
  */
 data class Weights(
     val handshakeOk: Int = 1000,
@@ -41,7 +47,9 @@ data class Weights(
     val dnsPenalty: Int = 800,
     val perResourceOk: Int = 60,
     val dataOk: Int = 300,
-    val dataBlocked: Int = 900
+    val dataBlocked: Int = 900,
+    val plainPenalty: Int = 150,
+    val dataSustained: Int = 200
 )
 
 object Scoring {
@@ -54,7 +62,9 @@ object Scoring {
         junkSurvived: Boolean?,
         resourcesOk: Int = 0,
         resourcesTotal: Int = 0,
-        weights: Weights = Weights()
+        weights: Weights = Weights(),
+        /** Вариант без шума (чистый WireGuard): см. [Weights.plainPenalty]. */
+        plain: Boolean = false
     ): ScoreParts {
         val confirmed = when (stats.bestVerdict) {
             Verdict.HANDSHAKE_OK -> weights.handshakeOk
@@ -78,11 +88,17 @@ object Scoring {
             else -> 0
         }
         // Данные после рукопожатия — главный признак «точка работает», а не только «сервер жив».
+        // «Пошли и встали» (dataBlocked с 1.10.30 включает и это) — тот же нерабочий туннель.
         val data = when {
             stats.dataTried == 0 -> 0
-            stats.dataReplies > 0 -> weights.dataOk
-            else -> -weights.dataBlocked
+            stats.dataBlocked -> -weights.dataBlocked
+            else -> weights.dataOk
         }
+        // Маскировка: при прочих равных вариант с шумом выше. Цена шума — один пакет перед каждым
+        // рукопожатием (раз в две с половиной минуты), цена его отсутствия на сети с DPI — туннель,
+        // который замерзает через секунду. Долгая проверка данных — самый сильный довод «за».
+        val masking = (if (plain && stats.replies > 0) -weights.plainPenalty else 0) +
+            (if (stats.dataSustained && !stats.dataBlocked) weights.dataSustained else 0)
         return ScoreParts(
             confirmed = maxOf(0, confirmed),
             latency = latency,
@@ -91,7 +107,8 @@ object Scoring {
             junkSurvival = junk,
             resourceBonus = resource,
             penalty = penalty,
-            dataPath = data
+            dataPath = data,
+            masking = masking
         )
     }
 }

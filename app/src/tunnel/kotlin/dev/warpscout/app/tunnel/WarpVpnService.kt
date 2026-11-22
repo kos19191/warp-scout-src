@@ -13,6 +13,7 @@ import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import dev.warpscout.app.ConfigShortlist
 import dev.warpscout.app.EndpointMemory
+import dev.warpscout.app.NoiseMemory
 import dev.warpscout.app.R
 import dev.warpscout.app.TunnelDebug
 import dev.warpscout.core.config.SplitRoutes
@@ -30,8 +31,11 @@ import dev.warpscout.core.net.EndpointSpec
 import dev.warpscout.core.net.NetSettings
 import dev.warpscout.core.net.SpeedTest
 import dev.warpscout.core.net.UdpSocketFactory
+import dev.warpscout.core.net.WarpDefaults
 import dev.warpscout.core.net.WgProber
 import dev.warpscout.core.state.TunnelStatus
+import dev.warpscout.core.tune.NoiseBook
+import dev.warpscout.core.tunnel.DataGate
 import dev.warpscout.core.tunnel.DataPlane
 import dev.warpscout.core.tunnel.ExitRouter
 import dev.warpscout.core.tunnel.PacketQueueIn
@@ -925,13 +929,20 @@ class WarpVpnService : VpnService() {
         // экземпляр сервиса — это двойные рукопожатия и двойной расход, а не «просто лог»).
         TunnelDebug.stage("подъём: экземпляр ${System.identityHashCode(this)}, эпоха $myEpoch")
         TunnelDebug.stage("конфиг получен (${text.toByteArray().size} байт)")
-        val cfg = runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull()
-        if (cfg == null) {
+        val parsed = runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull()
+        if (parsed == null) {
             fail("конфиг не разбирается: нет PrivateKey или PublicKey", startId, myEpoch)
             return
         }
+        // Шум под эту сеть (с 1.10.30): если на ней шум конфига замерзает (см. NoiseMemory), та же
+        // точка поднимается с маской, которая здесь работает. Конфиг, который потом сохранится для
+        // перезагрузки и пойдёт в перебор, — уже с новым шумом.
+        val noiseFix = noiseForNetwork(parsed)
+        val cfg = noiseFix?.first ?: parsed
+        val runText = noiseFix?.second ?: text
+        if (noiseFix != null && myEpoch == epoch.get()) lastConfigText = runText
         TunnelState.endpoint = cfg.endpoint.render()
-        TunnelDebug.stage("сервер ${cfg.endpoint.render()}, шум ${cfg.junk.name}, MTU ${cfg.mtu}")
+        TunnelDebug.stage("сервер ${cfg.endpoint.render()}, шум ${JunkLibrary.nameOf(cfg.junk)}, MTU ${cfg.mtu}")
 
         val socket = try {
             // soTimeout = 1500: ровно столько ждём один ответ handshake; attempts в NetSettings умножает это.
@@ -1273,7 +1284,7 @@ class WarpVpnService : VpnService() {
             // «устаревшая попытка: таймаут…» — по строке на каждую точку перебора.
             if (!waited && myEpoch == epoch.get() && !stopped.get() && !TunnelState.up) {
                 fail("таймаут: за 25 с handshake не завершился", startId, myEpoch)
-            } else if (waited && dataGate(cfg, text, startId, myEpoch)) {
+            } else if (waited && dataGate(cfg, runText, startId, myEpoch)) {
                 // Данные ходят. Через полторы секунды после подъёма (приложения как раз начинают
                 // переподключаться) проверяем ещё и настоящим запросом через маршруты телефона;
                 // два провала подряд — точка не годится, переходим на следующую. Проверка идёт в
@@ -1286,20 +1297,19 @@ class WarpVpnService : VpnService() {
 
     // ------------------------------------------------------------ проверка данных после рукопожатия
 
-    /** Когда слать пробы данных после рукопожатия (мс от его конца): потеря одной — не приговор. */
-    private val DATA_PROBE_AT_MS = longArrayOf(0L, 900L, 2_000L)
-
-    /** Сколько ждать ответа через туннель, прежде чем признать точку «без данных». */
-    private val DATA_GATE_MS = 3_500L
-
     /**
-     * Рукопожатие прошло — идут ли данные? DNS-запрос внутри сессии (мимо маршрутов телефона, см.
-     * DataPlane.sendDataProbe), три попытки за 3,5 с. Любой пакет приложений вниз — тоже ответ.
+     * Рукопожатие прошло — идут ли данные, и не встают ли они через секунду? DNS-запросы внутри
+     * сессии (мимо маршрутов телефона, см. DataPlane.sendDataProbe) по расписанию [DataGate]: две
+     * ранние пробы и две поздние, окно 4 с. Любой пакет приложений вниз — тоже ответ.
      *
-     * Ответ есть — туннель объявляется рабочим. Нет — точка «рукопожатие есть, данных нет»: она
-     * помечается мёртвой для этой сети, и попытка кончается отказом с понятной причиной; перебор
-     * (в интерфейсе или в самом сервисе) берёт следующую точку. Раньше такая точка считалась
-     * рабочей, а проверка связи через 28 с переподключала на неё же — по кругу (журнал 22.11).
+     * С 1.10.30 рабочим туннель считается, только если данные идут и через полторы секунды: сеть
+     * человека пропускала рукопожатие и первые 60–200 байт, а дальше молчала (журнал 22.11,
+     * 19:04:45 «данные идут: ответ за 82 мс» → через 28 с «нет ответа»), и сервис полчаса
+     * объявлял «подключено» точкам, через которые ничего не шло.
+     *
+     * Итог записывается в память шума этой сети (см. NoiseMemory): «пошли и встали» без шума — и
+     * следующая попытка пойдёт с маской. Точку без шума мёртвой не считаем: с маской она может
+     * работать (та же 188.114.97.1:500 с tls-fixed держалась 12 часов).
      *
      * @return true — данные идут, туннель объявлен рабочим.
      */
@@ -1310,20 +1320,14 @@ class WarpVpnService : VpnService() {
         val began = System.currentTimeMillis()
         TunnelState.dataCheckAt = began
         TunnelState.status = "рукопожатие есть — проверяю, идут ли данные"
-        var sent = 0
-        var ok = false
+        val gate = DataGate()
         try {
-            while (current() && System.currentTimeMillis() - began < DATA_GATE_MS) {
-                val since = System.currentTimeMillis() - began
-                if (sent < DATA_PROBE_AT_MS.size && since >= DATA_PROBE_AT_MS[sent]) {
-                    p.sendDataProbe()
-                    sent++
+            while (current()) {
+                when (gate.step(System.currentTimeMillis() - began, p.probeReplies, p.bytesDown)) {
+                    DataGate.Step.SEND_PROBE -> p.sendDataProbe()
+                    DataGate.Step.WAIT -> Thread.sleep(40)
+                    DataGate.Step.DONE -> break
                 }
-                if (p.probeReplies > 0 || p.bytesDown > 0L) {
-                    ok = true
-                    break
-                }
-                Thread.sleep(40)
             }
         } catch (e: InterruptedException) {
             return false
@@ -1331,27 +1335,98 @@ class WarpVpnService : VpnService() {
             if (TunnelState.dataCheckAt == began) TunnelState.dataCheckAt = 0L
         }
         if (!current()) return false
+        val verdict = gate.verdict ?: return false
         val ep = cfg.endpoint.render()
-        if (ok) {
-            val ms = p.probeReplyMs.takeIf { it >= 0L } ?: (System.currentTimeMillis() - began)
+        val noise = JunkLibrary.nameOf(cfg.junk)
+        val plain = cfg.junk.isEmpty
+        val warp = isWarpPeer(cfg)
+        val net = memoryNetKind()
+        val kind = when (verdict) {
+            DataGate.Verdict.FLOWING -> NoiseBook.WORKED
+            DataGate.Verdict.FROZEN -> NoiseBook.FROZE
+            DataGate.Verdict.NO_DATA -> NoiseBook.NO_DATA
+        }
+        // Свой сервер AmneziaWG в память шума не пишем: менять шум сами мы умеем только для WARP.
+        if (warp) runCatching { NoiseMemory.note(this, net, noise, kind, ep) }
+        if (verdict == DataGate.Verdict.FLOWING) {
+            val ms = p.probeReplyMs.takeIf { it >= 0L } ?: gate.firstMs.coerceAtLeast(0L)
             TunnelDebug.ok(
-                if (p.probeReplies > 0) "данные идут: ответ через туннель за $ms мс"
-                else "данные идут: приложения уже получают ответы"
+                if (p.probeReplies > 0) "данные идут: первый ответ через туннель за $ms мс, поздний тоже пришёл"
+                else "данные идут: приложения получают ответы"
             )
             markTunnelUp(cfg, text, myEpoch)
             return true
         }
-        // Рукопожатие есть, данных нет. Точку — в мёртвые для этой сети и из памяти «работала
-        // здесь»: иначе следующий переподъём опять начался бы с неё.
-        markDataDead(ep)
-        fail(
-            "данные не идут через $ep: рукопожатие есть, а за ${DATA_GATE_MS / 1000.0} с " +
-                "ни ответа через туннель, ни одного пакета вниз",
-            startId,
-            myEpoch
-        )
+        val label = if (plain) "без шума" else "шум $noise"
+        val reason = if (verdict == DataGate.Verdict.FROZEN) {
+            "данные не идут через $ep ($label): пошли и встали — первый ответ за ${gate.firstMs} мс, " +
+                "а через полторы секунды тишина"
+        } else {
+            "данные не идут через $ep ($label): рукопожатие есть, а за ${DataGate.WINDOW_MS / 1000.0} с " +
+                "ни ответа через туннель, ни одного пакета вниз"
+        }
+        if (warp) {
+            val next = runCatching {
+                NoiseMemory.replacement(this, net, noise, JunkLibrary.serviceOrder().map { it.name })
+            }.getOrNull()
+            if (next != null) TunnelDebug.stage("на этой сети шум $noise замерзает — следующая попытка с шумом $next")
+        }
+        // Точку — в мёртвые для этой сети и из памяти «работала здесь», но только с маской: без шума
+        // виноват скорее сам чистый WireGuard, а не точка.
+        if (!plain) markDataDead(ep)
+        fail(reason, startId, myEpoch)
         return false
     }
+
+    /**
+     * Записать в память шума этой сети итог для туннеля, который работает сейчас (текст —
+     * [lastConfigText]). [onlyPlain] — только если он без шума. Свой сервер AmneziaWG не пишем.
+     */
+    private fun noteRunningNoise(kind: Char, onlyPlain: Boolean) {
+        runCatching {
+            val text = lastConfigText ?: return@runCatching
+            val cfg = WgConf.toWarpConfig("WARP", text) ?: return@runCatching
+            if (!isWarpPeer(cfg)) return@runCatching
+            if (onlyPlain && !cfg.junk.isEmpty) return@runCatching
+            val noise = JunkLibrary.nameOf(cfg.junk)
+            NoiseMemory.note(this, memoryNetKind(), noise, kind, cfg.endpoint.render())
+            if (kind != NoiseBook.WORKED) {
+                val next = NoiseMemory.replacement(this, memoryNetKind(), noise, JunkLibrary.serviceOrder().map { it.name })
+                if (next != null) TunnelDebug.stage("на этой сети шум $noise замерзает — следующий подъём с шумом $next")
+            }
+        }
+    }
+
+    /** Пир — Cloudflare WARP (а не свой сервер WireGuard/AmneziaWG). */
+    private fun isWarpPeer(cfg: WarpConfig): Boolean =
+        cfg.account.peerPublicB64.trim() == WarpDefaults.WARP_PEER_PUBLIC
+
+    /**
+     * Шум под текущую сеть: если шум конфига здесь замерзает (см. NoiseMemory), — конфиг с маской,
+     * которая здесь работала или идёт следующей по [JunkLibrary.serviceOrder]. null — менять не нужно.
+     *
+     * Только для WARP: у своего сервера AmneziaWG шум — часть договорённости с сервером. H1–H4,
+     * S1–S4 и прочие ключи AWG остаются как были: меняются только мусорные пакеты перед рукопожатием.
+     */
+    private fun noiseForNetwork(cfg: WarpConfig): Pair<WarpConfig, String>? = runCatching {
+        if (!isWarpPeer(cfg)) return@runCatching null
+        val net = memoryNetKind()
+        if (net.isBlank()) return@runCatching null
+        val current = JunkLibrary.nameOf(cfg.junk)
+        val pick = NoiseMemory.replacement(this, net, current, JunkLibrary.serviceOrder().map { it.name })
+            ?: return@runCatching null
+        val lib = JunkLibrary.byName(pick) ?: return@runCatching null
+        val old = cfg.junk.awg
+        val awg = lib.awg.copy(
+            h1 = old.h1, h2 = old.h2, h3 = old.h3, h4 = old.h4,
+            s1 = old.s1, s2 = old.s2, s3 = old.s3, s4 = old.s4,
+            extra = old.extra
+        )
+        val next = cfg.copy(junk = lib.copy(awg = awg))
+        val text = WgConf.render(next)
+        TunnelDebug.stage("на этой сети шум $current замерзает — подключаюсь к ${cfg.endpoint.render()} с шумом ${lib.name}")
+        next to text
+    }.getOrNull()
 
     /**
      * Туннель работает: данные через него идут. Всё, что раньше делалось сразу после рукопожатия, —
@@ -1390,8 +1465,14 @@ class WarpVpnService : VpnService() {
         runCatching { EndpointMemory.forget(this, memoryNetKind(), endpoint) }
     }
 
-    /** Причина отказа — «рукопожатие есть, данных нет» (см. [dataGate]). */
+    /** Причина отказа — «рукопожатие есть, данных нет» или «пошли и встали» (см. [dataGate]). */
     private fun isDataDead(reason: String?): Boolean = reason.orEmpty().contains("данные не идут")
+
+    /**
+     * Отказ был без шума (чистый WireGuard): точку за него мёртвой не считаем — следующая попытка
+     * пойдёт с маской, и с ней точка может работать.
+     */
+    private fun isPlainNoise(reason: String?): Boolean = reason.orEmpty().contains("(без шума)")
 
     /**
      * «Туннель поднят, а интернета нет» — отдельный диагноз: if up, но счётчики нулевые, значит
@@ -1784,6 +1865,9 @@ class WarpVpnService : VpnService() {
         val oldPoint = currentEndpointLine().orEmpty()
         // Точку, на которой встала загрузка, на этой сети пока обходим (как дважды молчавшую).
         if (oldPoint.isNotEmpty()) sentryMarkDead(oldPoint)
+        // И шум — в память сети (с 1.10.30): без шума одной заморозки хватает, чтобы следующий
+        // подъём пошёл с маской; маске — двух разных точек (см. NoiseBook.frozen).
+        noteRunningNoise(NoiseBook.FROZE, onlyPlain = false)
         failoverOrder = emptyList()
         rebuildFailoverOrder()
         val next = nextFailoverEndpoint()
@@ -1814,6 +1898,10 @@ class WarpVpnService : VpnService() {
             cycleTried.add(oldPoint)
             cycleSilent.add(oldPoint)
         }
+        // Без шума «поднялся, а через полминуты тишина» — почерк DPI против WireGuard (журнал 22.11,
+        // 19:04–19:10, шесть точек подряд): следующий подъём пойдёт с маской. С маской так же
+        // выглядит и пропажа сети, поэтому её шум здесь не судим.
+        noteRunningNoise(NoiseBook.FROZE, onlyPlain = true)
         failoverOrder = emptyList()
         rebuildFailoverOrder()
         val next = nextFailoverEndpoint()
@@ -2743,7 +2831,7 @@ class WarpVpnService : VpnService() {
             when {
                 // «Порт закрыт» — прямой ответ сети: точка мертва, сколько ни жди. «Данные не
                 // идут» — тоже: рукопожатие прошло, сеть до точки есть, а данных через неё нет.
-                isClosedPort(reason) || isDataDead(reason) -> sentryMarkDead(oldPoint)
+                isClosedPort(reason) || (isDataDead(reason) && !isPlainNoise(reason)) -> sentryMarkDead(oldPoint)
                 // Молчание — только кандидат в мёртвые (см. [cycleSilent]).
                 isSilentPoint(reason) -> cycleSilent.add(oldPoint)
             }
@@ -2977,6 +3065,9 @@ class WarpVpnService : VpnService() {
         // Без шума не ответил никто — сеть режет голый WireGuard: подробно смотрим точки пула с шумом.
         val targets = (if (alive.isNotEmpty()) alive.map { it.endpoint } else pool).take(RESCUE_REFINE)
         val profiles = rescueProfiles(cfg)
+        TunnelDebug.stage("подбор сервиса: шум по порядку — " + profiles.joinToString { JunkLibrary.nameOf(it) })
+        val warp = isWarpPeer(cfg)
+        val net = memoryNetKind()
         val found = ArrayList<RescuePoint>()
         for (ep in targets) {
             if (!live() || found.size >= dev.warpscout.core.tune.Shortlist.LIMIT) break
@@ -2986,6 +3077,18 @@ class WarpVpnService : VpnService() {
                     prober.probe(ep, cfg.account, peer, profile.takeIf { !it.isEmpty }, dataProbe = true)
                 }.getOrNull() ?: continue
                 val ms = r.stats.dataMs ?: continue
+                // Один ответ ещё ничего не обещает (журнал 22.11: подбор сервиса нашёл три точки без
+                // шума «с данными», и все замерзали через секунду). Долгая проба: данные должны идти
+                // и через полторы секунды. Не удалось повторить рукопожатие — верим первой пробе.
+                val long = runCatching {
+                    prober.probeSustained(ep, cfg.account, peer, profile.takeIf { !it.isEmpty })
+                }.getOrNull()
+                if (long != null && long.dataTried && !long.dataSustained) {
+                    val name = JunkLibrary.nameOf(profile)
+                    if (warp) runCatching { NoiseMemory.note(this, net, name, NoiseBook.FROZE, ep.render()) }
+                    TunnelDebug.stage("подбор сервиса: ${ep.render()} · $name — ${long.note.take(90)}, не беру")
+                    continue
+                }
                 found += RescuePoint(ep, profile, ms)
                 break // одной рабочей комбинации на точку хватает
             }
@@ -2998,15 +3101,26 @@ class WarpVpnService : VpnService() {
     }
 
     /**
-     * Профили шума для подбора сервиса: текущий (с ним туннель уже работал) и два из библиотеки —
-     * «без шума» и TLS. Больше — дольше, а подбор идёт, пока туннель лежит.
+     * Профили шума для подбора сервиса. С 1.10.30 первыми — маски: та, с которой на этой сети уже
+     * шли данные, потом по [JunkLibrary.serviceOrder] (TLS, QUIC, SIP); «без шума» — последним.
+     * Шум, который на этой сети замерзает (см. NoiseMemory), не пробуем вовсе. Раньше первым шёл
+     * текущий шум — а он и был «none», который здесь замерзал (журнал 22.11, 19:07: подбор сервиса
+     * нашёл три точки без шума, и петля пошла по второму кругу).
      */
     private fun rescueProfiles(cfg: WarpConfig): List<JunkProfile> {
-        val library = listOf(JunkLibrary.none(), JunkLibrary.tlsFixed()) + JunkLibrary.defaultPool()
+        // Свой сервер AmneziaWG: шум и параметры H/S — договорённость с сервером, их не трогаем.
+        if (!isWarpPeer(cfg)) return listOf(cfg.junk)
+        val net = memoryNetKind()
+        val bad = runCatching { NoiseMemory.frozen(this, net) }.getOrDefault(emptySet())
+        val worked = runCatching { NoiseMemory.preferred(this, net) }.getOrNull()?.let { JunkLibrary.byName(it) }
+        val library = JunkLibrary.serviceOrder()
         // У разобранного из текста конфига профиль называется «imported»: возвращаем ему имя из
         // библиотеки, если шум тот же, — иначе в «Лучших конфигах» стояло бы непонятное «imported».
         val current = library.firstOrNull { sameJunk(it, cfg.junk) }?.let { cfg.junk.copy(name = it.name) } ?: cfg.junk
-        return (listOf(current) + library).distinctBy { junkKey(it) }.take(3)
+        val ordered = (listOfNotNull(worked) + library.filter { !it.isEmpty } + current + JunkLibrary.none())
+            .distinctBy { junkKey(it) }
+            .filter { JunkLibrary.nameOf(it) !in bad }
+        return ordered.take(4).ifEmpty { listOf(JunkLibrary.tlsFixed()) }
     }
 
     private fun junkKey(p: JunkProfile): String = JunkChunk.renderAll(p.i1 + p.i2)

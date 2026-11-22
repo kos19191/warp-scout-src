@@ -46,6 +46,8 @@ import dev.warpscout.core.tune.Scoring
 import dev.warpscout.core.tune.Shortlist
 import dev.warpscout.core.tune.Weights
 import dev.warpscout.core.wg.Wg
+import dev.warpscout.core.tune.NoiseBook
+import dev.warpscout.core.tunnel.DataGate
 
 /**
  * Автономные проверки ядра. Запускаются и на десктопе (`warp-scout selftest`), и как unit-тесты
@@ -100,6 +102,11 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         }
         section("данные после рукопожатия и очередь (1.10.29)") {
             dataProbeChecks()
+        }
+        section("заморозка данных и маскировка (1.10.30)") {
+            sustainChecks()
+            dataGateChecks()
+            noiseBookChecks()
         }
         section("расход батареи: интервал keepalive") {
             keepalivePolicy()
@@ -688,6 +695,178 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             TunnelStatus.fromJson(TunnelStatus(dataCheckAt = 1_758_000_000_777L).toJson())?.dataCheckAt,
             1_758_000_000_777L
         )
+    }
+
+    /**
+     * 1.10.30: «данные пошли и встали» и маскировка. Журнал 22.11: на сети человека чистый WireGuard
+     * отвечал на рукопожатие и на первый DNS-запрос, а дальше молчал — подбор выбирал его раз за
+     * разом, хотя туннель держался только с шумом (tls-fixed — 12 часов подряд).
+     */
+    private fun sustainChecks() {
+        val clientPriv = ByteArray(32) { (it * 7 + 3).toByte() }
+        val serverPriv = ByteArray(32) { (it * 11 + 5).toByte() }
+        val serverPub = Crypto.publicOf(serverPriv)
+        val account = WarpAccount(Crypto.base64(clientPriv), Crypto.base64(serverPub))
+        val prober = WgProber(NetSettings(attempts = 2, timeoutMs = 800, betweenAttemptsMs = 0))
+
+        // Сервер отвечает на все запросы внутри сессии: данные идут и не встают.
+        val steady = LoopbackServer(serverPriv, answerData = { fakeDnsReply(it) }).start()
+        try {
+            val ep = Endpoint("127.0.0.1", steady.port)
+            val s1 = prober.probeSustained(ep, account, serverPub, null, 2_400)
+            check(
+                "долгая проба: данные идут и через полторы секунды",
+                s1.dataTried && s1.dataSustained && !s1.dataFrozen && s1.dataMs != null,
+                s1.note
+            )
+            val s2 = prober.probeSustained(ep, account, serverPub, JunkLibrary.tlsFixed(), 2_400)
+            check("долгая проба: с шумом tls-fixed тоже", s2.dataSustained && s2.profile == "tls-fixed", s2.note)
+            // Время ответа профиля с шумом — от инициации, без паузы после мусорного пакета
+            // (Jmin = 40 мс): раньше любой шум проигрывал «none» по пингу на ровном месте.
+            val masked = prober.probe(ep, account, serverPub, JunkLibrary.tlsFixed())
+            val rtt = masked.stats.minRtt ?: 999.0
+            check("пинг профиля с шумом не включает паузу после мусора", rtt < 38.0, "rtt=$rtt мс")
+        } finally {
+            steady.stop()
+        }
+
+        // Сервер отвечает только на первый пакет данных — ровно «пошли и встали».
+        val answered = java.util.concurrent.atomic.AtomicInteger(0)
+        val freezer = LoopbackServer(serverPriv, answerData = { q ->
+            if (answered.incrementAndGet() <= 1) fakeDnsReply(q) else null
+        }).start()
+        try {
+            val ep = Endpoint("127.0.0.1", freezer.port)
+            val f = prober.probeSustained(ep, account, serverPub, null, 2_400)
+            check(
+                "долгая проба: «первый ответ есть, дальше тишина» — заморозка",
+                f.dataTried && f.dataFrozen && !f.dataSustained && f.dataMs != null,
+                f.note
+            )
+            val quick = ProbeSample(ep, Verdict.HANDSHAKE_OK, 20.0, 0, dataTried = true, dataMs = 21.0)
+            val st = EndpointStats(ep, listOf(quick, f), Verdict.HANDSHAKE_OK, 1, 1)
+            check("замёрзшая точка считается точкой без данных", st.dataFrozen && st.dataBlocked)
+            val cfg = WarpConfig(name = "т", account = account, endpoint = ep, junk = JunkLibrary.none())
+            val cand = Candidate(cfg, st, Scoring.evaluate(st, true, plain = true))
+            check("замёрзшая точка в очередь не попадает", !cand.usable && Shortlist.pick(listOf(cand)).isEmpty())
+            val okSample = ProbeSample(ep, Verdict.HANDSHAKE_OK, 20.0, 0, dataTried = true, dataMs = 21.0, dataSustained = true)
+            val healed = EndpointStats(ep, listOf(quick, f, okSample), Verdict.HANDSHAKE_OK, 1, 1)
+            check("долгая проба «идут» перевешивает прошлую заморозку", !healed.dataFrozen && !healed.dataBlocked)
+        } finally {
+            freezer.stop()
+        }
+
+        // Маскировка в баллах: при равных замерах вариант с шумом выше, а проверенный долгой пробой
+        // шум выше быстрого «без шума».
+        val ep2 = Endpoint("1.2.3.4", 500)
+        fun st(ms: Double, sustained: Boolean = false) = EndpointStats(
+            ep2,
+            listOf(ProbeSample(ep2, Verdict.HANDSHAKE_OK, ms, 0, dataTried = true, dataMs = ms + 5, dataSustained = sustained)),
+            Verdict.HANDSHAKE_OK, 3, 3
+        )
+        val plainScore = Scoring.evaluate(st(40.0), true, plain = true).total
+        val maskedScore = Scoring.evaluate(st(40.0), true, plain = false).total
+        check("маскировка: с шумом выше, чем без шума, при равных замерах", maskedScore > plainScore, "$maskedScore против $plainScore")
+        val fastPlain = Scoring.evaluate(st(20.0), true, plain = true).total
+        val slowMasked = Scoring.evaluate(st(150.0, sustained = true), true, plain = false).total
+        check("маскировка: шум с долгой пробой выше быстрого «без шума»", slowMasked > fastPlain, "$slowMasked против $fastPlain")
+
+        // Имя шума по самим пакетам: сервис и память сетей узнают профиль из текста конфига, где
+        // имени нет (там он «imported»).
+        for (p in JunkLibrary.defaultPool()) {
+            expect("имя шума по пакетам: ${p.name}", JunkLibrary.nameOf(p.copy(name = "imported")), p.name)
+            val cfg = WarpConfig(name = "т", account = account, endpoint = ep2, junk = p)
+            val back = WgConf.toWarpConfig("т", WgConf.render(cfg))
+            expect("имя шума переживает текст конфига: ${p.name}", back?.let { JunkLibrary.nameOf(it.junk) }, p.name)
+            expect("профиль по имени: ${p.name}", JunkLibrary.byName(p.name)?.let { JunkChunk.renderAll(it.i1 + it.i2) }, JunkChunk.renderAll(p.i1 + p.i2))
+        }
+        expect("порядок шума в сервисе: первым tls-fixed", JunkLibrary.serviceOrder().firstOrNull()?.name, "tls-fixed")
+        expect("порядок шума в сервисе: «без шума» последним", JunkLibrary.serviceOrder().lastOrNull()?.name, "none")
+        check("неизвестный шум по имени — null", JunkLibrary.byName("нет-такого") == null)
+    }
+
+    /**
+     * Проверка данных в сервисе (1.10.30): рабочим туннель считается, только если данные идут и
+     * через полторы секунды. Моделируем сеть: проба, отправленная в момент t, получает ответ через
+     * rtt мс, если сеть её пропускает.
+     */
+    private fun dataGateChecks() {
+        fun runGate(
+            replyIf: (Long) -> Boolean,
+            rtt: Long = 80L,
+            bytesAt: (Long) -> Long = { 0L }
+        ): Pair<DataGate.Verdict?, Long> {
+            val gate = DataGate()
+            val sentAt = ArrayList<Long>()
+            var t = 0L
+            while (t <= 8_000L) {
+                val replies = sentAt.count { s0 -> replyIf(s0) && t >= s0 + rtt }
+                when (gate.step(t, replies, bytesAt(t))) {
+                    DataGate.Step.SEND_PROBE -> sentAt += t
+                    DataGate.Step.DONE -> return gate.verdict to t
+                    DataGate.Step.WAIT -> t += 40L
+                }
+            }
+            return gate.verdict to t
+        }
+        val flowing = runGate({ true })
+        expect("проверка данных: данные идут — рабочий", flowing.first, DataGate.Verdict.FLOWING)
+        check("проверка данных: рабочий — меньше чем за две секунды", flowing.second < 2_000L, "t=${flowing.second}")
+        // Журнал 22.11 19:04:45: ответ на первую пробу пришёл, дальше — тишина.
+        val frozen = runGate({ it < 500L })
+        expect("проверка данных: «пошли и встали» — заморозка", frozen.first, DataGate.Verdict.FROZEN)
+        expect("проверка данных: ни ответа — данных нет", runGate({ false }).first, DataGate.Verdict.NO_DATA)
+        val apps = runGate({ false }, bytesAt = { it / 100L * 50L })
+        expect("проверка данных: приложения получают байты и после 1,5 с — рабочий", apps.first, DataGate.Verdict.FLOWING)
+        check("проверка данных: по байтам приложений — сразу после 1,5 с", apps.second in 1_500L..1_700L, "t=${apps.second}")
+        // Журнал 22.11 18:53: «вверх 1091, вниз 60 байт» за полсекунды — и больше ничего.
+        val bytesFrozen = runGate({ false }, bytesAt = { if (it >= 300L) 120L else 0L })
+        expect("проверка данных: 120 байт в начале и тишина — заморозка", bytesFrozen.first, DataGate.Verdict.FROZEN)
+        val slow = runGate({ true }, rtt = 1_200L)
+        expect("проверка данных: медленная сеть (1,2 с на ответ) — рабочий", slow.first, DataGate.Verdict.FLOWING)
+        check("проверка данных: укладывается в окно", flowing.second <= DataGate.WINDOW_MS && slow.second <= DataGate.WINDOW_MS)
+    }
+
+    /** Книга шума по сетям (1.10.30): когда шум считать замерзающим и на что его менять. */
+    private fun noiseBookChecks() {
+        val net = "wifi·665"
+        val now = 1_763_800_000_000L
+        val order = JunkLibrary.serviceOrder().map { it.name }
+        fun ev(noise: String, kind: Char, ep: String, ago: Long = 60_000L, n: String = net) =
+            NoiseBook.Event(n, noise, kind, ep, now - ago)
+
+        val plainFroze = listOf(ev("none", NoiseBook.FROZE, "8.39.204.10:4500"))
+        check("шум: «пошли и встали» без шума — сразу замерзающий", "none" in NoiseBook.frozen(plainFroze, net, now))
+        expect("шум: замена «none» — tls-fixed", NoiseBook.replacement(plainFroze, net, "none", order, now), "tls-fixed")
+        check("шум: на другой сети ничего не известно", NoiseBook.frozen(plainFroze, "мобильная·25001", now).isEmpty())
+        check("шум: через четверо суток запись забыта", NoiseBook.frozen(listOf(ev("none", NoiseBook.FROZE, "a", ago = 4L * 24 * 3600 * 1000)), net, now).isEmpty())
+
+        val maskOnce = listOf(ev("tls-fixed", NoiseBook.FROZE, "a"))
+        check("шум: маска встала на одной точке — это может быть точка", "tls-fixed" !in NoiseBook.frozen(maskOnce, net, now))
+        check("шум: маска встала на двух точках — замерзающий", "tls-fixed" in NoiseBook.frozen(maskOnce + ev("tls-fixed", NoiseBook.FROZE, "b"), net, now))
+
+        val noDataSame = listOf(ev("none", NoiseBook.NO_DATA, "a"), ev("none", NoiseBook.NO_DATA, "a", ago = 30_000L))
+        check("шум: «данных нет» дважды на одной точке — ещё не шум", "none" !in NoiseBook.frozen(noDataSame, net, now))
+        check("шум: «данных нет» на двух точках — замерзающий", "none" in NoiseBook.frozen(noDataSame + ev("none", NoiseBook.NO_DATA, "b"), net, now))
+
+        val healed = plainFroze + ev("none", NoiseBook.WORKED, "c", ago = 1_000L)
+        check("шум: данные пошли после заморозки — снова годится", "none" !in NoiseBook.frozen(healed, net, now))
+        expect("шум: незамерзающий не меняем", NoiseBook.replacement(healed, net, "none", order, now), null)
+
+        val worked = plainFroze + ev("quic:akbars.ru", NoiseBook.WORKED, "d", ago = 2_000L)
+        expect("шум: первым — тот, с которым здесь уже шли данные", NoiseBook.replacement(worked, net, "none", order, now), "quic:akbars.ru")
+        check("шум: «подбор сказал встают» — сразу", "sip-invite" in NoiseBook.frozen(listOf(ev("sip-invite", NoiseBook.TUNER, "")), net, now))
+
+        val all = order.map { ev(it, NoiseBook.TUNER, "") }
+        expect("шум: замерзает всё — не меняем, не на что", NoiseBook.replacement(all, net, "none", order, now), null)
+
+        val text = NoiseBook.render(plainFroze + ev("quic:x|y", NoiseBook.WORKED, "1.2.3.4:500"))
+        val back = NoiseBook.parse(text + "битая строка\n|||\n")
+        expect("шум: книга переживает файл", back.size, 2)
+        expect("шум: «|» в имени не ломает строку", back.lastOrNull()?.noise, "quic:x/y")
+        var many = emptyList<NoiseBook.Event>()
+        for (i in 0 until NoiseBook.MAX_EVENTS + 20) many = NoiseBook.add(many, ev("none", NoiseBook.NO_DATA, "p$i", ago = 0L))
+        expect("шум: в книге не больше ${NoiseBook.MAX_EVENTS} записей", many.size, NoiseBook.MAX_EVENTS)
     }
 
     /**

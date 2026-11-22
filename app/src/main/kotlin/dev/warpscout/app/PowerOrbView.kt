@@ -23,6 +23,10 @@ import androidx.core.content.ContextCompat
  * только дуга во время подключения — это индикатор работы, и он останавливается вместе с ним,
  * а также когда View не на экране.
  *
+ * С 1.10.30 — кольцо-прогресс (так выбрал человек): пока идёт подбор, кольцо заполняется по ходу
+ * поиска ([setProgress]), а при подключении по кольцу бежит светлая дуга. Заполнение плавное, но
+ * анимируется только переход к новому значению (300 мс), без бесконечных циклов.
+ *
  * Значок питания, надпись и таймер лежат поверх — обычными View в разметке: так их проще
  * озвучивать TalkBack и менять текстом, не перерисовывая круг.
  */
@@ -39,11 +43,23 @@ class PowerOrbView @JvmOverloads constructor(
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
     }
+    private val progressPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val headPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val arcBox = RectF()
 
     private var state = STATE_OFF
     private var sweepStart = -90f
     private var spinner: ValueAnimator? = null
+
+    /** Доля заполнения кольца, которая сейчас нарисована; меньше нуля — прогресса нет. */
+    private var shownProgress = -1f
+
+    /** Куда кольцо идёт. */
+    private var targetProgress = -1f
+    private var progressAnim: ValueAnimator? = null
 
     /** Шейдеры зависят от размера и цвета: пересобираем только когда меняется одно из двух. */
     private var shadersFor = ""
@@ -57,7 +73,44 @@ class PowerOrbView @JvmOverloads constructor(
         invalidate()
     }
 
+    /**
+     * Прогресс подбора: 0..1 — кольцо заполнено на эту долю, null или меньше нуля — кольца-прогресса
+     * нет (обычное кольцо состояния). Повтор того же значения ничего не делает. Заметный откат
+     * назад (подбор начался заново: быстрый старт не подтвердился) — без анимации.
+     */
+    fun setProgress(fraction: Float?) {
+        val target = fraction?.takeIf { it >= 0f }?.coerceIn(0f, 1f) ?: -1f
+        if (kotlin.math.abs(target - targetProgress) < 0.002f) return
+        targetProgress = target
+        progressAnim?.cancel()
+        progressAnim = null
+        val from = shownProgress
+        if (target < 0f || from < 0f || target < from - 0.25f || !isAttachedToWindow) {
+            shownProgress = target
+            updateSpinner()
+            invalidate()
+            return
+        }
+        progressAnim = ValueAnimator.ofFloat(from, target).apply {
+            duration = 300L
+            addUpdateListener { a ->
+                shownProgress = a.animatedValue as Float
+                invalidate()
+            }
+            start()
+        }
+        updateSpinner()
+    }
+
     private fun color(res: Int): Int = ContextCompat.getColor(context, res)
+
+    /** Светлый вариант цвета: дуга подключения «бежит светом» по кольцу. */
+    private fun lighter(c: Int, k: Float): Int = Color.argb(
+        Color.alpha(c),
+        (Color.red(c) + (255 - Color.red(c)) * k).toInt().coerceIn(0, 255),
+        (Color.green(c) + (255 - Color.green(c)) * k).toInt().coerceIn(0, 255),
+        (Color.blue(c) + (255 - Color.blue(c)) * k).toInt().coerceIn(0, 255)
+    )
 
     private fun accentFor(s: Int): Int = when (s) {
         STATE_ON -> color(R.color.orb_accent)
@@ -110,14 +163,31 @@ class PowerOrbView @JvmOverloads constructor(
         innerPaint.color = withAlpha(color(R.color.orb_ring_off), 0.55f)
         canvas.drawCircle(cx, cy, disc - 7f * density, innerPaint)
 
+        val showProgress = shownProgress >= 0f
         ringPaint.strokeWidth = 3f * density
-        ringPaint.color = if (state == STATE_CONNECTING) withAlpha(accent, 0.30f) else accent
+        ringPaint.color = if (state == STATE_CONNECTING || showProgress) withAlpha(accent, 0.30f) else accent
         canvas.drawCircle(cx, cy, disc, ringPaint)
+        arcBox.set(cx - disc, cy - disc, cx + disc, cy + disc)
 
-        if (state == STATE_CONNECTING) {
+        if (showProgress) {
+            // Кольцо-прогресс подбора: заполненная часть — цветом состояния, конец — светлой точкой,
+            // чтобы было видно, где поиск сейчас.
+            val sweep = 360f * shownProgress
+            progressPaint.strokeWidth = 4f * density
+            progressPaint.color = accent
+            if (sweep > 0.5f) canvas.drawArc(arcBox, -90f, sweep, false, progressPaint)
+            val angle = Math.toRadians((-90f + sweep).toDouble())
+            headPaint.color = lighter(accent, 0.55f)
+            canvas.drawCircle(
+                cx + disc * kotlin.math.cos(angle).toFloat(),
+                cy + disc * kotlin.math.sin(angle).toFloat(),
+                3.2f * density,
+                headPaint
+            )
+        } else if (state == STATE_CONNECTING) {
+            // Подключение: по кольцу бежит светлая дуга.
             arcPaint.strokeWidth = 3.5f * density
-            arcPaint.color = accent
-            arcBox.set(cx - disc, cy - disc, cx + disc, cy + disc)
+            arcPaint.color = lighter(accent, 0.45f)
             canvas.drawArc(arcBox, sweepStart, 80f, false, arcPaint)
         }
     }
@@ -125,9 +195,9 @@ class PowerOrbView @JvmOverloads constructor(
     private fun withAlpha(c: Int, a: Float): Int =
         Color.argb((Color.alpha(c) * a).toInt().coerceIn(0, 255), Color.red(c), Color.green(c), Color.blue(c))
 
-    /** Дуга крутится только пока идёт подключение и View видна. */
+    /** Дуга крутится только пока идёт подключение (не подбор с кольцом-прогрессом) и View видна. */
     private fun updateSpinner() {
-        val need = state == STATE_CONNECTING && isAttachedToWindow && isShown
+        val need = state == STATE_CONNECTING && targetProgress < 0f && isAttachedToWindow && isShown
         if (need && spinner == null) {
             spinner = ValueAnimator.ofFloat(0f, 360f).apply {
                 duration = 1_400L
@@ -153,6 +223,9 @@ class PowerOrbView @JvmOverloads constructor(
     override fun onDetachedFromWindow() {
         spinner?.cancel()
         spinner = null
+        progressAnim?.cancel()
+        progressAnim = null
+        if (targetProgress >= 0f) shownProgress = targetProgress
         super.onDetachedFromWindow()
     }
 

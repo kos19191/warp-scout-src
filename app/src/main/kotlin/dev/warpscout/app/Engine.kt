@@ -16,6 +16,7 @@ import dev.warpscout.core.report.Report
 import dev.warpscout.core.tune.AutoTuner
 import dev.warpscout.core.tune.ProgressSink
 import dev.warpscout.core.tune.TuningResult
+import dev.warpscout.core.tune.NoiseBook
 import dev.warpscout.core.tune.Shortlist
 import dev.warpscout.core.tune.TuningSpec
 import java.util.concurrent.CountDownLatch
@@ -215,11 +216,31 @@ class Engine(private val context: Context) {
         // Быстрый старт: если на этой же сети недавно нашлась рабочая точка, проверяем сначала
         // только её (секунды вместо минут и без разогрева радио на весь скан). Не подтвердится —
         // подбор сам уйдёт в полный проход по пулу.
-        val withCache = withProxy.copy(cachedStart = TuningCache.cachedStart(context, withProxy.junkProfiles))
+        // Шум, который на этой сети замерзает (с 1.10.30, см. NoiseMemory: так решили прошлые
+        // подборы и сам туннель), подбор не проверяет: одна проба данных его не разоблачает, а
+        // первое место в очереди он займёт — и туннель снова «подключится» без данных.
+        val netKey = runCatching { NetIdentity.currentKey(context) }.getOrDefault("")
+        val frozenHere = if (netKey.isBlank()) emptySet() else NoiseMemory.frozen(context, netKey)
+        if (frozenHere.isNotEmpty()) {
+            sink.log("на этой сети замерзает шум: ${frozenHere.joinToString(", ")} — подбор его пропустит")
+        }
+        val withCache = withProxy.copy(
+            cachedStart = TuningCache.cachedStart(context, withProxy.junkProfiles),
+            excludeJunk = withProxy.excludeJunk + frozenHere
+        )
         val result = try {
             tuner.run(withCache, sink)
         } finally {
             CleanNetwork.unbind(context)
+        }
+        // Что подбор узнал о шуме на этой сети — в память: туннель выберет шум ещё до рукопожатия.
+        if (netKey.isNotBlank() && !sink.isCancelled()) runCatching {
+            for (name in result.report.frozenProfiles.distinct()) {
+                NoiseMemory.note(context, netKey, name, NoiseBook.TUNER, "")
+            }
+            result.report.candidates.filter { it.stats.dataSustained }
+                .distinctBy { it.junk.name }
+                .forEach { NoiseMemory.note(context, netKey, it.junk.name, NoiseBook.WORKED, it.config.endpoint.render()) }
         }
         // Остановленный подбор — это не результат. Раньше недосчитанный прогон шёл дальше как
         // обычный: записывал отчёт и тройку замен из случайного куска пула и по галочке даже

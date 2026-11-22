@@ -131,6 +131,10 @@ class VpnTunnelController(private val context: Context) : TunnelController {
      * экране. Полезно то, что можно сделать прямо сейчас.
      */
     private fun hintFor(reason: String): String = when {
+        // С 1.10.30 «пошли и встали» без шума — почти всегда DPI против чистого WireGuard: сервис
+        // запоминает это для сети и следующую попытку делает с маской сам.
+        reason.contains("данные не идут") && reason.contains("(без шума)") ->
+            "сеть режет чистый WireGuard — следующую попытку делаю с маской (шум TLS/QUIC)"
         reason.contains("данные не идут") ->
             "сеть пропускает рукопожатие, но режет данные — беру следующую точку; помогает и другой профиль шума"
         reason.contains("port unreachable", ignoreCase = true) || reason.contains("порт закрыт") ->
@@ -182,10 +186,11 @@ class VpnTunnelController(private val context: Context) : TunnelController {
         const val REQUEST_VPN = 4211
 
         /**
-         * Сколько ждать итога проверки данных с её начала: сама проверка — до 3,5 с (см.
-         * WarpVpnService.DATA_GATE_MS), плюс запас на запись и чтение снимка между процессами.
+         * Сколько ждать итога проверки данных с её начала: сама проверка — до 4 с (см.
+         * DataGate.WINDOW_MS; с 1.10.30 она ждёт и позднего ответа), плюс запас на запись и чтение
+         * снимка между процессами.
          */
-        private const val DATA_CHECK_WAIT_MS = 5_000L
+        private const val DATA_CHECK_WAIT_MS = 5_500L
     }
 }
 

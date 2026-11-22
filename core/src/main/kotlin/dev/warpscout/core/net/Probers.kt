@@ -148,19 +148,14 @@ class WgProber(private val settings: NetSettings) {
         try {
             for (attempt in 0 until settings.attempts) {
                 val initiation = Wg.buildInitiation(localPriv, localPub, peerPublic, Crypto.random.nextInt())
-                val t0 = System.nanoTime()
+                var t0 = System.nanoTime()
                 try {
-                    if (junk != null && !junk.isEmpty && settings.junkPacketsBeforeHandshake > 0) {
-                        val chunks = junk.i1 + junk.i2
-                        if (chunks.isNotEmpty()) {
-                            for (i in 0 until settings.junkPacketsBeforeHandshake) {
-                                val bytes = chunks[i % chunks.size].materialize(Crypto.random)
-                                if (bytes.isNotEmpty()) socket.send(DatagramPacket(bytes, bytes.size))
-                                val spread = (junk.awg.jmax - junk.awg.jmin).coerceAtLeast(0)
-                                Thread.sleep((junk.awg.jmin + Crypto.random.nextInt(spread + 1)).toLong())
-                            }
-                        }
-                    }
+                    sendJunk(socket, junk)
+                    // Время ответа — от самой инициации, а не от мусорного пакета перед ней. Раньше
+                    // в него входила и пауза после мусора (40–70 мс по Jmin/Jmax): у любого профиля
+                    // с шумом «пинг» выходил на полосу хуже, и подбор за подбором побеждал «none» —
+                    // ровно тот вариант, который на сети человека замерзает через секунду (1.10.30).
+                    t0 = System.nanoTime()
                     socket.send(DatagramPacket(initiation.packet, initiation.packet.size))
 
                     val buf = ByteArray(2048)
@@ -247,6 +242,208 @@ class WgProber(private val settings: NetSettings) {
         val replies = samples.count { it.verdict in setOf(Verdict.HANDSHAKE_OK, Verdict.COOKIE_REPLY, Verdict.TLS_OK) }
         val best = samples.minByOrNull { it.verdict.rank }?.verdict ?: Verdict.ERROR
         return WgProbeResult(EndpointStats(endpoint, samples, best, replies, samples.size), accepted, replyTypes)
+    }
+
+    /**
+     * Мусорные пакеты профиля перед инициацией — как у AmneziaWG: пакет шаблона I1/I2 и пауза
+     * Jmin..Jmax. Без профиля (или «none») не шлём ничего — это чистый WireGuard.
+     */
+    private fun sendJunk(socket: DatagramSocket, junk: JunkProfile?) {
+        if (junk == null || junk.isEmpty || settings.junkPacketsBeforeHandshake <= 0) return
+        val chunks = junk.i1 + junk.i2
+        if (chunks.isEmpty()) return
+        for (i in 0 until settings.junkPacketsBeforeHandshake) {
+            val bytes = chunks[i % chunks.size].materialize(Crypto.random)
+            if (bytes.isNotEmpty()) socket.send(DatagramPacket(bytes, bytes.size))
+            val spread = (junk.awg.jmax - junk.awg.jmin).coerceAtLeast(0)
+            Thread.sleep((junk.awg.jmin + Crypto.random.nextInt(spread + 1)).toLong())
+        }
+    }
+
+    /**
+     * Долгая проба данных (с 1.10.30): рукопожатие, затем DNS-запросы внутри сессии в течение
+     * [sustainMs]. Годной точка считается, только если ответ приходит и на запрос, отправленный
+     * через полторы секунды после начала и позже.
+     *
+     * Зачем. Сеть человека пропускала рукопожатие и первый ответ, а дальше молчала: обычная проба
+     * (один запрос) говорила «данные идут» про туннель, который замерзал через секунду. Подбор
+     * ставил такие точки первыми, сервис объявлял «подключено», а через 25 с проверка связи находила
+     * обман — и так по кругу (журнал 22.11 19:04–19:10, все точки с шумом none). Цена — четыре
+     * пакета по 60 байт и до трёх секунд, поэтому так проверяются только лучшие кандидаты.
+     */
+    fun probeSustained(
+        endpoint: Endpoint,
+        account: WarpAccount,
+        peerPublic: ByteArray,
+        junk: JunkProfile? = null,
+        sustainMs: Int = SUSTAIN_DEFAULT_MS
+    ): ProbeSample {
+        val name = junk?.name ?: "none"
+        val address = try {
+            InetAddress.getByName(endpoint.host)
+        } catch (e: UnknownHostException) {
+            return ProbeSample(endpoint, Verdict.DNS_FAIL, profile = name, note = "не разрешился ${endpoint.host}")
+        }
+        val localPriv = Crypto.unBase64(account.privateB64)
+        val localPub = Crypto.publicOf(localPriv)
+        val socket = try {
+            settings.udpFactory.create(endpoint).apply {
+                soTimeout = settings.timeoutMs
+                connect(InetSocketAddress(address, endpoint.port))
+            }
+        } catch (e: Exception) {
+            return ProbeSample(endpoint, Verdict.ERROR, profile = name, note = "сокет: ${e.message}")
+        }
+        try {
+            var lastVerdict = Verdict.UDP_SILENT
+            var lastNote = "нет ответа"
+            // Две инициации, не больше: эта проба повторяет уже ответившую точку, ей нужна сессия,
+            // а не статистика потерь.
+            for (attempt in 0 until settings.attempts.coerceIn(1, 2)) {
+                var initiation = Wg.buildInitiation(localPriv, localPub, peerPublic, Crypto.random.nextInt())
+                try {
+                    sendJunk(socket, junk)
+                    val t0 = System.nanoTime()
+                    socket.send(DatagramPacket(initiation.packet, initiation.packet.size))
+                    val buf = ByteArray(2048)
+                    val pkt = DatagramPacket(buf, buf.size)
+                    socket.receive(pkt)
+                    val rtt = (System.nanoTime() - t0) / 1e6
+                    var reply = Wg.consumeResponse(pkt.data.copyOfRange(0, pkt.length), initiation, peerPublic)
+                    if (reply.kind == Wg.ResponseKind.COOKIE_REPLY && reply.cookie != null) {
+                        // Сервер под нагрузкой: повтор с cookie, как в [probe].
+                        val retry = Wg.buildInitiation(
+                            localPriv, localPub, peerPublic, Crypto.random.nextInt(), lastCookie = reply.cookie
+                        )
+                        socket.send(DatagramPacket(retry.packet, retry.packet.size))
+                        val pkt2 = DatagramPacket(ByteArray(2048), 2048)
+                        socket.receive(pkt2)
+                        reply = Wg.consumeResponse(pkt2.data.copyOfRange(0, pkt2.length), retry, peerPublic)
+                        initiation = retry
+                    }
+                    if (reply.kind != Wg.ResponseKind.HANDSHAKE_RESPONSE) {
+                        lastVerdict = if (reply.kind == Wg.ResponseKind.COOKIE_REPLY) Verdict.COOKIE_REPLY else Verdict.UDP_SILENT
+                        lastNote = "ответ ${reply.kind}"
+                        continue
+                    }
+                    val series = dataSeries(socket, initiation, reply, account, sustainMs)
+                    return ProbeSample(
+                        endpoint, Verdict.HANDSHAKE_OK, rtt, attempt, name,
+                        note = series.describe(),
+                        dataTried = true,
+                        dataMs = series.firstMs,
+                        dataFrozen = series.firstMs != null && !series.late,
+                        dataSustained = series.late
+                    )
+                } catch (e: SocketTimeoutException) {
+                    lastVerdict = Verdict.UDP_SILENT
+                    lastNote = "нет ответа ${settings.timeoutMs}мс"
+                } catch (e: Exception) {
+                    lastVerdict = Verdict.ERROR
+                    lastNote = "${e.javaClass.simpleName}: ${e.message}"
+                }
+            }
+            return ProbeSample(endpoint, lastVerdict, null, 0, name, note = lastNote)
+        } finally {
+            runCatching { socket.close() }
+        }
+    }
+
+    /** Итог серии запросов долгой пробы. */
+    private class Series(val sent: Int, val replies: Int, val firstMs: Double?, val late: Boolean) {
+        fun describe(): String = when {
+            firstMs == null -> "данных нет: $sent запросов без ответа"
+            late -> "данные идут: ответов $replies из $sent, первый за ${firstMs.toLong()} мс"
+            else -> "данные встали: первый ответ за ${firstMs.toLong()} мс, дальше тишина ($replies из $sent)"
+        }
+    }
+
+    /**
+     * Серия DNS-запросов внутри открытой сессии: в моменты [SUSTAIN_SEND_AT_MS] (не дальше
+     * [sustainMs]) и ожидание ответов. Каждый запрос — свой порт и номер, поэтому ответ узнаётся,
+     * даже если пришёл после следующего запроса. Поздний ответ (на запрос через [SUSTAIN_LATE_MS] и
+     * позже) — и проба сразу заканчивается: дальше ждать незачем.
+     */
+    private fun dataSeries(
+        socket: DatagramSocket,
+        init: Wg.Initiation,
+        reply: Wg.ProbeReply,
+        account: WarpAccount,
+        sustainMs: Int
+    ): Series {
+        val session = reply.session ?: return Series(0, 0, null, false)
+        val peerIndex = reply.peerSenderIndex ?: return Series(0, 0, null, false)
+        val src = DataProbe.ipv4Of(account.ipv4) ?: DataProbe.ipv4Of("172.16.0.2") ?: return Series(0, 0, null, false)
+        val plan = SUSTAIN_SEND_AT_MS.filter { it <= sustainMs.toLong() }
+        // порт → (номер запроса, когда ушёл, мс от начала серии)
+        val pending = HashMap<Int, Pair<Int, Long>>()
+        var sending = session
+        var receiving = session
+        val before = runCatching { socket.soTimeout }.getOrDefault(settings.timeoutMs)
+        val t0 = System.nanoTime()
+        fun nowMs(): Long = (System.nanoTime() - t0) / 1_000_000L
+        val endMs = (plan.lastOrNull() ?: 0L) + SUSTAIN_TAIL_MS
+        var next = 0
+        var sent = 0
+        var replies = 0
+        var firstMs: Double? = null
+        var late = false
+        val buf = ByteArray(2048)
+        try {
+            while (!late) {
+                val now = nowMs()
+                if (now >= endMs) break
+                if (next < plan.size && now >= plan[next]) {
+                    val port = DataProbe.randomPort(Crypto.random)
+                    val txId = Crypto.random.nextInt(0x10000)
+                    val (bytes, nextSend) = Wg.buildTransport(peerIndex, sending, DataProbe.dnsQuery(src, port, txId))
+                    sending = nextSend
+                    pending[port] = txId to now
+                    socket.send(DatagramPacket(bytes, bytes.size))
+                    sent++
+                    next++
+                    continue
+                }
+                val untilSend = if (next < plan.size) plan[next] - now else Long.MAX_VALUE
+                val wait = minOf(untilSend, endMs - now).coerceIn(1L, 1_000L)
+                socket.soTimeout = wait.toInt()
+                val pkt = DatagramPacket(buf, buf.size)
+                try {
+                    socket.receive(pkt)
+                } catch (e: SocketTimeoutException) {
+                    continue
+                }
+                val data = pkt.data.copyOfRange(0, pkt.length)
+                val opened = Wg.openTransport(data, init.state.senderIndex, receiving) ?: continue
+                receiving = opened.second
+                val match = pending.entries.firstOrNull { (port, v) -> DataProbe.isReply(opened.first, port, v.first) }
+                    ?: continue
+                pending.remove(match.key)
+                replies++
+                val sentAt = match.value.second
+                if (firstMs == null) firstMs = (nowMs() - sentAt).toDouble()
+                if (sentAt >= SUSTAIN_LATE_MS) late = true
+            }
+        } catch (e: Exception) {
+            // Сокет закрыли или сеть пропала: что успели узнать, то и итог.
+        } finally {
+            runCatching { socket.soTimeout = before }
+        }
+        return Series(sent, replies, firstMs, late)
+    }
+
+    companion object {
+        /** Когда слать запросы долгой пробы, мс от конца рукопожатия. */
+        val SUSTAIN_SEND_AT_MS = longArrayOf(0L, 600L, 1_500L, 2_400L).toList()
+
+        /** Ответ на запрос, ушедший с этого момента и позже, — «данные идут и не встают». */
+        const val SUSTAIN_LATE_MS = 1_500L
+
+        /** Сколько ждать ответа после последнего запроса. */
+        const val SUSTAIN_TAIL_MS = 700L
+
+        /** Длина долгой пробы по умолчанию: до последнего запроса. */
+        const val SUSTAIN_DEFAULT_MS = 2_400
     }
 
     /**

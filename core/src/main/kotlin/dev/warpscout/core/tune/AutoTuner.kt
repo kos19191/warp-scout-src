@@ -107,7 +107,19 @@ data class TuningSpec(
      * очередь. Иначе полный подбор после неудачного быстрого старта мог потерять рабочую точку,
      * которой просто не оказалось в пуле.
      */
-    val priority: List<Endpoint> = emptyList()
+    val priority: List<Endpoint> = emptyList(),
+    /**
+     * Профили шума, которые на этой сети замерзают (данные идут секунду и встают): их подбор не
+     * проверяет вовсе. Список ведёт приложение по прошлым подборам и подключениям (NoiseMemory).
+     */
+    val excludeJunk: Set<String> = emptySet(),
+    /**
+     * Сколько лучших точек проверить долгой пробой данных (см. [WgProber.probeSustained]): идут
+     * ли данные и через полторы секунды. 0 — не проверять.
+     */
+    val sustainTop: Int = 4,
+    /** Длина долгой пробы, мс. */
+    val sustainMs: Int = WgProber.SUSTAIN_DEFAULT_MS
 )
 
 /**
@@ -229,7 +241,23 @@ class AutoTuner(
             .distinctBy { it.render() }
             .take(Shortlist.LIMIT + 1)
         val names = (listOf(cached.junkName) + cached.queueJunk).filter { it.isNotBlank() }.toSet()
-        val profiles = spec.junkProfiles.filter { it.name in names }
+        // Замерзающий на этой сети шум не проверяем и в быстром старте: иначе он снова «подтвердился»
+        // бы одним ответом и затёр очередь (журнал 22.11: быстрый старт брал точки с шумом none).
+        val allowed = spec.junkProfiles.filter { it.name !in spec.excludeJunk }.ifEmpty { spec.junkProfiles }
+        val saved = allowed.filter { it.name in names }
+        // Сохранённая очередь целиком «без шума» (так её оставил 1.10.29) — рядом всегда проверяем и
+        // TLS-маску: только сравнение двух вариантов на тех же точках показывает, что чистый
+        // WireGuard здесь замерзает, а с маской данные идут. Без пары долгая проверка увидела бы
+        // «встало у всех» и не доверилась бы себе, и быстрый старт снова подтвердил бы «none».
+        val masked = allowed.firstOrNull { it.name == JunkLibrary.tlsFixed().name }
+            ?: allowed.firstOrNull { !it.isEmpty }
+        val profiles = when {
+            saved.isNotEmpty() && saved.all { it.isEmpty } && masked != null -> saved + masked
+            // Сохранённый шум весь замерзает на этой сети — те же точки проверяем с маской, а не
+            // со всем пулом шума: быстрый старт должен остаться быстрым.
+            saved.isEmpty() && names.isNotEmpty() && masked != null -> listOf(masked)
+            else -> saved
+        }
         progress.log(
             "быстрый старт: проверяю сохранённые точки — " + points.joinToString { it.render() } +
                 (if (profiles.isNotEmpty()) " · шум " + profiles.joinToString { it.name } else "")
@@ -241,9 +269,12 @@ class AutoTuner(
                 hostnames = points.map { "${it.host}:${it.port}" },
                 maxEndpoints = points.size
             ),
-            junkProfiles = profiles.ifEmpty { spec.junkProfiles },
+            junkProfiles = profiles.ifEmpty { allowed },
             refineTop = points.size,
-            priority = emptyList()
+            priority = emptyList(),
+            // Быстрый старт должен остаться быстрым: долгой пробой — две лучшие точки (плюс лучшие
+            // варианты с шумом и без), а не четыре.
+            sustainTop = spec.sustainTop.coerceAtMost(2)
         )
     }
 
@@ -254,8 +285,9 @@ class AutoTuner(
     private fun cachedConfirmed(result: TuningResult, cached: CachedStart): Boolean =
         result.report.candidates
             .filter { it.config.endpoint == cached.endpoint }
+            // Годный — значит и не «данные пошли и встали» (с 1.10.30 это видно долгой пробой).
             .any { cand ->
-                CachedPoint.confirmed(
+                cand.usable && CachedPoint.confirmed(
                     cand.stats.replies, cand.resourcesTotal, cand.resourcesOk,
                     cand.stats.dataTried, cand.stats.dataReplies
                 )
@@ -302,11 +334,20 @@ class AutoTuner(
         .take(maxOf(3, spec.refineTop))
 
     // --- фаза 2: подробно, по профилям шума ---------------------------------------
+    // Шум, который на этой сети замерзает (знает приложение по прошлым подборам и подключениям),
+    // не проверяем: одна проба данных его не разоблачает, а место в очереди он займёт.
+    val activeProfiles = spec.junkProfiles.filter { it.name !in spec.excludeJunk }.ifEmpty { spec.junkProfiles }
+    val skipped = spec.junkProfiles.filter { it.name in spec.excludeJunk }.map { it.name }
+    if (skipped.isNotEmpty() && activeProfiles.size < spec.junkProfiles.size) {
+        val line = "На этой сети замерзает шум: ${skipped.joinToString(", ")} — не проверяю его"
+        notes += line
+        progress.log(line)
+    }
     val perProfile = LinkedHashMap<Endpoint, MutableMap<String, EndpointStats>>()
-    val totalWork = refineCandidates.size * spec.junkProfiles.size
+    val totalWork = refineCandidates.size * activeProfiles.size
     var done = 0
     for (stats in refineCandidates) {
-        for (profile in spec.junkProfiles) {
+        for (profile in activeProfiles) {
             if (progress.isCancelled()) break
             val refined = wgProber.probe(stats.endpoint, account, peerPublic, profile, dataProbe = spec.dataProbe).stats
             perProfile.getOrPut(stats.endpoint) { LinkedHashMap() }[profile.name] = refined
@@ -343,13 +384,13 @@ class AutoTuner(
     val candidates = ArrayList<Candidate>()
     for ((endpoint, profiles) in perProfile) {
         for ((profileName, stats) in profiles) {
-            val profile = spec.junkProfiles.firstOrNull { it.name == profileName } ?: continue
+            val profile = activeProfiles.firstOrNull { it.name == profileName } ?: continue
             val survived = stats.replies > 0
             val tlsSample = tlsResults[endpoint]
             val effectiveStats = if (tlsSample != null && tlsSample.verdict == Verdict.TLS_OK) {
                 EndpointStats(endpoint, stats.samples + tlsSample, Verdict.TLS_OK, stats.replies, stats.attempts)
             } else stats
-            val parts = Scoring.evaluate(effectiveStats, survived, 0, 0, weights)
+            val parts = Scoring.evaluate(effectiveStats, survived, 0, 0, weights, plain = profile.isEmpty)
             candidates.add(
                 Candidate(
                     config = buildConfig(spec, account, endpoint, profile, parts.total),
@@ -368,10 +409,16 @@ class AutoTuner(
             Candidate(
                 buildConfig(spec, account, top.endpoint, JunkLibrary.none(), 0),
                 top,
-                Scoring.evaluate(top, null, 0, 0, weights),
+                Scoring.evaluate(top, null, 0, 0, weights, plain = true),
                 top.samples
             )
         )
+    }
+
+    // --- фаза 2б: не встают ли данные через секунду ---------------------------------
+    val frozenNames = ArrayList<String>()
+    if (spec.dataProbe && spec.sustainTop > 0 && !progress.isCancelled()) {
+        sustainCheck(spec, candidates, account, peerPublic, progress, notes, frozenNames)
     }
 
     val ordered = candidates.sortedByDescending { it.score }
@@ -404,7 +451,7 @@ class AutoTuner(
                 "  ${cand.config.endpoint.render()} · ${cand.junk.name} → ${ok}/${spec.resources.size} ресурсов" +
                     (if (speed > 0) " · ${dev.warpscout.core.net.SpeedTest.human(speed)}" else "")
             )
-            val parts = Scoring.evaluate(cand.stats, cand.stats.replies > 0, ok, spec.resources.size, weights)
+            val parts = Scoring.evaluate(cand.stats, cand.stats.replies > 0, ok, spec.resources.size, weights, plain = cand.junk.isEmpty)
             verified.add(
                 cand.copy(
                     parts = parts,
@@ -425,7 +472,103 @@ class AutoTuner(
         notes += "Сборка без встроенного туннеля: проверка «изнутри» пропущена, отранжировано по сетевым пробам."
     }
 
-    return finish(spec, started, notes, finalList, resourceResults, account, progress, endpoints.size)
+    return finish(spec, started, notes, finalList, resourceResults, account, progress, endpoints.size, frozen = frozenNames)
+    }
+
+    /**
+     * Долгая проба данных для лучших вариантов (с 1.10.30): идут ли данные и через полторы
+     * секунды после рукопожатия. Варианты, у которых данные встали, получают «данных нет» и в
+     * очередь не попадают. Если без шума данные встают, а с шумом идут — это свойство сети, а не
+     * точки: варианты без шума убираются из выбора совсем.
+     *
+     * Журнал 22.11: подбор 19:03 нашёл «данные идут» у 57 из 60 вариантов и выбрал чистый
+     * WireGuard; на деле через него за 8 с не пришло приложениям ни байта, и сервис полчаса
+     * переключался по кругу между точками без шума.
+     */
+    private fun sustainCheck(
+        spec: TuningSpec,
+        candidates: MutableList<Candidate>,
+        account: dev.warpscout.core.model.WarpAccount,
+        peerPublic: ByteArray,
+        progress: ProgressSink,
+        notes: MutableList<String>,
+        frozenNames: MutableList<String>
+    ) {
+        val targets = sustainTargets(candidates, spec.sustainTop)
+        if (targets.isEmpty()) return
+        progress.log("Проверяю, не встают ли данные через секунду: вариантов ${targets.size}…")
+        val before = candidates.toList()
+        val sustainedBy = HashMap<String, Int>()
+        val frozenBy = HashMap<String, Int>()
+        for ((i, cand) in targets.withIndex()) {
+            if (progress.isCancelled()) break
+            val label = "${cand.config.endpoint.render()} · ${cand.junk.name}"
+            progress.progress(i, targets.size, "проверка на заморозку · $label")
+            val sample = runCatching {
+                wgProber.probeSustained(
+                    cand.config.endpoint, account, peerPublic, cand.junk.takeIf { !it.isEmpty }, spec.sustainMs
+                )
+            }.getOrNull() ?: continue
+            if (!sample.dataTried) {
+                // Рукопожатие на этот раз не прошло: одна потеря — не приговор, вариант не трогаем.
+                progress.log("  ? $label — рукопожатие не повторилось (${sample.note.take(60)})")
+                continue
+            }
+            val stats = cand.stats.copy(samples = cand.stats.samples + sample)
+            val parts = Scoring.evaluate(stats, stats.replies > 0, 0, 0, weights, plain = cand.junk.isEmpty)
+            val idx = candidates.indexOf(cand)
+            if (idx >= 0) candidates[idx] = cand.copy(stats = stats, parts = parts)
+            val ok = sample.dataSustained
+            val counter = if (ok) sustainedBy else frozenBy
+            counter[cand.junk.name] = (counter[cand.junk.name] ?: 0) + 1
+            progress.log("  ${if (ok) "✓" else "✗"} $label — ${sample.note}")
+        }
+        progress.progress(targets.size, targets.size, "проверка на заморозку")
+        val sustained = sustainedBy.values.sum()
+        val frozen = frozenBy.values.sum()
+        val summary = "Долгая проверка данных: идут у $sustained, встали у $frozen"
+        notes += summary
+        progress.log(summary)
+        if (sustained == 0) {
+            if (frozen > 0) {
+                // Встало у всех: это либо сеть, которая режет вообще всё, либо сбой самой проверки.
+                // Очередь из-за неё не опустошаем — остаётся итог обычной проверки, а ложь (если она
+                // есть) поймает проверка данных при подключении.
+                candidates.clear()
+                candidates.addAll(before)
+                val line = "Данные встали у всех проверенных вариантов — не доверяю долгой проверке, " +
+                    "оставляю итог обычной"
+                notes += line
+                progress.log(line)
+            }
+            return
+        }
+        // Шум, с которым данные вставали и ни разу не пошли, когда с другим шумом шли: это свойство
+        // сети, а не точки. Такие варианты из очереди убираем, а имена отдаём приложению — оно
+        // запомнит их для этой сети (NoiseMemory) и в следующий раз проверять их не будет.
+        val badNoise = frozenBy.keys.filter { (sustainedBy[it] ?: 0) == 0 }.sorted()
+        if (badNoise.isNotEmpty()) {
+            val removed = candidates.count { it.junk.name in badNoise }
+            candidates.removeAll { it.junk.name in badNoise }
+            frozenNames += badNoise
+            val line = "С шумом ${badNoise.joinToString(", ")} данные встают через секунду, с другим идут — " +
+                "такие варианты ($removed) в очередь не беру"
+            notes += line
+            progress.log(line)
+        }
+    }
+
+    /**
+     * Кого проверять долгой пробой: лучший вариант каждой из [top] лучших точек, плюс лучший
+     * вариант без шума и лучший с шумом — чтобы узнать, как сеть обходится с каждым из них.
+     */
+    private fun sustainTargets(candidates: List<Candidate>, top: Int): List<Candidate> {
+        val usable = candidates.filter { it.usable }.sortedByDescending { it.score }
+        val perPoint = usable.distinctBy { it.config.endpoint.render() }.take(top)
+        val plain = usable.firstOrNull { it.junk.isEmpty }
+        val masked = usable.firstOrNull { !it.junk.isEmpty }
+        return (perPoint + listOfNotNull(plain, masked))
+            .distinctBy { it.config.endpoint.render() + "|" + it.junk.name }
     }
 
     /**
@@ -491,6 +634,8 @@ class AutoTuner(
         account: dev.warpscout.core.model.WarpAccount,
         progress: ProgressSink,
         endpointsTested: Int = 0,
+        /** Профили шума, на которых данные встали (см. [TuningReport.frozenProfiles]). */
+        frozen: List<String> = emptyList(),
         /**
          * Победитель — только из годных (см. [Candidate.usable]). Раньше при «живых 0 из 120»
          * победителем становилась молчащая точка с 60 баллами: её конфиг записывался, тройка из
@@ -505,7 +650,8 @@ class AutoTuner(
             candidates = candidates,
             resources = resources,
             endpointsTested = endpointsTested,
-            notes = notes
+            notes = notes,
+            frozenProfiles = frozen
         )
         // Победитель: сначала «сколько реально открылось», потом балл. Если изнутри ничего не
         // проверяли — обычный максимум балла.

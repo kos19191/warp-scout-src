@@ -998,6 +998,8 @@ class MainActivity : AppCompatActivity() {
             binding.btnTunnel.setText(R.string.btn_tunnel_searching)
         }
         scanProgressText = ""
+        scanFraction = 0f
+        scanActivityText = getString(if (mode == Engine.SCAN_MOBILE) R.string.simple_act_mobile else R.string.simple_act_start)
         if (mode == Engine.SCAN_MOBILE) banner(getString(R.string.scan_mobile_started))
         updateSimple()
         engine.start(prefs.tuningSpec(), manualConfig(), sink(), mode = mode) { result, error ->
@@ -1019,6 +1021,8 @@ class MainActivity : AppCompatActivity() {
     ) {
         scanAutoConnect = false
         scanProgressText = ""
+        scanFraction = -1f
+        scanActivityText = ""
         if (!::binding.isInitialized) return
         // Список лучших точек обновился — его видно и в «Резервной» упрощённого экрана.
         runCatching { renderShortlist() }
@@ -1605,7 +1609,9 @@ class MainActivity : AppCompatActivity() {
             if (log.length > 30000) log.delete(0, log.length - 30000)
             // Строки — на экран, который сейчас на виду: подбор мог запустить прежний экран, уже
             // пересозданный (поворот, смена темы, возврат в приложение).
-            (shown ?: this@MainActivity).showScanLog()
+            val ui = shown ?: this@MainActivity
+            ui.showScanLog()
+            runCatching { ui.noteScanLog(message) }
         }
 
         override fun progress(done: Int, total: Int, current: String) = runOnUiThread {
@@ -1640,7 +1646,64 @@ class MainActivity : AppCompatActivity() {
         // После «Остановить» ещё приходят строки доделываемых проб: статус «останавливаю» не перетираем.
         if (!cancelled.get()) binding.textStatus.text = "[$done/$total] $current"
         scanProgressText = if (total > 0) getString(R.string.simple_scan_progress, done, total) else ""
+        // Кольцо-прогресс (с 1.10.30): у каждой фазы подбора свой кусок кольца — первичный скан
+        // до 45 %, подробные пробы до 85 %, проверка на заморозку до 97 %; остаток — проверка сайтов
+        // и запись итога. Назад кольцо идёт, только если подбор начался заново (быстрый старт не
+        // подтвердился и пошёл полный поиск).
+        val part = if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else 0f
+        val next = when {
+            current.startsWith("первичный") -> 0.03f + 0.42f * part
+            current.startsWith("проверка на заморозку") -> 0.85f + 0.12f * part
+            else -> 0.45f + 0.40f * part
+        }
+        scanFraction = if (next >= scanFraction || next < scanFraction - 0.25f) next else scanFraction
+        scanActivityText = scanActivityFor(done, total, current)
         updateSimple()
+    }
+
+    /** Строка «что сейчас делаю» по шагу подбора: «Ищу точки: 45 из 120», «Проверяю … · шум …». */
+    private fun scanActivityFor(done: Int, total: Int, current: String): String {
+        val parts = current.split(" · ").map { it.trim() }
+        return when {
+            current.startsWith("первичный") ->
+                if (total > 0) getString(R.string.simple_act_scan, done, total) else getString(R.string.simple_act_start)
+            current.startsWith("проверка на заморозку") ->
+                parts.getOrNull(1)?.takeIf { it.isNotBlank() }?.let { getString(R.string.simple_act_sustain, it) }
+                    ?: getString(R.string.simple_act_sustain_done)
+            parts.size >= 2 && parts[0].isNotBlank() -> getString(R.string.simple_act_probe, parts[0], parts[1])
+            else -> current
+        }
+    }
+
+    /** Строки журнала подбора, после которых меняется «что сейчас делаю» (шаги без прогресса). */
+    private fun noteScanLog(message: String) {
+        if (!engine.running) return
+        val m = message.trim()
+        val text = when {
+            m.startsWith("быстрый старт: проверяю") -> getString(R.string.simple_act_saved)
+            m.startsWith("Проверяю доступность ресурсов") || m.startsWith("Проверяю топ-") ->
+                getString(R.string.simple_act_sites)
+            m.startsWith("мобильная сеть получена") -> getString(R.string.simple_act_mobile)
+            else -> return
+        }
+        if (text == scanActivityText) return
+        scanActivityText = text
+        updateSimple()
+    }
+
+    /** Что сейчас делает сервис туннеля — по снимку его состояния (строка под кнопкой). */
+    private fun serviceActivity(snap: TunnelStatus?): String {
+        if (snap == null) return ""
+        val ep = snap.endpoint.trim()
+        val st = snap.status.trim()
+        val now = System.currentTimeMillis()
+        return when {
+            ep.isNotBlank() && snap.dataCheckAt > 0L && now - snap.dataCheckAt < 15_000L ->
+                getString(R.string.simple_act_data, ep)
+            serviceActivityPrefixes.any { st.startsWith(it) } -> st.replaceFirstChar { it.uppercaseChar() }
+            ep.isNotBlank() && (snap.isStarting || snap.busy) -> getString(R.string.simple_act_handshake, ep)
+            else -> ""
+        }
     }
 
     /**
@@ -2423,6 +2486,9 @@ class MainActivity : AppCompatActivity() {
                 val n = i + 1
                 runOnUiThread {
                     if (!::binding.isInitialized) return@runOnUiThread
+                    // Строка «что сейчас делаю» под кнопкой упрощённого экрана (с 1.10.30).
+                    connectActivityText = getString(R.string.simple_act_try, n, candidates.size, cfg.endpoint.render())
+                    updateSimple()
                     binding.textStatus.text = if (n == 1 && savedFirst != null && cfg.endpoint == savedFirst.endpoint) {
                         getString(R.string.tunnel_connecting_saved, cfg.endpoint.render())
                     } else {
@@ -2464,6 +2530,7 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 connecting = false
                 connectCancel = false
+                connectActivityText = ""
                 if (!::binding.isInitialized) return@runOnUiThread
                 binding.btnTunnel.isEnabled = true
                 binding.textStatus.text = statusBefore
@@ -3098,6 +3165,24 @@ class MainActivity : AppCompatActivity() {
     /** «проверено 40 из 120» — ход подбора для упрощённого экрана (там нет журнала и полосы). */
     private var scanProgressText = ""
 
+    /**
+     * Кольцо-прогресс подбора вокруг кнопки (с 1.10.30): доля 0..1, меньше нуля — подбор не идёт.
+     * Фазы подбора — свои куски кольца (см. [showScanProgress]), поэтому оно не обнуляется между ними.
+     */
+    private var scanFraction = -1f
+
+    /** «Что сейчас делаю» во время подбора — строка под кнопкой упрощённого экрана. */
+    private var scanActivityText = ""
+
+    /** «Что сейчас делаю» во время перебора точек при подключении. */
+    private var connectActivityText = ""
+
+    /** Статусы сервиса, которые показываем под кнопкой как есть: они уже написаны для человека. */
+    private val serviceActivityPrefixes = listOf(
+        "переключаюсь", "точки очереди", "нет связи", "сеть пропала", "нет сети",
+        "сервер не отвечает", "загрузка через туннель", "рукопожатие есть"
+    )
+
     /** Метки дозора, с которыми последний раз рисовался список лучших. */
     private var lastMarksRendered = ""
 
@@ -3309,7 +3394,10 @@ class MainActivity : AppCompatActivity() {
             engine.running -> {
                 state = PowerOrbView.STATE_CONNECTING
                 title = getString(R.string.simple_state_scanning)
-                sub = scanProgressText.ifBlank { getString(R.string.simple_tap_to_stop_scan) }
+                // В кнопке — проценты кольца; что именно проверяется — строкой под кнопкой.
+                val pct = (scanFraction * 100f).toInt()
+                sub = if (pct > 0) getString(R.string.simple_scan_percent, pct)
+                else scanProgressText.ifBlank { getString(R.string.simple_tap_to_stop_scan) }
             }
             connecting -> {
                 state = PowerOrbView.STATE_CONNECTING
@@ -3346,6 +3434,20 @@ class MainActivity : AppCompatActivity() {
         s.simpleOrbView.setState(state)
         if (s.simpleState.text.toString() != title) s.simpleState.text = title
         if (s.simpleTimer.text.toString() != sub) s.simpleTimer.text = sub
+        // Кольцо-прогресс и строка «что сейчас делаю» (с 1.10.30): пока идёт подбор — доля кольца
+        // и шаг подбора; пока подключаемся — светлая дуга бежит по кольцу, а под кнопкой видно,
+        // к какой точке и что именно проверяется.
+        runCatching {
+            s.simpleOrbView.setProgress(if (engine.running && scanFraction >= 0f) scanFraction else null)
+            val activity = when {
+                engine.running -> scanActivityText
+                connecting -> serviceActivity(snap).ifBlank { connectActivityText }
+                state == PowerOrbView.STATE_CONNECTING -> serviceActivity(snap)
+                else -> ""
+            }
+            if (s.simpleActivity.text.toString() != activity) s.simpleActivity.text = activity
+            s.simpleActivity.visibility = if (activity.isBlank()) View.GONE else View.VISIBLE
+        }
         s.simplePowerIcon.imageTintList = android.content.res.ColorStateList.valueOf(
             ContextCompat.getColor(
                 this,

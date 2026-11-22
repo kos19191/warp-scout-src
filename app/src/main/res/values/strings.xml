@@ -390,6 +390,19 @@
     <string name="simple_tap_to_stop">нажмите, чтобы выключить</string>
     <string name="simple_link_need_tunnel">Сначала включи туннель: связь проверяется через него</string>
     <string name="simple_scan_progress">проверено %1$d из %2$d</string>
+    <!-- Строка «что сейчас делаю» под кнопкой (с 1.10.30). -->
+    <string name="simple_scan_percent">%1$d %%</string>
+    <string name="simple_act_start">Готовлю подбор: ключи и список точек</string>
+    <string name="simple_act_scan">Ищу точки: %1$d из %2$d</string>
+    <string name="simple_act_probe">Проверяю %1$s · шум %2$s</string>
+    <string name="simple_act_sustain">Проверяю, не встают ли данные: %1$s</string>
+    <string name="simple_act_sustain_done">Проверяю, не встают ли данные</string>
+    <string name="simple_act_saved">Проверяю сохранённые точки</string>
+    <string name="simple_act_sites">Проверяю, открываются ли сайты</string>
+    <string name="simple_act_mobile">Подбираю точки для мобильной сети</string>
+    <string name="simple_act_handshake">Подключаюсь к %1$s</string>
+    <string name="simple_act_data">Проверяю, идут ли данные через %1$s</string>
+    <string name="simple_act_try">Точка %1$d из %2$d: %3$s</string>
     <string name="simple_where">%1$s · %2$s</string>
     <string name="simple_where_region">%1$s · %2$s · выход %3$s</string>
     <string name="simple_dash">—</string>

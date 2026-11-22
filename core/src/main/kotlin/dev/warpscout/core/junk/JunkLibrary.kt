@@ -70,4 +70,47 @@ object JunkLibrary {
             add(sip())
         }
     }
+
+    /**
+     * Порядок, в котором сервис пробует шум, когда рукопожатие проходит, а данные — нет (с 1.10.30).
+     * Первым — фиксированный TLS: на сети человека он держал туннель 12 часов подряд (журнал 22.11,
+     * 01:21–13:06), когда чистый WireGuard не поднимался ни разу. «Без шума» — последним.
+     */
+    fun serviceOrder(): List<JunkProfile> {
+        val pool = defaultPool()
+        val quic = pool.filter { it.kind == JunkKind.QUIC }
+        return buildList {
+            add(tlsFixed())
+            quic.firstOrNull()?.let { add(it) }
+            add(sip())
+            addAll(quic.drop(1))
+            add(this@JunkLibrary.none())
+        }.distinctBy { it.name }
+    }
+
+    /**
+     * Профиль библиотеки по имени («tls-fixed», «quic:akbars.ru», «none»…) — тот же, что даёт
+     * [defaultPool] (те же шаблоны и зерно), чтобы шум из памяти совпадал с проверенным подбором.
+     */
+    fun byName(name: String): JunkProfile? {
+        val n = name.trim()
+        if (n.isEmpty()) return null
+        if (n == "none") return none()
+        defaultPool().firstOrNull { it.name == n }?.let { return it }
+        // Остальные SNI из списка: зерно — как в defaultPool при большем числе доменов.
+        return defaultPool(sniCount = SNI_DOMAINS.size).firstOrNull { it.name == n }
+            ?: listOf(tlsFixed(), sip(), httpGet()).firstOrNull { it.name == n }
+    }
+
+    /**
+     * Имя шума по самим пакетам. Профиль, разобранный из текста конфига, называется «imported» —
+     * имя в .conf не пишется. По имени же сервис и память сетей решают, какой шум уже пробовали и
+     * какой здесь замерзает, поэтому сравниваем шаблоны: совпал с библиотечным — его имя.
+     */
+    fun nameOf(profile: JunkProfile): String {
+        if (profile.isEmpty) return "none"
+        val key = JunkChunk.renderAll(profile.i1 + profile.i2)
+        val known = defaultPool() + listOf(httpGet())
+        return known.firstOrNull { !it.isEmpty && JunkChunk.renderAll(it.i1 + it.i2) == key }?.name ?: profile.name
+    }
 }
