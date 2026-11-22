@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
+import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.model.Endpoint
 import dev.warpscout.core.model.JunkProfile
 import dev.warpscout.core.tune.CachedStart
@@ -87,9 +88,17 @@ object TuningCache {
     fun cachedStart(context: Context, profiles: List<JunkProfile>): CachedStart? {
         val entry = load(context) ?: return null
         if (System.currentTimeMillis() - entry.savedAt > MAX_AGE_MS) return null
-        if (entry.transport != transportOf(context)) return null
+        val transport = transportOf(context)
+        if (entry.transport != transport) return null
         if (entry.junk.isNotBlank() && profiles.none { it.name == entry.junk }) return null
-        return CachedStart(Endpoint(entry.host, entry.port), entry.junk)
+        val cached = Endpoint(entry.host, entry.port)
+        // Прежняя очередь этой сети — в быстрый старт целиком: подтвердить одну точку и затереть ею
+        // всю тройку значило остаться без запасных (журнал 22.11 16:35, «Лучшие конфиги» из одной строки).
+        val queue = runCatching { ConfigShortlist.forGroup(context, ConfigShortlist.group(transport)) }
+            .getOrDefault(emptyList())
+        val points = queue.mapNotNull { e -> runCatching { WgConf.parseEndpoint(e.endpoint) }.getOrNull() }
+            .filter { it != cached && it.family != dev.warpscout.core.model.AddrFamily.IPV6 }
+        return CachedStart(cached, entry.junk, points, queue.map { it.junk }.filter { it.isNotBlank() })
     }
 
     /**

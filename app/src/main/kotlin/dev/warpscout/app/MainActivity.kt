@@ -88,6 +88,13 @@ class MainActivity : AppCompatActivity() {
 
     /** Сколько помним неудачу точки: дольше — уже неактуально, сеть успевает измениться. */
     private val FAILED_MEMORY_MS = 10 * 60 * 1000L
+
+    /**
+     * Не чаще этого подбираем точки сами, когда «Включить» не нашло ни одной рабочей: подбор,
+     * который только что был, повторять бессмысленно (и так не будет круга «подбор → не
+     * подключилось → подбор»).
+     */
+    private val AUTO_RESCAN_GAP_MS = 10 * 60 * 1000L
     private val lists by lazy { AllowListsRepo(this) }
     private var lastConfigFile: File? = null
 
@@ -2027,6 +2034,10 @@ class MainActivity : AppCompatActivity() {
         val header = getString(R.string.top3_row, index + 1, entry.endpoint, entry.junk)
         val result = if (entry.resourcesOk >= 0 && entry.resourcesTotal > 0) {
             getString(R.string.top3_res, entry.resourcesOk, entry.resourcesTotal)
+        } else if (entry.dataMs >= 0) {
+            // С 1.10.29 каждая точка тройки проверена ответом через туннель — так и пишем, вместо
+            // «изнутри не проверялся», который читался как «неизвестно, работает ли».
+            getString(R.string.top3_row_data, entry.dataMs)
         } else {
             getString(R.string.top3_row_unknown)
         }
@@ -2046,7 +2057,7 @@ class MainActivity : AppCompatActivity() {
         }
         if (entry.speedKbps > 0) {
             detail.append(" · ").append(getString(R.string.top3_row_speed, SpeedTest.human(entry.speedKbps)))
-        } else if (entry.handshakeOnly) {
+        } else if (entry.handshakeOnly && entry.dataMs < 0) {
             detail.append(" · ").append(getString(R.string.top3_row_handshake))
         }
         if (entry.endpoint.trim() == prefs.backupFor(ConfigShortlist.group(entry.network))) {
@@ -2501,6 +2512,17 @@ class MainActivity : AppCompatActivity() {
                         failures.toString().take(300) +
                             " · " + getString(R.string.tunnel_failed_hint)
                     )
+                    // Ни одна известная точка не заработала — подбираем новые сами и подключаемся
+                    // к лучшей. Человек нажал «Включить», а не «разберись с точками»: одна кнопка
+                    // должна доводить дело до конца. Не чаще раза в 10 минут — без кругов.
+                    val sinceScan = System.currentTimeMillis() - prefs.lastTunedAt
+                    if (tunnel.supported && !engine.running && sinceScan > AUTO_RESCAN_GAP_MS) {
+                        TunnelDebug.stage("известные точки не работают — подбираю новые и подключусь к лучшей")
+                        prefs.endpointCursor = prefs.endpointCursor + 1
+                        banner(getString(R.string.banner_auto_rescan))
+                        runCatching { startScan(autoConnect = true) }
+                        return@runOnUiThread
+                    }
                     updateEndpointNote()
                     // «Не получилось» — на первой вкладке, а не всплывающей плашкой поверх любой вкладки.
                     prefs.endpointCursor = prefs.endpointCursor + 1
@@ -3601,6 +3623,7 @@ class MainActivity : AppCompatActivity() {
                     .append(dotLine(state, color))
                     .append(" · ")
                     .append(getString(R.string.sheet_row_junk, entry.junk))
+                if (entry.dataMs >= 0) line.append(" · ").append(getString(R.string.sheet_row_data))
                 if (entry.speedKbps > 0) line.append(" · ").append(SpeedTest.human(entry.speedKbps))
                 row.rowRadio.text = line
                 row.rowRadio.isChecked = ep == backup

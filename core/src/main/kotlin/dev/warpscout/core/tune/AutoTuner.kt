@@ -93,13 +93,42 @@ data class TuningSpec(
     val namePrefix: String = "WARP-Auto",
     /**
      * Прошлая удачная конфигурация (сеть та же, свежая). Если задана, подбор сначала проверяет
-     * только её: одна точка вместо пула — секунды вместо минут и без разогрева радио на весь скан.
+     * только её и прежнюю очередь: несколько точек вместо пула — секунды вместо минут.
      */
-    val cachedStart: CachedStart? = null
+    val cachedStart: CachedStart? = null,
+    /**
+     * После рукопожатия проверять, идут ли данные (DNS-запрос внутри сессии, см.
+     * [dev.warpscout.core.tunnel.DataProbe]). Без этого «живой» значило «ответил на рукопожатие», и в
+     * очередь попадали точки, через которые не идёт ни байта (журнал 22.11: «вверх 5542, вниз 0»).
+     */
+    val dataProbe: Boolean = true,
+    /**
+     * Точки, которые подробно проверяются в любом случае, если ответили в первом проходе: прежняя
+     * очередь. Иначе полный подбор после неудачного быстрого старта мог потерять рабочую точку,
+     * которой просто не оказалось в пуле.
+     */
+    val priority: List<Endpoint> = emptyList()
 )
 
-/** Сохранённая удачная точка: её проверяют первой, но по тем же правилам, что и свежую. */
-data class CachedStart(val endpoint: Endpoint, val junkName: String = "")
+/**
+ * Сохранённая удачная точка и прежняя очередь этой сети: их проверяют первыми, но по тем же
+ * правилам, что и свежие.
+ */
+data class CachedStart(
+    val endpoint: Endpoint,
+    val junkName: String = "",
+    /** Остальные точки прежней очереди этой сети (без [endpoint]). */
+    val queue: List<Endpoint> = emptyList(),
+    /** Профили шума точек очереди — имена из [JunkLibrary]. */
+    val queueJunk: List<String> = emptyList()
+)
+
+/**
+ * Сколько годных точек должен найти быстрый старт, чтобы обойтись без полного подбора: лучшая и
+ * хотя бы одна запасная. Одна точка без запасных не стоит экономии на скане — раньше быстрый
+ * старт подтверждал одну сохранённую точку и затирал ею всю тройку (журнал 22.11 16:35).
+ */
+private const val QUICK_MIN_POINTS = 2
 
 class TuningResult(
     val report: TuningReport,
@@ -160,14 +189,24 @@ class AutoTuner(
                 // Заметки быстрой попытки — отдельная копия: если она провалится, полный подбор не
                 // должен рассказывать пользователю про точки, которые он даже не проверял.
                 val quickNotes = notes.toMutableList()
-                quickNotes += "Быстрый старт: сохранённая конфигурация проверена заново, полный скан не понадобился."
+                quickNotes += "Быстрый старт: сохранённые точки проверены заново, полный скан не понадобился."
                 val quick = tuneWith(narrow, progress, started, quickNotes, account, peerPublic)
-                if (quick.best != null && cachedConfirmed(quick, cached)) return quick
+                val usable = quick.report.candidates.filter { it.usable }
+                    .map { it.config.endpoint.render() }
+                    .distinct()
+                val confirmed = quick.best != null && cachedConfirmed(quick, cached)
+                if (confirmed && usable.size >= QUICK_MIN_POINTS) return quick
                 // Остановили во время быстрого старта — полный подбор не начинаем. Раньше он
                 // начинался именно здесь: быстрая проверка «не подтвердилась» (её прервали), и
                 // «Остановить подбор» запускало полный скан пула вместо остановки.
                 if (progress.isCancelled()) return quick
-                progress.log("сохранённая конфигурация не подтвердилась — полный подбор")
+                progress.log(
+                    if (confirmed) "сохранённая точка работает, но рабочих точек ${usable.size} — мало для очереди, полный подбор"
+                    else "сохранённая конфигурация не подтвердилась — полный подбор"
+                )
+                // Прежние точки полный подбор проверит подробно первыми (если они ответят).
+                val prior = (listOf(cached.endpoint) + cached.queue).distinct()
+                return tuneWith(spec.copy(priority = spec.priority + prior), progress, started, notes, account, peerPublic)
             }
         }
 
@@ -181,28 +220,46 @@ class AutoTuner(
      */
     private fun speculativeStart(spec: TuningSpec, cached: CachedStart, progress: ProgressSink): TuningSpec? {
         val ep = cached.endpoint
-        val profiles = spec.junkProfiles.filter { it.name == cached.junkName }
         // IPv6 в разборе списка пока не поддержан — быстрый старт не для него, полный подбор работает.
         if (ep.host.isBlank() || ep.port !in 1..65535 || ep.host.contains(':')) return null
-        progress.log("быстрый старт: проверяю сохранённую конфигурацию ${ep.render()}" +
-            (profiles.firstOrNull()?.let { " · ${it.name}" } ?: ""))
+        // Вся прежняя очередь этой сети, а не одна точка: проверить три точки — те же секунды, а
+        // итогом быстрого старта становится тройка, а не одна строка без запасных.
+        val points = (listOf(ep) + cached.queue)
+            .filter { it.host.isNotBlank() && !it.host.contains(':') && it.port in 1..65535 }
+            .distinctBy { it.render() }
+            .take(Shortlist.LIMIT + 1)
+        val names = (listOf(cached.junkName) + cached.queueJunk).filter { it.isNotBlank() }.toSet()
+        val profiles = spec.junkProfiles.filter { it.name in names }
+        progress.log(
+            "быстрый старт: проверяю сохранённые точки — " + points.joinToString { it.render() } +
+                (if (profiles.isNotEmpty()) " · шум " + profiles.joinToString { it.name } else "")
+        )
         return spec.copy(
             endpointSpec = EndpointSpec(
                 mode = PoolMode.EXPLICIT,
                 subnets = emptyList(),
-                hostnames = listOf("${ep.host}:${ep.port}"),
-                maxEndpoints = 1
+                hostnames = points.map { "${it.host}:${it.port}" },
+                maxEndpoints = points.size
             ),
             junkProfiles = profiles.ifEmpty { spec.junkProfiles },
-            refineTop = 1
+            refineTop = points.size,
+            priority = emptyList()
         )
     }
 
-    /** Есть ли в отчёте сохранённая точка и подтвердилась ли она (см. [CachedPoint]). */
-    private fun cachedConfirmed(result: TuningResult, cached: CachedStart): Boolean {
-        val cand = result.report.candidates.firstOrNull { it.config.endpoint == cached.endpoint } ?: return false
-        return CachedPoint.confirmed(cand.stats.replies, cand.resourcesTotal, cand.resourcesOk)
-    }
+    /**
+     * Подтвердилась ли сохранённая точка (см. [CachedPoint]): хотя бы с одним профилем шума ответила
+     * на рукопожатие и — если проверяли — пропустила данные.
+     */
+    private fun cachedConfirmed(result: TuningResult, cached: CachedStart): Boolean =
+        result.report.candidates
+            .filter { it.config.endpoint == cached.endpoint }
+            .any { cand ->
+                CachedPoint.confirmed(
+                    cand.stats.replies, cand.resourcesTotal, cand.resourcesOk,
+                    cand.stats.dataTried, cand.stats.dataReplies
+                )
+            }
 
     /**
      * Сам подбор: пул endpoint'ов → скан → подробные пробы по профилям шума → проверки ресурсов.
@@ -219,7 +276,8 @@ class AutoTuner(
         peerPublic: ByteArray
     ): TuningResult {
     val peerPublic = Crypto.unBase64(account.peerPublicB64)
-    val endpoints = EndpointPool.build(spec.endpointSpec)
+    // Прежняя очередь — в пул первой: её точек может не быть в выборке пула.
+    val endpoints = (spec.priority.filter { !it.host.contains(':') } + EndpointPool.build(spec.endpointSpec)).distinct()
     progress.log("Ключи: ${account.source}; кандидатов: ${endpoints.size}")
 
     // --- фаза 1: быстрый скан -------------------------------------------------------
@@ -237,7 +295,11 @@ class AutoTuner(
     val alive = ranked.filter { it.bestVerdict in setOf(Verdict.HANDSHAKE_OK, Verdict.COOKIE_REPLY) }
     notes += "Живых (подтверждённый handshake/cookie): ${alive.size} из ${ranked.size}"
 
-    val refineCandidates = (if (alive.size >= 2) alive else ranked).take(maxOf(3, spec.refineTop))
+    // Ответившие точки прежней очереди проверяются подробно в любом случае — первыми.
+    val prior = spec.priority.mapTo(HashSet()) { it.render() }
+    val refineCandidates = (alive.filter { it.endpoint.render() in prior } + (if (alive.size >= 2) alive else ranked))
+        .distinctBy { it.endpoint.render() }
+        .take(maxOf(3, spec.refineTop))
 
     // --- фаза 2: подробно, по профилям шума ---------------------------------------
     val perProfile = LinkedHashMap<Endpoint, MutableMap<String, EndpointStats>>()
@@ -246,10 +308,26 @@ class AutoTuner(
     for (stats in refineCandidates) {
         for (profile in spec.junkProfiles) {
             if (progress.isCancelled()) break
-            val refined = wgProber.probe(stats.endpoint, account, peerPublic, profile).stats
+            val refined = wgProber.probe(stats.endpoint, account, peerPublic, profile, dataProbe = spec.dataProbe).stats
             perProfile.getOrPut(stats.endpoint) { LinkedHashMap() }[profile.name] = refined
             done++
-            progress.progress(done, totalWork, "${stats.endpoint.render()} · ${profile.name} · ${refined.bestVerdict}")
+            val dataMark = when {
+                refined.dataTried == 0 -> ""
+                refined.dataReplies > 0 -> " · данные ✓"
+                else -> " · данных нет"
+            }
+            progress.progress(done, totalWork, "${stats.endpoint.render()} · ${profile.name} · ${refined.bestVerdict}$dataMark")
+        }
+    }
+    if (spec.dataProbe) {
+        // Итог проверки данных — в журнал подбора: по нему видно, режет ли сеть сам туннель.
+        val tried = perProfile.values.flatMap { it.values }.filter { it.dataTried > 0 }
+        if (tried.isNotEmpty()) {
+            val passed = tried.count { it.dataReplies > 0 }
+            val line = "Данные через туннель: пошли у $passed из ${tried.size} вариантов «точка + шум»" +
+                (if (passed == 0) " — рукопожатие проходит, а данные нет: сеть режет сам туннель" else "")
+            notes += line
+            progress.log(line)
         }
     }
 
@@ -282,8 +360,10 @@ class AutoTuner(
             )
         }
     }
-    // добавляем «просто лучший endpoint без шума» — иногда честный WG проходит лучше AWG
-    ranked.firstOrNull()?.let { top ->
+    // добавляем «просто лучший endpoint без шума» — иногда честный WG проходит лучше AWG. С проверкой
+    // данных — нет: у этого варианта только рукопожатие первого прохода, а «без шума» и так есть
+    // среди профилей второго прохода, уже с проверкой данных.
+    if (!spec.dataProbe) ranked.firstOrNull()?.let { top ->
         candidates.add(
             Candidate(
                 buildConfig(spec, account, top.endpoint, JunkLibrary.none(), 0),
@@ -378,7 +458,9 @@ class AutoTuner(
             val parts = Scoring.evaluate(stats, null, 0, 0, weights)
             Candidate(buildConfig(spec, account, ep, JunkLibrary.tlsFixed(), parts.total), stats, parts)
         }.toList().sortedByDescending { it.score }
-        return finish(spec, started, notes, results, emptyList(), account, progress, endpoints.size)
+        // Здесь рукопожатий нет вовсе (нет ключа) — это догадка по TLS/UDP, и годность по ответу
+        // сервера к ней не применима.
+        return finish(spec, started, notes, results, emptyList(), account, progress, endpoints.size, requireUsable = false)
     }
 
     private fun buildConfig(
@@ -408,7 +490,13 @@ class AutoTuner(
         resources: List<ResourceResult>,
         account: dev.warpscout.core.model.WarpAccount,
         progress: ProgressSink,
-        endpointsTested: Int = 0
+        endpointsTested: Int = 0,
+        /**
+         * Победитель — только из годных (см. [Candidate.usable]). Раньше при «живых 0 из 120»
+         * победителем становилась молчащая точка с 60 баллами: её конфиг записывался, тройка из
+         * молчащих точек затирала рабочую, а подключение перебирало мёртвое (журнал 22.11 16:32).
+         */
+        requireUsable: Boolean = true
     ): TuningResult {
         val report = TuningReport(
             startedAt = started.format(tsFmt),
@@ -421,17 +509,24 @@ class AutoTuner(
         )
         // Победитель: сначала «сколько реально открылось», потом балл. Если изнутри ничего не
         // проверяли — обычный максимум балла.
-        val verifiedAny = candidates.filter { it.resourcesTotal > 0 }
+        val pool = if (requireUsable) candidates.filter { it.usable } else candidates
+        val verifiedAny = pool.filter { it.resourcesTotal > 0 }
         val best = if (verifiedAny.any { it.resourcesOk > 0 }) {
             verifiedAny.sortedWith(verifiedOrder()).firstOrNull()
         } else {
-            candidates.maxByOrNull { it.score }
+            pool.maxByOrNull { it.score }
         }
         val text = best?.let { WgConf.render(it.config) }
         progress.log(
-            if (best == null) "Готово: ни один кандидат не набрал баллов."
+            if (best == null) when {
+                candidates.isEmpty() -> "Готово: ни один кандидат не набрал баллов."
+                candidates.any { it.stats.replies > 0 } ->
+                    "Готово: рукопожатие у части точек есть, но данные не пошли ни через одну — прежние конфиг и очередь не трогаю."
+                else -> "Готово: ни одна точка не ответила — прежние конфиг и очередь не трогаю."
+            }
             else buildString {
                 append("Лучший: ${best.config.endpoint.render()} · ${best.junk.name} · ${best.score} балла")
+                best.stats.dataMs?.let { append(" · данные через туннель ${it.toLong()} мс") }
                 if (best.resourcesTotal > 0) append(" · изнутри открылось ${best.resourcesOk}/${best.resourcesTotal}")
                 if (best.speedKbps > 0) append(" · ${dev.warpscout.core.net.SpeedTest.human(best.speedKbps)}")
             }

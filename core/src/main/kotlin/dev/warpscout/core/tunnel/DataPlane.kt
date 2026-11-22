@@ -178,6 +178,27 @@ class DataPlane(
     var bytesDown: Long = 0L
         private set
 
+    /**
+     * Сколько ответов пришло на пробу данных ([sendDataProbe]). По ним сервис решает, работает ли
+     * точка: рукопожатие само по себе этого не доказывает (журнал 22.11: «вверх 5542, вниз 0»).
+     */
+    @Volatile
+    var probeReplies: Int = 0
+        private set
+
+    /** За сколько пришёл первый ответ на пробу данных, мс (-1 — ещё не пришёл). */
+    @Volatile
+    var probeReplyMs: Long = -1L
+        private set
+
+    /** Порт и номер запроса последней пробы: по ним её ответ отличается от трафика приложений. */
+    @Volatile
+    private var probePort: Int = 0
+    @Volatile
+    private var probeTxId: Int = -1
+    @Volatile
+    private var probeSentAt: Long = 0L
+
     @Volatile
     private var sessionStartedAt: Long = 0L
 
@@ -271,6 +292,36 @@ class DataPlane(
     fun keepaliveNow() {
         if (stopped || !handshakeOk) return
         runCatching { sendKeepalive() }
+    }
+
+    /**
+     * Проба данных: DNS-запрос к 1.1.1.1 прямо в сессию, мимо tun и маршрутов телефона (см.
+     * [DataProbe]). Ответ не уходит в tun, а считается в [probeReplies].
+     *
+     * Зачем мимо tun: в раздельном режиме и с «только выбранными приложениями» запрос из сокета мог
+     * пойти мимо туннеля и «доказать» связь, которой нет. Здесь пакет шифруется текущей сессией —
+     * ответ на него приходит, только если данные через эту точку действительно идут.
+     *
+     * @return false — сессии нет (туннель не поднят или остановлен), проба не ушла.
+     */
+    fun sendDataProbe(): Boolean {
+        if (stopped || !handshakeOk) return false
+        val src = DataProbe.ipv4Of(config.account.ipv4) ?: DataProbe.ipv4Of("172.16.0.2") ?: return false
+        val port = DataProbe.randomPort(Crypto.random)
+        val txId = Crypto.random.nextInt(0x10000)
+        val query = DataProbe.dnsQuery(src, port, txId)
+        val pkt = synchronized(lock) {
+            val s = session ?: return false
+            val (bytes, next) = Wg.buildTransport(peerIndex, s, query)
+            session = next
+            bytes
+        }
+        // Порт и номер — до отправки: ответ может прийти раньше, чем вернётся send().
+        probeTxId = txId
+        probePort = port
+        probeSentAt = System.currentTimeMillis()
+        sendTracked(pkt)
+        return true
     }
 
     /**
@@ -415,6 +466,14 @@ class DataPlane(
             opened.first
         }
         if (plain.isEmpty()) return
+        // Ответ на нашу пробу данных — не для приложений: считаем его и в tun не пишем. Иначе
+        // система ответила бы на него «порт закрыт», и этот ответ ушёл бы обратно в туннель.
+        val port = probePort
+        if (port != 0 && DataProbe.isReply(plain, port, probeTxId)) {
+            if (probeReplyMs < 0L) probeReplyMs = (System.currentTimeMillis() - probeSentAt).coerceAtLeast(0L)
+            probeReplies += 1
+            return
+        }
         try {
             tunOutput.write(plain)
             tunOutput.flush()

@@ -33,6 +33,12 @@ object WarpDefaults {
         4177, 4198, 4233, 4500, 5279, 5956, 7103, 7152, 7156, 7281, 7559, 8319, 8742, 8854, 8886
     )
 
+    /**
+     * Порты, с которых начинается выборка каждой подсети: на них WARP отвечает чаще всего (их
+     * ставит и официальный клиент). Остальные порты идут следом в случайном порядке.
+     */
+    val POPULAR_PORTS = listOf(500, 2408, 1701, 4500)
+
     /** Порты MASQUE (WireGuard over HTTP/3 CONNECT-UDP). */
     val MASQUE_PORTS = listOf(443, 500, 1701, 4500, 4443, 8443, 8095)
     val MASQUE_SUBNETS = listOf("162.159.198.", "162.159.199.")
@@ -75,14 +81,28 @@ object EndpointPool {
 
         if (spec.mode == PoolMode.STRATIFIED) {
             // Детерминированно, но «перемешанно»: для каждой подсети и порта берём samplesPerKey октетов.
-            for (prefix in spec.subnets) {
+            //
+            // Подсети ЧЕРЕДУЮТСЯ. Раньше точки шли подсеть за подсетью, и предел maxEndpoints
+            // обрезал пул уже на первой: при 54 портах × 2 октетах первые 120 точек были почти все
+            // из 162.159.192.x, а 188.114.96–99 и 8.x в скан не попадали вовсе. Журнал 22.11 16:32:
+            // «живых 0 из 120» (сеть как раз резала 162.159.192.x), а 188.114.97.1:500 отвечала.
+            // Теперь любой предел даёт срез по всем подсетям: в каждой — сначала популярные порты,
+            // потом остальные вперемешку, и у соседних портов разные октеты.
+            val perSubnet = spec.subnets.map { prefix ->
                 val chosen = if (octets.isEmpty()) listOf(1) else
                     octets.shuffled(rnd).take(spec.samplesPerKey).sorted()
-                for (port in spec.ports) {
-                    for (o in chosen) {
-                        out.add(Endpoint(prefix + o, port))
-                        if (out.size >= spec.maxEndpoints) return out.toList()
-                    }
+                val popular = WarpDefaults.POPULAR_PORTS.filter { it in spec.ports }
+                val ports = popular + spec.ports.filter { it !in popular }.shuffled(rnd)
+                val firstPass = ports.mapIndexed { j, port -> Endpoint(prefix + chosen[j % chosen.size], port) }
+                val allPairs = ports.flatMap { port -> chosen.map { o -> Endpoint(prefix + o, port) } }
+                (firstPass + allPairs).distinct()
+            }
+            val longest = perSubnet.maxOfOrNull { it.size } ?: 0
+            for (i in 0 until longest) {
+                for (list in perSubnet) {
+                    if (i >= list.size) continue
+                    out.add(list[i])
+                    if (out.size >= spec.maxEndpoints) return out.toList()
                 }
             }
             for (h in spec.hostnames) {

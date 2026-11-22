@@ -11,15 +11,22 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import dev.warpscout.app.ConfigShortlist
 import dev.warpscout.app.EndpointMemory
 import dev.warpscout.app.R
 import dev.warpscout.app.TunnelDebug
 import dev.warpscout.core.config.SplitRoutes
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.crypto.Crypto
+import dev.warpscout.core.junk.JunkLibrary
+import dev.warpscout.core.model.AddrFamily
 import dev.warpscout.core.model.Endpoint
+import dev.warpscout.core.model.JunkChunk
+import dev.warpscout.core.model.JunkProfile
 import dev.warpscout.core.model.Verdict
 import dev.warpscout.core.model.WarpConfig
+import dev.warpscout.core.net.EndpointPool
+import dev.warpscout.core.net.EndpointSpec
 import dev.warpscout.core.net.NetSettings
 import dev.warpscout.core.net.SpeedTest
 import dev.warpscout.core.net.UdpSocketFactory
@@ -527,6 +534,14 @@ class WarpVpnService : VpnService() {
     @Volatile
     private var autoRebind: Boolean = false
 
+    /**
+     * Текущий старт пришёл не из перебора в интерфейсе (плитка, автоподъём, возврат после подбора):
+     * за него следующую точку берёт сам сервис (см. superviseStart). Перебор в интерфейсе шлёт
+     * отметку начала подключения и меняет точки сам — тогда сервис при отказе снимает себя, как раньше.
+     */
+    @Volatile
+    private var selfDrivenStart: Boolean = false
+
     /** Сеть поменялась повторно, пока шла пауза — перезапустимся сразу после неё. */
     @Volatile
     private var netRestartPending: Boolean = false
@@ -795,8 +810,11 @@ class WarpVpnService : VpnService() {
         // мерит сам, и два замера разом мешали бы друг другу.
         quietSession = explicit != null && intent?.getBooleanExtra(EXTRA_QUIET, false) == true
         // Подключение по кнопке/плитке — не автопереподъём: при неудаче сервис снимает себя, как
-        // и раньше, иначе следующее ручное нажатие упрётся в «уже поднимается».
+        // и раньше, иначе следующее ручное нажатие упрётся в «уже поднимается». Исключение —
+        // старт без перебора в интерфейсе: мёртвую точку там меняет сам сервис (см. superviseStart).
         autoRebind = false
+        val selfDriven = !quietSession && (requestedAt <= 0L || redelivered)
+        selfDrivenStart = selfDriven
         netRestartAttempts = 0
         // Ручной старт — новый отсчёт: отложенные повторы отменяются, счётчики циклов — с нуля.
         wanted = true
@@ -813,7 +831,10 @@ class WarpVpnService : VpnService() {
         // handshake. Главный поток сервиса — он же главный поток приложения: UI в это время висел,
         // и выглядело это ровно как «туннель запускается, потом без ошибок ничего не происходит».
         Thread({
-            if (epoch.get() == bootEpoch && wanted && !destroyed) startVpn(text, startId)
+            if (epoch.get() == bootEpoch && wanted && !destroyed) {
+                startVpn(text, startId)
+                if (selfDriven) superviseStart()
+            }
         }, "warpscout-vpn-boot").apply { isDaemon = true }.start()
         return START_REDELIVER_INTENT
     }
@@ -893,6 +914,7 @@ class WarpVpnService : VpnService() {
         // Итог проверки связи и замер скорости — про прошлую сессию; у новой их ещё нет.
         TunnelState.clearLink()
         TunnelState.clearSpeed()
+        TunnelState.dataCheckAt = 0L
         freezeStreak = 0
         TunnelDebug.reset()
         createChannel()
@@ -1084,28 +1106,15 @@ class WarpVpnService : VpnService() {
             },
             // Подъём — по событию, а не по тексту журнала: правка формулировки в ядре раньше
             // молча лишала сервис сигнала «туннель работает».
+            //
+            // С 1.10.29 рукопожатие — ещё не «работает». Журнал 22.11 16:33: точка 188.114.97.1:500
+            // отвечала на рукопожатие за 200 мс, а данных назад не шло ни байта («вверх 5542,
+            // вниз 0»), и экран всё это время писал «Туннель работает». Теперь «работает», память
+            // точки и дозор — только после ответа через туннель (см. [dataGate]).
             onTunnelUp = {
-                TunnelState.up = true
-                TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_UP
                 handshake.countDown()
-                // Туннель поднят — отложенные повторы и ожидание сети больше не нужны.
+                // Рукопожатие есть — отложенные повторы и ожидание сети больше не нужны.
                 cancelWaits()
-                // Туннель поднят — цикл перебора закончен, следующая авария начнёт новый. Раньше
-                // счётчик сбрасывался только при переподъёме самим сервисом: после ручного
-                // «Подключить» он оставался исчерпанным, и сервис больше не менял точку сам.
-                rotationsSinceUp = 0
-                // Память «на такой сети работает такая точка»: следующая смена сети начнётся
-                // сразу с неё, без неудачной попытки на адресе из другой сети.
-                runCatching {
-                    EndpointMemory.remember(this, memoryNetKind(), cfg.endpoint.render())
-                }
-                // Ровно этот текст и поднимется после перезагрузки, обновления или перезапуска
-                // системой: точка в нём та, что работает сейчас (см. TunnelLastConfig).
-                runCatching { TunnelLastConfig.save(this, text) }
-                TunnelDebug.ok("туннель поднят: ${cfg.endpoint.render()}")
-                postNotification(getString(R.string.notif_active, cfg.endpoint.render()))
-                // Тихая проверка соседних точек: сессию не трогает, очередь держит свежей.
-                startSentry(cfg, myEpoch)
             },
             log = { line ->
                 // Статистика расхода — для журнала, в уведомлении ей не место.
@@ -1264,15 +1273,125 @@ class WarpVpnService : VpnService() {
             // «устаревшая попытка: таймаут…» — по строке на каждую точку перебора.
             if (!waited && myEpoch == epoch.get() && !stopped.get() && !TunnelState.up) {
                 fail("таймаут: за 25 с handshake не завершился", startId, myEpoch)
-            } else if (waited) {
-                watchTraffic(startId, myEpoch)
-                // «Подключено» — только когда данные ходят. Через полторы секунды после подъёма
-                // (приложения как раз начинают переподключаться) проверяем это запросом через
-                // туннель; два провала подряд — сессия мертва, переподключаемся.
+            } else if (waited && dataGate(cfg, text, startId, myEpoch)) {
+                // Данные ходят. Через полторы секунды после подъёма (приложения как раз начинают
+                // переподключаться) проверяем ещё и настоящим запросом через маршруты телефона;
+                // два провала подряд — точка не годится, переходим на следующую. Проверка идёт в
+                // своём потоке, поэтому запускается раньше слежения за трафиком (оно ждёт до 8 с).
                 startLinkCheck(myEpoch, "после подъёма", 1_500L, reconnectOnFail = true, autoSpeed = true)
+                watchTraffic(startId, myEpoch)
             }
         }.apply { isDaemon = true; name = "warpscout-vpn-watch"; start() }
     }
+
+    // ------------------------------------------------------------ проверка данных после рукопожатия
+
+    /** Когда слать пробы данных после рукопожатия (мс от его конца): потеря одной — не приговор. */
+    private val DATA_PROBE_AT_MS = longArrayOf(0L, 900L, 2_000L)
+
+    /** Сколько ждать ответа через туннель, прежде чем признать точку «без данных». */
+    private val DATA_GATE_MS = 3_500L
+
+    /**
+     * Рукопожатие прошло — идут ли данные? DNS-запрос внутри сессии (мимо маршрутов телефона, см.
+     * DataPlane.sendDataProbe), три попытки за 3,5 с. Любой пакет приложений вниз — тоже ответ.
+     *
+     * Ответ есть — туннель объявляется рабочим. Нет — точка «рукопожатие есть, данных нет»: она
+     * помечается мёртвой для этой сети, и попытка кончается отказом с понятной причиной; перебор
+     * (в интерфейсе или в самом сервисе) берёт следующую точку. Раньше такая точка считалась
+     * рабочей, а проверка связи через 28 с переподключала на неё же — по кругу (журнал 22.11).
+     *
+     * @return true — данные идут, туннель объявлен рабочим.
+     */
+    private fun dataGate(cfg: WarpConfig, text: String, startId: Int, myEpoch: Int): Boolean {
+        val p = plane ?: return false
+        fun current() = myEpoch == epoch.get() && !stopped.get() && !destroyed
+        if (!current()) return false
+        val began = System.currentTimeMillis()
+        TunnelState.dataCheckAt = began
+        TunnelState.status = "рукопожатие есть — проверяю, идут ли данные"
+        var sent = 0
+        var ok = false
+        try {
+            while (current() && System.currentTimeMillis() - began < DATA_GATE_MS) {
+                val since = System.currentTimeMillis() - began
+                if (sent < DATA_PROBE_AT_MS.size && since >= DATA_PROBE_AT_MS[sent]) {
+                    p.sendDataProbe()
+                    sent++
+                }
+                if (p.probeReplies > 0 || p.bytesDown > 0L) {
+                    ok = true
+                    break
+                }
+                Thread.sleep(40)
+            }
+        } catch (e: InterruptedException) {
+            return false
+        } finally {
+            if (TunnelState.dataCheckAt == began) TunnelState.dataCheckAt = 0L
+        }
+        if (!current()) return false
+        val ep = cfg.endpoint.render()
+        if (ok) {
+            val ms = p.probeReplyMs.takeIf { it >= 0L } ?: (System.currentTimeMillis() - began)
+            TunnelDebug.ok(
+                if (p.probeReplies > 0) "данные идут: ответ через туннель за $ms мс"
+                else "данные идут: приложения уже получают ответы"
+            )
+            markTunnelUp(cfg, text, myEpoch)
+            return true
+        }
+        // Рукопожатие есть, данных нет. Точку — в мёртвые для этой сети и из памяти «работала
+        // здесь»: иначе следующий переподъём опять начался бы с неё.
+        markDataDead(ep)
+        fail(
+            "данные не идут через $ep: рукопожатие есть, а за ${DATA_GATE_MS / 1000.0} с " +
+                "ни ответа через туннель, ни одного пакета вниз",
+            startId,
+            myEpoch
+        )
+        return false
+    }
+
+    /**
+     * Туннель работает: данные через него идут. Всё, что раньше делалось сразу после рукопожатия, —
+     * здесь: статус, память точки, сохранённый конфиг для перезагрузки, уведомление, дозор.
+     */
+    private fun markTunnelUp(cfg: WarpConfig, text: String, myEpoch: Int) {
+        TunnelState.up = true
+        TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_UP
+        // Туннель поднят — цикл перебора закончен, следующая авария начнёт новый. Раньше
+        // счётчик сбрасывался только при переподъёме самим сервисом: после ручного
+        // «Подключить» он оставался исчерпанным, и сервис больше не менял точку сам.
+        rotationsSinceUp = 0
+        // Память «на такой сети работает такая точка»: следующая смена сети начнётся
+        // сразу с неё, без неудачной попытки на адресе из другой сети.
+        runCatching {
+            EndpointMemory.remember(this, memoryNetKind(), cfg.endpoint.render())
+        }
+        // Ровно этот текст и поднимется после перезагрузки, обновления или перезапуска
+        // системой: точка в нём та, что работает сейчас (см. TunnelLastConfig).
+        runCatching { TunnelLastConfig.save(this, text) }
+        TunnelDebug.ok("туннель поднят: ${cfg.endpoint.render()}")
+        TunnelState.status = getString(R.string.notif_active, cfg.endpoint.render())
+        postNotification(getString(R.string.notif_active, cfg.endpoint.render()))
+        // Тихая проверка соседних точек: сессию не трогает, очередь держит свежей.
+        startSentry(cfg, myEpoch)
+    }
+
+    /**
+     * Точка пропускает рукопожатие, но не данные. Для перебора на этой сети она мертва (как «порт
+     * закрыт»), а запись «на этой сети работала она» стираем: иначе каждый переподъём начинался бы
+     * с неё (журнал 22.11: три переподключения подряд на 188.114.97.1:500 и ни одного на следующую).
+     */
+    private fun markDataDead(endpoint: String) {
+        if (endpoint.isBlank()) return
+        sentryMarkDead(endpoint)
+        runCatching { EndpointMemory.forget(this, memoryNetKind(), endpoint) }
+    }
+
+    /** Причина отказа — «рукопожатие есть, данных нет» (см. [dataGate]). */
+    private fun isDataDead(reason: String?): Boolean = reason.orEmpty().contains("данные не идут")
 
     /**
      * «Туннель поднят, а интернета нет» — отдельный диагноз: if up, но счётчики нулевые, значит
@@ -1280,9 +1399,11 @@ class WarpVpnService : VpnService() {
      */
     private fun watchTraffic(startId: Int, myEpoch: Int) {
         val deadline = System.currentTimeMillis() + 8000
-        while (System.currentTimeMillis() < deadline && !stopped.get()) {
+        while (System.currentTimeMillis() < deadline && !stopped.get() && myEpoch == epoch.get()) {
             val p = plane
-            if (p != null && (p.bytesUp > 0 || p.bytesDown > 0)) {
+            // «Трафик пошёл» — только когда что-то пришло ВНИЗ. Раньше хватало байт вверх, и в
+            // журнале стояло «✓ трафик пошёл: вверх 5542, вниз 0 байт» — галочка при мёртвой точке.
+            if (p != null && p.bytesDown > 0) {
                 TunnelDebug.ok("трафик пошёл: вверх ${p.bytesUp}, вниз ${p.bytesDown} байт")
                 TunnelDebug.bytesUp = p.bytesUp
                 TunnelDebug.bytesDown = p.bytesDown
@@ -1290,14 +1411,20 @@ class WarpVpnService : VpnService() {
             }
             Thread.sleep(500)
         }
-        if (!stopped.get() && TunnelState.up) {
-            val p = plane
-            if (p != null && p.bytesUp == 0L && p.bytesDown == 0L) {
+        if (!stopped.get() && TunnelState.up && myEpoch == epoch.get()) {
+            val p = plane ?: return
+            TunnelDebug.bytesUp = p.bytesUp
+            TunnelDebug.bytesDown = p.bytesDown
+            if (p.bytesUp == 0L && p.bytesDown == 0L) {
                 TunnelDebug.error(
                     "туннель поднят, но ноль пакетов за 8 с",
                     "проверь AllowedIPs: в split-tunnel через WARP идут только перечисленные сети"
                 )
                 postNotification(getString(R.string.notif_no_traffic))
+            } else if (p.bytesDown == 0L) {
+                // Сама точка проверена ответом через туннель (см. dataGate), а приложениям за 8 с
+                // ничего не пришло: решит проверка связи — она уже идёт.
+                TunnelDebug.stage("приложения отправили ${p.bytesUp} байт, ответов им пока нет — жду проверку связи")
             }
         }
     }
@@ -1371,7 +1498,7 @@ class WarpVpnService : VpnService() {
                 val settings = serviceSettings()
                 if (result.web == TunnelStatus.LINK_FAIL && reconnectOnFail && wanted && linkAlive(myEpoch)) {
                     if (settings.linkReconnect) {
-                        restartAfterNetworkChange("проверка связи: через туннель нет ответа", R.string.status_reconnect_silent)
+                        switchAfterDeadLink()
                     } else {
                         TunnelDebug.stage("переподключение по проверке связи выключено в настройках — туннель не трогаю")
                     }
@@ -1673,6 +1800,39 @@ class WarpVpnService : VpnService() {
         }
     }
 
+    /**
+     * Проверка связи дважды не получила ответа через туннель: точка перестала пропускать данные.
+     * Переходим на следующую из очереди этой сети. Раньше переподключались к той же точке (журнал
+     * 22.11: 16:33:31, 16:34:00, 16:34:29 — три раза подряд 188.114.97.1:500), и до следующей
+     * точки дело не доходило.
+     */
+    private fun switchAfterDeadLink() {
+        val oldPoint = currentEndpointLine().orEmpty()
+        // Не в «мёртвые» сразу: ответа нет и тогда, когда пропала вся сеть. Точка — кандидат в
+        // мёртвые; мёртвой она станет, если поднимется следующая (см. commitCycleMarks).
+        if (oldPoint.isNotEmpty()) {
+            cycleTried.add(oldPoint)
+            cycleSilent.add(oldPoint)
+        }
+        failoverOrder = emptyList()
+        rebuildFailoverOrder()
+        val next = nextFailoverEndpoint()
+        if (next != null && next.first != oldPoint) {
+            lastConfigText = next.second
+            // Чтобы переподъём не вернул «работавшую на этой сети» — ту самую точку без ответа.
+            rotationsSinceUp += 1
+            forceFastRetry = true
+            TunnelDebug.stage("$oldPoint: через туннель нет ответа — перехожу на ${next.first}")
+            restartAfterNetworkChange(
+                "проверка связи: через туннель нет ответа — переход на ${next.first}",
+                R.string.status_reconnect_silent
+            )
+        } else {
+            TunnelDebug.stage("$oldPoint: через туннель нет ответа, других точек нет — переподключаюсь к ней же")
+            restartAfterNetworkChange("проверка связи: через туннель нет ответа", R.string.status_reconnect_silent)
+        }
+    }
+
     /** Экран попросил замерить скорость (нажатие на «Скорость»). */
     private fun handleSpeedRequest(startId: Int) {
         val running = plane != null && worker?.isAlive == true && TunnelState.up
@@ -1885,7 +2045,9 @@ class WarpVpnService : VpnService() {
         }
         // Закрытому экземпляру сдаваться не от чего: общее состояние уже принадлежит другому.
         if (destroyed) return
-        if (autoRebind) {
+        // Старт без перебора в интерфейсе (плитка, автоподъём): мёртвую точку меняет сам сервис
+        // (см. superviseStart) — снять себя здесь значило оставить туннель лежать до нажатия.
+        if (autoRebind || (selfDrivenStart && isSilentPoint(reason))) {
             // После смены сети сервис не снимаем: сеть может появиться снова, а пользователь —
             // не нажать «Подключить». Просто честно говорим, что не вышло.
             starting = false
@@ -2534,7 +2696,9 @@ class WarpVpnService : VpnService() {
                 slowRetries = 0
                 rotationsSinceUp = 0
                 commitCycleMarks()
-                TunnelDebug.ok("туннель переподнят после смены сети")
+                // Причина — та, по которой переподнимали: раньше здесь всегда стояло «после смены
+                // сети», даже когда сеть не менялась (журнал 22.11: переподъёмы по проверке связи).
+                TunnelDebug.ok("туннель переподнят: $why")
                 return@Thread
             }
             // «Сервер молчит» — это не «сеть не пускает», а «эта точка умерла»: пять инициаций
@@ -2552,41 +2716,77 @@ class WarpVpnService : VpnService() {
                     restartAfterNetworkChange("повтор после неудачи")
                 }
             } else {
-                // Три раза стучались в одну точку и не достучались (или она молчит/закрыта) —
-                // берём следующую из очереди последнего подключения.
-                val oldPoint = currentEndpointLine().orEmpty()
-                if (oldPoint.isNotEmpty()) {
-                    cycleTried.add(oldPoint)
-                    when {
-                        // «Порт закрыт» — прямой ответ сети: точка мертва, сколько ни жди.
-                        isClosedPort(reason) -> sentryMarkDead(oldPoint)
-                        // Молчание — только кандидат в мёртвые (см. [cycleSilent]).
-                        deadPoint -> cycleSilent.add(oldPoint)
-                    }
-                }
-                val next = nextFailoverEndpoint()
+                // Три раза стучались в одну точку и не достучались (или она молчит, закрыта или не
+                // пропускает данные) — берём следующую из очереди последнего подключения.
+                val next = moveToNextPoint(reason)
                 if (next != null) {
-                    lastConfigText = next.second
-                    rotationsSinceUp += 1
-                    netRestartAttempts = 0
-                    forceFastRetry = true
-                    TunnelDebug.stage(
-                        "$oldPoint не поднялась — перехожу на ${next.first} " +
-                            "(смена $rotationsSinceUp из $MAX_ROTATIONS, без ручного нажатия; " +
-                            "причина: ${(reason ?: "нет ответа").take(80)})"
-                    )
-                    TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_RECONNECTING
-                    TunnelState.status = "переключаюсь на ${next.first}"
-                    postNotification(TunnelState.status)
                     runCatching { Thread.sleep(120) }
                     if (!stopped.get() && epoch.get() == attemptEpoch && wanted && !destroyed) {
-                        restartAfterNetworkChange("переход на ${next.first}")
+                        restartAfterNetworkChange("переход на $next")
                     }
                     return@Thread
                 }
                 endFailedCycle()
             }
         }, "warpscout-net-restart").apply { isDaemon = true }.start()
+    }
+
+    /**
+     * Точка не поднялась (молчит, порт закрыт, данные не идут): помечаем её и берём следующую из
+     * очереди этой сети. Возвращает адрес следующей точки (текст конфига уже переключён на неё) или
+     * null — переходить некуда.
+     */
+    private fun moveToNextPoint(reason: String?): String? {
+        val oldPoint = currentEndpointLine().orEmpty()
+        if (oldPoint.isNotEmpty()) {
+            cycleTried.add(oldPoint)
+            when {
+                // «Порт закрыт» — прямой ответ сети: точка мертва, сколько ни жди. «Данные не
+                // идут» — тоже: рукопожатие прошло, сеть до точки есть, а данных через неё нет.
+                isClosedPort(reason) || isDataDead(reason) -> sentryMarkDead(oldPoint)
+                // Молчание — только кандидат в мёртвые (см. [cycleSilent]).
+                isSilentPoint(reason) -> cycleSilent.add(oldPoint)
+            }
+        }
+        val next = nextFailoverEndpoint() ?: return null
+        lastConfigText = next.second
+        rotationsSinceUp += 1
+        netRestartAttempts = 0
+        forceFastRetry = true
+        TunnelDebug.stage(
+            "$oldPoint не годится — перехожу на ${next.first} " +
+                "(смена $rotationsSinceUp из $MAX_ROTATIONS, без ручного нажатия; " +
+                "причина: ${(reason ?: "нет ответа").take(80)})"
+        )
+        TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_RECONNECTING
+        TunnelState.status = "переключаюсь на ${next.first}"
+        postNotification(TunnelState.status)
+        return next.first
+    }
+
+    /**
+     * Старт без перебора в интерфейсе (плитка, автоподъём после перезагрузки, возврат туннеля после
+     * подбора): если точка не годится, следующую берёт сам сервис — так же, как после смены сети.
+     * Раньше такой старт на мёртвой точке кончался «сдался», и туннель лежал до ручного нажатия.
+     */
+    private fun superviseStart() {
+        val attemptEpoch = epoch.get()
+        val outcome = awaitAttempt(15_000)
+        // Решение fail() уже принято (см. [selfDrivenStart]) — дальше старт обычный.
+        selfDrivenStart = false
+        if (epoch.get() != attemptEpoch || destroyed || !wanted || stopped.get()) return
+        if (outcome != ATTEMPT_FAILED) return
+        val reason = TunnelState.error
+        // Не «точка не ответила», а поломка (конфиг, tun, protect): fail() уже снял сервис, как раньше.
+        if (!isSilentPoint(reason)) return
+        val next = moveToNextPoint(reason)
+        if (next == null) {
+            endFailedCycle()
+            return
+        }
+        autoRebind = true
+        runCatching { Thread.sleep(120) }
+        if (epoch.get() == attemptEpoch && wanted && !destroyed) restartAfterNetworkChange("переход на $next")
     }
 
     /**
@@ -2618,10 +2818,25 @@ class WarpVpnService : VpnService() {
         TunnelState.busy = false
         TunnelState.up = false
         TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_FAILED
-        val why = (if (tried == 1) "не удалось поднять туннель: точка не отвечает"
-        else "не удалось поднять туннель: не ответила ни одна из $tried точек") +
+        // «Не заработала», а не «не ответила»: с 1.10.29 точка, которая отвечает на рукопожатие, но
+        // не пропускает данные, тоже не годится — и тоже входит в это число.
+        val why = (if (tried == 1) "не удалось поднять туннель: точка не работает"
+        else "не удалось поднять туннель: не заработала ни одна из $tried точек") +
             (if (allSilent) " — все молчали, похоже на сеть, а не на точки" else "")
         TunnelState.error = why
+        // Вся очередь не работает — подбираем новые точки сами (не чаще раза в 30 минут): туннель
+        // всё равно лежит, и пауза на подбор ничего не стоит. Не вышло — как раньше, медленные повторы.
+        if (hasUsableNetwork() && startRescue(why)) return
+        retryLaterAfterFailure(why)
+    }
+
+    /**
+     * Медленный повтор после неудачного цикла перебора (или неудачного подбора сервиса): растущая
+     * пауза; новая сеть или включённый экран — сразу.
+     */
+    private fun retryLaterAfterFailure(why: String) {
+        TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_FAILED
+        TunnelState.up = false
         slowRetries += 1
         if (slowRetries > SLOW_RETRY_LIMIT) {
             TunnelDebug.error(
@@ -2650,6 +2865,210 @@ class WarpVpnService : VpnService() {
         TunnelState.status = "нет связи с WARP — повторю через ${pauseText(pause)}"
         postNotification(TunnelState.status)
         scheduleSlowRetry(slowRetries, pause)
+    }
+
+    // ------------------------------------------------------------ сам подбор, когда очередь кончилась
+    //
+    // Зачем. Очередь — тройка последнего подбора плюс память и дозор. Если сеть зарезала их все
+    // (журнал 22.11: одна точка без данных, остальные молчат), сервис раньше только повторял те же
+    // точки через растущие паузы — до ручного «Подобрать заново». Теперь он подбирает новые сам:
+    // туннель всё равно не работает, и пауза на подбор ничего не стоит. Не чаще раза в
+    // [RESCUE_GAP_MS]: на сети, где WARP не проходит вовсе, подбор каждые пять минут только сажал
+    // бы батарею.
+
+    private val RESCUE_GAP_MS = 30 * 60_000L
+
+    /** Сколько точек проверять подробно: рукопожатие с шумом и данные через туннель. */
+    private val RESCUE_REFINE = 8
+
+    @Volatile
+    private var lastRescueAt = 0L
+
+    private val rescueBusy = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Точки последнего подбора сервиса: в переборе на сети [rescueNet] — сразу за текущей. */
+    @Volatile
+    private var rescueQueue: List<String> = emptyList()
+
+    @Volatile
+    private var rescueNet: String = ""
+
+    /** Найденная точка: адрес, профиль шума и время ответа через туннель. */
+    private data class RescuePoint(val endpoint: Endpoint, val junk: JunkProfile, val dataMs: Double)
+
+    /**
+     * Запустить подбор, если пора. true — подбор пошёл (дальше он решает сам), false — не время или
+     * нечем (тогда — обычные медленные повторы).
+     */
+    private fun startRescue(why: String): Boolean {
+        if (destroyed || !wanted || stopped.get()) return false
+        val now = System.currentTimeMillis()
+        if (lastRescueAt > 0L && now - lastRescueAt < RESCUE_GAP_MS) return false
+        val text = lastConfigText ?: return false
+        val cfg = runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull() ?: return false
+        val peer = runCatching { Crypto.unBase64(cfg.account.peerPublicB64) }.getOrNull()
+            ?.takeIf { it.size == 32 } ?: return false
+        if (!rescueBusy.compareAndSet(false, true)) return true
+        lastRescueAt = now
+        val netAtStart = memoryNetKind()
+        // Своё поколение ожиданий: «Выключить», новое «Включить» или смена сети отменяют подбор.
+        val gen = waitGen.incrementAndGet()
+        TunnelState.phase = TunnelStatus.PHASE_RECONNECTING
+        TunnelState.status = "точки очереди не работают — подбираю новые"
+        postNotification(TunnelState.status)
+        TunnelDebug.stage("$why — подбираю новые точки сам, без нажатия (до минуты)")
+        Thread({
+            try {
+                val found = runRescue(cfg, peer, gen)
+                if (gen != waitGen.get() || destroyed || !wanted) {
+                    // Подбор прервали. Если телефон перешёл на другую сеть, следующий цикл неудач на
+                    // ней вправе подобрать заново, не дожидаясь получаса; на той же сети — нет, иначе
+                    // включение экрана раз за разом перезапускало бы подбор и тратило батарею.
+                    if (memoryNetKind() != netAtStart) lastRescueAt = 0L
+                    return@Thread
+                }
+                if (found.isEmpty()) {
+                    retryLaterAfterFailure("подбор не нашёл точек, через которые идут данные")
+                } else {
+                    applyRescue(found, cfg, text)
+                }
+            } catch (e: Throwable) {
+                runCatching {
+                    TunnelDebug.stage("подбор сервиса не удался: ${e.javaClass.simpleName} ${e.message.orEmpty().take(80)}")
+                }
+                if (gen == waitGen.get() && wanted && !destroyed) retryLaterAfterFailure(why)
+            } finally {
+                rescueBusy.set(false)
+            }
+        }, "warpscout-rescue").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }.start()
+        return true
+    }
+
+    /**
+     * Подбор точек самим сервисом: рукопожатие по пулу без шума (параллельно), потом лучшие точки —
+     * с профилями шума и проверкой данных. Туннеля в это время нет, поэтому проба данных никому не
+     * мешает. Итог — до трёх точек с данными, быстрые первыми.
+     */
+    private fun runRescue(cfg: WarpConfig, peer: ByteArray, gen: Int): List<RescuePoint> {
+        fun live() = gen == waitGen.get() && wanted && !destroyed
+        val prober = WgProber(
+            NetSettings(
+                attempts = 2,
+                timeoutMs = 1000,
+                concurrency = 32,
+                betweenAttemptsMs = 40,
+                junkPacketsBeforeHandshake = 1,
+                udpFactory = protectedUdp()
+            )
+        )
+        val started = System.currentTimeMillis()
+        // Известные точки (очередь, память, дозор) — вместе с пулом: вдруг какая-то ожила. Пул —
+        // свежая выборка по всем подсетям (seed от времени), а не тот же срез, что не сработал.
+        val known = orderedCandidates().mapNotNull { parseEndpoint(it) }
+        val pool = (known + EndpointPool.build(EndpointSpec(maxEndpoints = 96, seed = started)))
+            .distinct()
+            .filter { it.family == AddrFamily.IPV4 }
+        val coarse = prober.scan(pool, cfg.account, peer, junk = null, isCancelled = { !live() })
+        if (!live()) return emptyList()
+        val alive = coarse
+            .filter { it.bestVerdict == Verdict.HANDSHAKE_OK || it.bestVerdict == Verdict.COOKIE_REPLY }
+            .sortedBy { it.minRtt ?: Double.MAX_VALUE }
+        TunnelDebug.stage("подбор сервиса: на рукопожатие без шума ответили ${alive.size} из ${pool.size} точек")
+        // Без шума не ответил никто — сеть режет голый WireGuard: подробно смотрим точки пула с шумом.
+        val targets = (if (alive.isNotEmpty()) alive.map { it.endpoint } else pool).take(RESCUE_REFINE)
+        val profiles = rescueProfiles(cfg)
+        val found = ArrayList<RescuePoint>()
+        for (ep in targets) {
+            if (!live() || found.size >= dev.warpscout.core.tune.Shortlist.LIMIT) break
+            for (profile in profiles) {
+                if (!live()) break
+                val r = runCatching {
+                    prober.probe(ep, cfg.account, peer, profile.takeIf { !it.isEmpty }, dataProbe = true)
+                }.getOrNull() ?: continue
+                val ms = r.stats.dataMs ?: continue
+                found += RescuePoint(ep, profile, ms)
+                break // одной рабочей комбинации на точку хватает
+            }
+        }
+        TunnelDebug.stage(
+            "подбор сервиса: точек с данными — ${found.size}, " +
+                "за ${(System.currentTimeMillis() - started) / 1000} с"
+        )
+        return found.sortedBy { it.dataMs }
+    }
+
+    /**
+     * Профили шума для подбора сервиса: текущий (с ним туннель уже работал) и два из библиотеки —
+     * «без шума» и TLS. Больше — дольше, а подбор идёт, пока туннель лежит.
+     */
+    private fun rescueProfiles(cfg: WarpConfig): List<JunkProfile> {
+        val library = listOf(JunkLibrary.none(), JunkLibrary.tlsFixed()) + JunkLibrary.defaultPool()
+        // У разобранного из текста конфига профиль называется «imported»: возвращаем ему имя из
+        // библиотеки, если шум тот же, — иначе в «Лучших конфигах» стояло бы непонятное «imported».
+        val current = library.firstOrNull { sameJunk(it, cfg.junk) }?.let { cfg.junk.copy(name = it.name) } ?: cfg.junk
+        return (listOf(current) + library).distinctBy { junkKey(it) }.take(3)
+    }
+
+    private fun junkKey(p: JunkProfile): String = JunkChunk.renderAll(p.i1 + p.i2)
+
+    private fun sameJunk(a: JunkProfile, b: JunkProfile): Boolean = junkKey(a) == junkKey(b)
+
+    /**
+     * Подбор сервиса нашёл точки: записываем их тройкой этой сети (её видно в «Лучших конфигах» и в
+     * «Резервной»), ставим в перебор сразу за текущей и поднимаем туннель на лучшей.
+     */
+    private fun applyRescue(found: List<RescuePoint>, cfg: WarpConfig, baseText: String) {
+        val kind = memoryNetKind()
+        val mobile = dev.warpscout.app.NetIdentity.isMobile(kind)
+        val now = System.currentTimeMillis()
+        val ready = found.mapNotNull { pt ->
+            val text = if (sameJunk(pt.junk, cfg.junk)) {
+                swapEndpointLine(baseText, pt.endpoint.render())
+            } else {
+                runCatching { WgConf.render(cfg.copy(endpoint = pt.endpoint, junk = pt.junk)) }.getOrNull()
+            }
+            text?.takeIf { it.isNotBlank() }?.let { pt to it }
+        }
+        if (ready.isEmpty()) {
+            retryLaterAfterFailure("подбор сервиса: конфиг для найденных точек не собрался")
+            return
+        }
+        runCatching {
+            ConfigShortlist.save(this, ready.map { (pt, text) ->
+                ConfigShortlist.Entry(
+                    endpoint = pt.endpoint.render(),
+                    junk = pt.junk.name,
+                    score = 0,
+                    resourcesOk = ConfigShortlist.UNKNOWN,
+                    resourcesTotal = 0,
+                    configText = text,
+                    savedAt = now,
+                    network = if (mobile) ConfigShortlist.GROUP_MOBILE else ConfigShortlist.GROUP_WIFI,
+                    dataMs = pt.dataMs.toInt()
+                )
+            })
+        }
+        rescueQueue = ready.map { it.first.endpoint.render() }
+        rescueNet = kind
+        TunnelDebug.ok(
+            "подбор сервиса нашёл новую очередь: " + ready.joinToString { (pt, _) ->
+                "${pt.endpoint.render()} (шум ${pt.junk.name}, данные ${pt.dataMs.toLong()} мс)"
+            }
+        )
+        val best = ready.first()
+        lastConfigText = best.second
+        failoverOrder = emptyList()
+        failoverPos = -1
+        cycleSilent.clear()
+        cycleTried.clear()
+        // Не «с нуля»: иначе переподъём начал бы с точки, запомненной для этой сети, а она — из
+        // очереди, которая только что не работала.
+        rotationsSinceUp = 1
+        netRestartAttempts = 0
+        slowRetries = 0
+        forceFastRetry = true
+        autoRebind = true
+        restartAfterNetworkChange("подбор нашёл ${best.first.endpoint.render()}", R.string.status_reconnect_net)
     }
 
     /** Цикл удался: промолчавшие в нём точки — в конец перебора (рядом нашлась живая, сеть ни при чём). */
@@ -2710,7 +3129,9 @@ class WarpVpnService : VpnService() {
     private fun isSilentPoint(reason: String?): Boolean {
         val r = reason.orEmpty()
         return r.contains("молчит") || r.contains("ответа не было") ||
-            r.contains("порт закрыт") || r.contains("port unreachable")
+            r.contains("порт закрыт") || r.contains("port unreachable") ||
+            // «Рукопожатие есть, данных нет» — тоже про точку, а не про сеть: следующая может работать.
+            isDataDead(r)
     }
 
     /** «Порт закрыт» (ICMP) — прямой ответ сети, а не тишина: точка мертва без оговорок. */
@@ -2825,8 +3246,12 @@ class WarpVpnService : VpnService() {
             }
             .sortedByDescending { it.value.okAt }
             .map { it.key.removePrefix(prefix) }
+        // Точки, которые сервис только что подобрал сам (см. applyRescue): проверены данными минуту
+        // назад — раньше старой очереди и резервной из неё.
+        val rescued = if (rescueNet == kind) rescueQueue else emptyList()
         val all = buildList {
             if (current != null) add(current)
+            addAll(rescued)
             if (backup != null) add(backup)
             if (remembered != null) add(remembered)
             addAll(fresh)

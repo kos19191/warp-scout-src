@@ -22,7 +22,22 @@ class TuneWorker(appContext: Context, params: WorkerParameters) : Worker(appCont
         // То же, если туннель не поднят, но сервис его держит (переподключается или ждёт повтора):
         // повтор посреди подбора поднял бы туннель, и замеры пошли бы через WARP.
         val tunnel = TunnelFactory.create(context)
-        if (runCatching { tunnel.isUp || tunnel.active }.getOrDefault(false)) {
+        val tunnelUp = runCatching { tunnel.isUp }.getOrDefault(false)
+        val tunnelHeld = runCatching { tunnel.active }.getOrDefault(false)
+        if (tunnelUp) {
+            // С 1.10.29 работающий туннель — не повод отказаться навсегда: раньше при включённом
+            // туннеле подбор откладывался каждый раз, то есть «иногда подбирать заново» не работало
+            // никогда. Подбор приостанавливает туннель на 30–60 с, поэтому — только на зарядке и с
+            // выключенным экраном (так решено 22.11): обычно это ночь, батарея не тратится, паузу
+            // никто не заметит. В другое время пропускаем этот раз молча — следующий придёт сам.
+            if (!quietMoment(context)) {
+                TunnelDebug.stage("фоновый подбор пропущен: туннель работает, а телефон не на зарядке или экран включён")
+                return Result.success()
+            }
+            TunnelDebug.stage("фоновый подбор: телефон на зарядке, экран выключен — туннель на время подбора приостанавливаю")
+        } else if (tunnelHeld) {
+            // Туннель не поднят, но сервис его держит (переподключается, подбирает сам или ждёт
+            // повтора): повтор посреди подбора поднял бы туннель, и замеры пошли бы через WARP.
             notify(context, context.getString(R.string.tune_delayed))
             return Result.retry()
         }
@@ -73,6 +88,17 @@ class TuneWorker(appContext: Context, params: WorkerParameters) : Worker(appCont
                 ?: context.getString(R.string.tune_none)
         )
         return Result.success()
+    }
+
+    /** На зарядке и с выключенным экраном: только тогда фоновый подбор вправе прервать работающий туннель. */
+    private fun quietMoment(context: Context): Boolean {
+        val charging = runCatching {
+            (context.getSystemService(Context.BATTERY_SERVICE) as android.os.BatteryManager).isCharging
+        }.getOrDefault(false)
+        val screenOff = runCatching {
+            !(context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).isInteractive
+        }.getOrDefault(false)
+        return charging && screenOff
     }
 
     private fun notify(context: Context, text: String) {

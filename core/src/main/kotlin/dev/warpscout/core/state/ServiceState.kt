@@ -115,6 +115,12 @@ data class TunnelStatus(
     val speedFull: Boolean = false,
     /** Замер идёт с этого момента (0 — не идёт): экран пишет «замеряю…», а не прошлое число. */
     val speedRunningSince: Long = 0L,
+    /**
+     * Рукопожатие прошло, и с этого момента сервис проверяет, идут ли данные (0 — не проверяет).
+     * Перебор точек в интерфейсе по нему ждёт итога проверки, а не обрывает попытку на пятой
+     * секунде: «работает» теперь объявляется только после ответа через туннель.
+     */
+    val dataCheckAt: Long = 0L,
 ) {
 
     val isStarting: Boolean get() = phase == PHASE_STARTING || phase == PHASE_RECONNECTING
@@ -155,6 +161,7 @@ data class TunnelStatus(
         "speedBytes" to JsonVal.num(speedBytes),
         "speedFull" to JsonVal.bool(speedFull),
         "speedRunningSince" to JsonVal.num(speedRunningSince),
+        "dataCheckAt" to JsonVal.num(dataCheckAt),
     ).render()
 
     companion object {
@@ -253,6 +260,7 @@ data class TunnelStatus(
                 speedBytes = obj.lng("speedBytes"),
                 speedFull = obj.bool("speedFull") ?: false,
                 speedRunningSince = obj.lng("speedRunningSince"),
+                dataCheckAt = obj.lng("dataCheckAt"),
             )
         }
     }

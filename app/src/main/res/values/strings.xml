@@ -223,6 +223,7 @@
     <string name="banner_sent">Конфиг сохранён и готов к отправке: %1$s</string>
     <string name="banner_connect_ok">Туннель поднят: %1$s</string>
     <string name="banner_connect_failed">Не удалось подключиться (%1$d попыток): %2$s</string>
+    <string name="banner_auto_rescan">Известные точки не работают — подбираю новые и подключусь к лучшей</string>
     <string name="banner_stopped">Туннель отключён</string>
     <!-- Перебор точек при подключении можно отменить: кнопка подключения на это время становится «Отменить». -->
     <string name="btn_connect_cancel">Отменить подключение</string>
@@ -237,6 +238,7 @@
     <string name="top3_row">%1$d) %2$s · шум %3$s</string>
     <string name="top3_row_detail">%1$s · проверен %2$s назад</string>
     <string name="top3_row_unknown">изнутри не проверялся</string>
+    <string name="top3_row_data">данные идут (%1$d мс)</string>
     <string name="top3_row_active">сейчас подключён</string>
     <string name="top3_now">Сейчас подключён: %1$s</string>
     <string name="top3_row_chosen">последний подключённый</string>
@@ -450,7 +452,8 @@
     <string name="sheet_group_now">%1$s · сейчас</string>
     <string name="sheet_group_empty">Точек для этой сети пока нет.</string>
     <string name="sheet_group_other">Сработает, когда телефон перейдёт на эту сеть.</string>
-    <string name="sheet_group_handshake">Подобраны через мобильную сеть, не уходя с Wi-Fi: проверены рукопожатием, без загрузки.</string>
+    <string name="sheet_group_handshake">Подобраны через мобильную сеть, не уходя с Wi-Fi: проверены рукопожатием и ответом через туннель, без загрузки.</string>
+    <string name="sheet_row_data">данные идут</string>
     <string name="sheet_clear_group">Снять отметку</string>
     <string name="sheet_scan_mobile">Подобрать для мобильной сети</string>
     <string name="sheet_row_speed">%1$s</string>

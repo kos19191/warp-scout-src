@@ -69,7 +69,7 @@ class VpnTunnelController(private val context: Context) : TunnelController {
         if (isCancelled()) return false
         if (!startAt(config, requestedAt)) return false
         val startMark = System.currentTimeMillis()
-        val deadline = startMark + waitMs.coerceAtLeast(3000)
+        var deadline = startMark + waitMs.coerceAtLeast(3000)
         var announced = false
         var lastRead = 0L
         while (System.currentTimeMillis() < deadline) {
@@ -90,6 +90,11 @@ class VpnTunnelController(private val context: Context) : TunnelController {
             // после старта, интерфейс уходил к следующей точке, а прежняя всё равно поднималась —
             // и в итоге работали два туннеля сразу (двойные рукопожатия, двойной расход).
             val ours = TunnelState.startedAt >= startMark
+            // С 1.10.29 «работает» объявляется после проверки данных (до 3,5 с после рукопожатия).
+            // Пока она идёт, попытку не обрываем: иначе медленное рукопожатие плюс проверка не
+            // укладывались в 5 с, и рабочая точка уходила в «не поднялась».
+            val checkAt = TunnelState.dataCheckAt
+            if (ours && checkAt > 0L) deadline = maxOf(deadline, checkAt + DATA_CHECK_WAIT_MS)
             if (!announced && ours && System.currentTimeMillis() - startMark > 500 && WarpVpnService.gaveUp()) {
                 announced = true
                 // Причину уже назвал сервис, и она попадает в журнал отдельной строкой. Второй
@@ -126,6 +131,8 @@ class VpnTunnelController(private val context: Context) : TunnelController {
      * экране. Полезно то, что можно сделать прямо сейчас.
      */
     private fun hintFor(reason: String): String = when {
+        reason.contains("данные не идут") ->
+            "сеть пропускает рукопожатие, но режет данные — беру следующую точку; помогает и другой профиль шума"
         reason.contains("port unreachable", ignoreCase = true) || reason.contains("порт закрыт") ->
             "порт не обслуживает WARP в этой сети — следующая точка поднимется сама"
         reason.contains("молчит", ignoreCase = true) || reason.contains("ответа нет") ->
@@ -173,6 +180,12 @@ class VpnTunnelController(private val context: Context) : TunnelController {
 
     companion object {
         const val REQUEST_VPN = 4211
+
+        /**
+         * Сколько ждать итога проверки данных с её начала: сама проверка — до 3,5 с (см.
+         * WarpVpnService.DATA_GATE_MS), плюс запас на запись и чтение снимка между процессами.
+         */
+        private const val DATA_CHECK_WAIT_MS = 5_000L
     }
 }
 

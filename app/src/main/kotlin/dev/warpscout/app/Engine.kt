@@ -231,6 +231,12 @@ class Engine(private val context: Context) {
         }
         last = result
         runCatching { Report.writeAll(result.report, ConfigFiles.dir(context, "reports"), "warpscout") }
+        if (result.best == null) {
+            // Годных точек нет (молчат или «рукопожатие есть, данных нет»). Раньше лучшей всё равно
+            // объявлялась молчащая точка с 60 баллами: её конфиг записывался, тройка из мёртвых
+            // точек затирала рабочую, и подключение перебирало заведомо мёртвое (журнал 22.11 16:32).
+            sink.log("годных точек нет — конфиг, кеш и очередь остаются прежними")
+        }
 
         // Конфиг пользователю отдаём уже «под него»: выбранный сервер, выбранный шум, выбранные
         // каналы и выбранный клиент. Иначе «я же выбрал WireGuard» расходится с файлом на диске.
@@ -334,9 +340,13 @@ class Engine(private val context: Context) {
                     savedAt = savedAt,
                     network = network,
                     speedKbps = cand.speedKbps,
-                    handshakeOnly = handshakeOnly
+                    handshakeOnly = handshakeOnly,
+                    dataMs = cand.stats.dataMs?.toInt() ?: -1
                 )
             }.distinctBy { it.endpoint + "|" + it.junk }
+            if (entries.isEmpty()) {
+                sink.log("очередь не обновлена: в этом подборе нет точек, через которые идут данные")
+            }
             if (entries.isNotEmpty()) {
                 ConfigShortlist.save(context, entries)
                 val where = if (ConfigShortlist.group(network) == ConfigShortlist.GROUP_MOBILE) "мобильной сети" else "Wi-Fi"

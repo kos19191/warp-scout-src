@@ -10,8 +10,17 @@ package dev.warpscout.core.tune
  */
 object CachedPoint {
 
-    fun confirmed(replies: Int, resourcesTotal: Int, resourcesOk: Int): Boolean {
+    fun confirmed(
+        replies: Int,
+        resourcesTotal: Int,
+        resourcesOk: Int,
+        dataTried: Int = 0,
+        dataReplies: Int = 0
+    ): Boolean {
         if (replies <= 0) return false
+        // Данные после рукопожатия проверяли, и ответа не было: такая точка не работает, сколько бы
+        // она ни отвечала на рукопожатие (журнал 22.11: «вверх 5542, вниз 0»).
+        if (dataTried > 0 && dataReplies <= 0) return false
         // Проверок изнутри не было (сборка без туннеля или они отключены) — судим по handshake.
         if (resourcesTotal <= 0) return true
         return resourcesOk > 0

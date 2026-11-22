@@ -98,6 +98,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("скорость через туннель, DNS и две тройки (1.10.28)") {
             speedAndDns()
         }
+        section("данные после рукопожатия и очередь (1.10.29)") {
+            dataProbeChecks()
+        }
         section("расход батареи: интервал keepalive") {
             keepalivePolicy()
         }
@@ -558,6 +561,133 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             "размер=${explicit.size}"
         )
         expect("роуты обхода белых списков", RoutePresets.BYPASS_WHITELIST.size, 56)
+
+        // 1.10.29: предел пула не должен обрезать его на первой подсети (журнал 22.11 16:32: все 120
+        // точек из 162.159.192.x, «живых 0», а 188.114.97.1:500 при этом отвечала).
+        val spread = EndpointPool.build(EndpointSpec(maxEndpoints = 120, seed = 5))
+        val subnetsSeen = spread.map { it.host.substringBeforeLast('.') + "." }.distinct()
+        check(
+            "пул: 120 точек покрывают все подсети, а не одну-две",
+            subnetsSeen.size == dev.warpscout.core.net.WarpDefaults.AWG_SUBNETS.size,
+            subnetsSeen.joinToString()
+        )
+        check(
+            "пул: в каждой подсети есть порт 500",
+            dev.warpscout.core.net.WarpDefaults.AWG_SUBNETS.all { pre -> spread.any { it.host.startsWith(pre) && it.port == 500 } }
+        )
+        check("пул: 120 точек — ровно 120", spread.size == 120, "размер ${spread.size}")
+    }
+
+    /**
+     * 1.10.29: проверка данных после рукопожатия. Точка, которая отвечает на рукопожатие, но не
+     * пропускает данные («вверх 5542, вниз 0» в журнале 22.11), не должна считаться рабочей — ни
+     * в подборе, ни в очереди, ни при подключении.
+     */
+    private fun dataProbeChecks() {
+        val probe = dev.warpscout.core.tunnel.DataProbe
+        val src = probe.ipv4Of("172.16.0.2/32")
+        check("проба данных: адрес туннеля разбирается", src?.toList() == listOf<Byte>(172.toByte(), 16, 0, 2))
+        check("проба данных: IPv6 — не адрес для пробы", probe.ipv4Of("2606:4700::1") == null)
+        val query = probe.dnsQuery(src ?: ByteArray(4), 40001, 0x1234)
+        expect("проба данных: запрос — 60 байт", query.size, 60)
+        expect("проба данных: сумма IP-заголовка сходится", probe.checksum(query, 0, 20, 0L), 0)
+        fun w(b: ByteArray, o: Int) = (((b[o].toInt() and 0xff) shl 8) or (b[o + 1].toInt() and 0xff)).toLong()
+        val udpLen = query.size - 20
+        val pseudo = w(query, 12) + w(query, 14) + w(query, 16) + w(query, 18) + 17L + udpLen.toLong()
+        expect("проба данных: сумма UDP сходится", probe.checksum(query, 20, udpLen, pseudo), 0)
+        val reply = fakeDnsReply(query)
+        check("проба данных: ответ узнаётся", reply != null && probe.isReply(reply, 40001, 0x1234))
+        check("проба данных: чужой номер запроса — не наш ответ", reply != null && !probe.isReply(reply, 40001, 0x1235))
+        check("проба данных: чужой порт — не наш ответ", reply != null && !probe.isReply(reply, 40002, 0x1234))
+        check("проба данных: сам запрос ответом не считается", !probe.isReply(query, 40001, 0x1234))
+
+        val clientPriv = ByteArray(32) { (it * 7 + 3).toByte() }
+        val serverPriv = ByteArray(32) { (it * 11 + 5).toByte() }
+        val serverPub = Crypto.publicOf(serverPriv)
+        val account = WarpAccount(Crypto.base64(clientPriv), Crypto.base64(serverPub))
+        val prober = WgProber(NetSettings(attempts = 2, timeoutMs = 800, betweenAttemptsMs = 0))
+
+        // Сервер, который отвечает на DNS внутри сессии: точка рабочая.
+        val dnsServer = LoopbackServer(serverPriv, answerData = { fakeDnsReply(it) }).start()
+        try {
+            val ok = prober.probe(Endpoint("127.0.0.1", dnsServer.port), account, serverPub, null, dataProbe = true)
+            check(
+                "проба данных: рукопожатие и ответ через сессию",
+                ok.stats.replies > 0 && ok.stats.dataReplies > 0 && !ok.stats.dataBlocked,
+                ok.stats.samples.joinToString { it.note }
+            )
+            check("проба данных: время ответа записано", ok.stats.dataMs != null)
+            val plain = prober.probe(Endpoint("127.0.0.1", dnsServer.port), account, serverPub, null)
+            check("проба данных: без флага — только рукопожатие, как раньше", plain.stats.dataTried == 0 && plain.stats.replies > 0)
+
+            val h = startPlane(clientPriv, serverPub, dnsServer.port, NetSettings(attempts = 2, timeoutMs = 800))
+            try {
+                check("data plane: поднялся для пробы данных", h.awaitUp(3000), h.log.toString())
+                check("data plane: проба данных ушла", h.plane.sendDataProbe())
+                val until = System.currentTimeMillis() + 2000
+                while (h.plane.probeReplies == 0 && System.currentTimeMillis() < until) Thread.sleep(20)
+                check("data plane: ответ на пробу данных пришёл", h.plane.probeReplies > 0)
+                check("data plane: ответ пробы не попал в tun", h.tunOut.poll(200L) == null)
+                check("data plane: ответ пробы не считается трафиком приложений", h.plane.bytesDown == 0L)
+            } finally {
+                h.stop()
+            }
+        } finally {
+            dnsServer.stop()
+        }
+
+        // Сервер отвечает на рукопожатие, а данные выбрасывает — ровно «вверх есть, вниз 0».
+        val blackhole = LoopbackServer(serverPriv, answerData = { null }).start()
+        try {
+            val dead = prober.probe(Endpoint("127.0.0.1", blackhole.port), account, serverPub, null, dataProbe = true)
+            check(
+                "проба данных: «рукопожатие есть, данных нет» распознано",
+                dead.stats.replies > 0 && dead.stats.dataBlocked,
+                dead.stats.samples.joinToString { it.note }
+            )
+            val cfg = WarpConfig(
+                name = "т", account = account, endpoint = Endpoint("127.0.0.1", blackhole.port), junk = JunkLibrary.none()
+            )
+            val blocked = Candidate(cfg, dead.stats, Scoring.evaluate(dead.stats, true))
+            check("очередь: точка без данных в неё не попадает", !blocked.usable && Shortlist.pick(listOf(blocked)).isEmpty())
+            val report = dev.warpscout.core.model.TuningReport("т", "т", "п", listOf(blocked), emptyList(), 1)
+            check("отчёт: точка без данных не становится лучшей", report.best == null)
+            check(
+                "быстрый старт: точка без данных не подтверждается",
+                !CachedPoint.confirmed(dead.stats.replies, 0, 0, dead.stats.dataTried, dead.stats.dataReplies)
+            )
+            val h = startPlane(clientPriv, serverPub, blackhole.port, NetSettings(attempts = 2, timeoutMs = 800))
+            try {
+                check("data plane: поднялся на точке без данных", h.awaitUp(3000), h.log.toString())
+                h.plane.sendDataProbe()
+                Thread.sleep(600)
+                check("data plane: на точке без данных ответа на пробу нет", h.plane.probeReplies == 0)
+            } finally {
+                h.stop()
+            }
+        } finally {
+            blackhole.stop()
+        }
+
+        // Балл: «рукопожатие есть, данных нет» ниже точки, через которую данные идут, при любом прочем.
+        val ep = Endpoint("1.2.3.4", 500)
+        val withData = EndpointStats(ep, listOf(ProbeSample(ep, Verdict.HANDSHAKE_OK, 300.0, 0, dataTried = true, dataMs = 310.0)), Verdict.HANDSHAKE_OK, 1, 3)
+        val noData = EndpointStats(ep, listOf(
+            ProbeSample(ep, Verdict.HANDSHAKE_OK, 10.0, 0, dataTried = true),
+            ProbeSample(ep, Verdict.HANDSHAKE_OK, 11.0, 1, dataTried = true),
+            ProbeSample(ep, Verdict.HANDSHAKE_OK, 12.0, 2)
+        ), Verdict.HANDSHAKE_OK, 3, 3)
+        check(
+            "скоринг: медленная точка с данными выше быстрой без данных",
+            Scoring.evaluate(withData, false).total > Scoring.evaluate(noData, true).total,
+            "${Scoring.evaluate(withData, false).total} против ${Scoring.evaluate(noData, true).total}"
+        )
+        check("быстрый старт: данные пришли — подтверждается", CachedPoint.confirmed(1, 0, 0, 1, 1))
+        expect(
+            "снимок: начало проверки данных переживает JSON",
+            TunnelStatus.fromJson(TunnelStatus(dataCheckAt = 1_758_000_000_777L).toJson())?.dataCheckAt,
+            1_758_000_000_777L
+        )
     }
 
     /**
@@ -1917,6 +2047,24 @@ object WgResponder {
     }
 }
 
+/**
+ * Ответ «DNS-сервера» на пробу данных: те же адреса и порты наоборот, флаг «ответ». null — это не
+ * DNS-запрос (тогда тестовый сервер пакет выбрасывает).
+ */
+private fun fakeDnsReply(query: ByteArray): ByteArray? {
+    if (query.size < 28 || ((query[0].toInt() ushr 4) and 0x0f) != 4 || (query[9].toInt() and 0xff) != 17) return null
+    val ihl = (query[0].toInt() and 0x0f) * 4
+    if (query.size < ihl + 8 + 12) return null
+    val src = query.copyOfRange(12, 16)
+    val dst = query.copyOfRange(16, 20)
+    val sport = ((query[ihl].toInt() and 0xff) shl 8) or (query[ihl + 1].toInt() and 0xff)
+    val dport = ((query[ihl + 2].toInt() and 0xff) shl 8) or (query[ihl + 3].toInt() and 0xff)
+    if (dport != 53) return null
+    val dns = query.copyOfRange(ihl + 8, query.size)
+    dns[2] = (dns[2].toInt() or 0x80).toByte()
+    return dev.warpscout.core.tunnel.DataProbe.udp4(dst, 53, src, sport, dns)
+}
+
 /** Сравнение меток TAI64N побайтно без знака — ровно как memcmp в ядре Linux. */
 private fun stampCompare(a: ByteArray, b: ByteArray): Int {
     for (i in 0 until minOf(a.size, b.size)) {
@@ -1936,7 +2084,12 @@ private fun stampCompare(a: ByteArray, b: ByteArray): Int {
 private class LoopbackServer(
     private val serverPrivate: ByteArray,
     /** false — инициацию «теряем» (имитация сети, которая съела первый датаграмм). */
-    private val answerInitiation: (Int) -> Boolean = { true }
+    private val answerInitiation: (Int) -> Boolean = { true },
+    /**
+     * Что вернуть на пакет данных: по умолчанию эхо; null — выбросить (сеть, которая пропускает
+     * рукопожатие, но режет данные — «вверх есть, вниз 0»).
+     */
+    private val answerData: (ByteArray) -> ByteArray? = { it }
 ) {
     private val socket = java.net.DatagramSocket()
     private val sessions = HashMap<Int, dev.warpscout.core.wg.Wg.Session>()
@@ -2022,7 +2175,8 @@ private class LoopbackServer(
                         if (got.first.isEmpty()) continue   // keepalive: подтверждаем и молчим
                         lastPayload = got.first
                         val client = clientIndex[idx] ?: continue
-                        val (echo, next) = dev.warpscout.core.wg.Wg.buildTransport(client, got.second, got.first)
+                        val answer = answerData(got.first) ?: continue
+                        val (echo, next) = dev.warpscout.core.wg.Wg.buildTransport(client, got.second, answer)
                         sessions[idx] = next
                         socket.send(java.net.DatagramPacket(echo, echo.size, p.socketAddress))
                     }

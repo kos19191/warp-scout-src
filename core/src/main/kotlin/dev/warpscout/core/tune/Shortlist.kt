@@ -22,11 +22,16 @@ object Shortlist {
     /** Три — предел полезного: больше вариантов превращает быстрое переключение во второй список. */
     const val LIMIT = 3
 
+    /** Годится ли кандидат в очередь (см. [Candidate.usable]). */
+    fun usable(c: Candidate): Boolean = c.usable
+
     fun pick(candidates: List<Candidate>, limit: Int = LIMIT): List<Candidate> {
         if (limit <= 0 || candidates.isEmpty()) return emptyList()
-        // Мёртвых не предлагаем: «переключиться» должно вести на что-то, что хотя бы ответило.
-        val alive = candidates.filter { it.stats.replies > 0 || it.resourcesOk > 0 }
-        val pool = (if (alive.isNotEmpty()) alive else candidates).sortedWith(rank())
+        // Мёртвых и «рукопожатие есть, данных нет» не предлагаем вовсе — даже когда других нет.
+        // Раньше при пустом списке живых в тройку шли молчащие точки (журнал 22.11 16:32: три точки
+        // по 60 баллов, ни одна не ответила), подключение перебирало заведомо мёртвое, а прежняя
+        // рабочая тройка затиралась. Пустой итог означает «тройку не трогать».
+        val pool = candidates.filter { usable(it) }.sortedWith(rank())
 
         val result = ArrayList<Candidate>(limit)
         val endpoints = HashSet<String>()
@@ -52,6 +57,8 @@ object Shortlist {
     private fun rank(): Comparator<Candidate> =
         compareByDescending<Candidate> { it.resourcesTotal > 0 }
             .thenByDescending { it.resourcesOk }
+            // Ответ через туннель пришёл — выше тех, у кого данные не проверяли (старые отчёты).
+            .thenByDescending { it.stats.dataReplies > 0 }
             // Одинаково открывшиеся — по ступени скорости через туннель (см. SpeedTest.bucket).
             .thenByDescending { dev.warpscout.core.net.SpeedTest.bucket(it.speedKbps) }
             .thenByDescending { it.score }

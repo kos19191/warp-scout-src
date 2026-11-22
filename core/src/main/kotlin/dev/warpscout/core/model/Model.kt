@@ -60,7 +60,15 @@ data class ProbeSample(
     val rttMs: Double? = null,
     val attempt: Int = 0,
     val profile: String = "none",
-    val note: String = ""
+    val note: String = "",
+    /**
+     * После рукопожатия проверяли, идут ли данные: DNS-запрос внутри сессии (см.
+     * [dev.warpscout.core.tunnel.DataProbe]). Рукопожатие само по себе ничего не обещает — в журнале
+     * 22.11 точка отвечала на него за 200 мс, а данных через неё не шло ни байта.
+     */
+    val dataTried: Boolean = false,
+    /** За сколько пришёл ответ на этот запрос, мс; null — не пришёл (или не проверяли). */
+    val dataMs: Double? = null
 )
 
 /** Агрегированная статистика по конечной точке. */
@@ -76,6 +84,18 @@ data class EndpointStats(
     val medianRtt: Double? get() = rtts.getOrNull(rtts.size / 2)
     val meanRtt: Double? get() = rtts.takeIf { it.isNotEmpty() }?.average()
     val minRtt: Double? get() = rtts.firstOrNull()
+
+    /** Сколько раз после рукопожатия проверяли данные (0 — не проверяли вовсе). */
+    val dataTried: Int get() = samples.count { it.dataTried }
+
+    /** Сколько раз ответ через туннель пришёл. */
+    val dataReplies: Int get() = samples.count { it.dataMs != null }
+
+    /** Лучшее время ответа через туннель, мс (null — ответа не было или не проверяли). */
+    val dataMs: Double? get() = samples.mapNotNull { it.dataMs }.minOrNull()
+
+    /** Рукопожатие было, а данные не пошли: ровно «вверх есть, вниз 0». */
+    val dataBlocked: Boolean get() = dataTried > 0 && dataReplies == 0
 
     /** Джиттер = среднее отклонение от медианы (в мс). */
     val jitterMs: Double?
@@ -203,9 +223,14 @@ data class ScoreParts(
     val jitter: Int = 0,
     val junkSurvival: Int = 0,
     val resourceBonus: Int = 0,
-    val penalty: Int = 0
+    val penalty: Int = 0,
+    /**
+     * Данные после рукопожатия: плюс, если ответ через туннель пришёл, большой минус, если нет
+     * (см. [dev.warpscout.core.tune.Weights.dataBlocked]), ноль — не проверяли.
+     */
+    val dataPath: Int = 0
 ) {
-    val total: Int get() = confirmed + latency + stability + jitter + junkSurvival + resourceBonus - penalty
+    val total: Int get() = confirmed + latency + stability + jitter + junkSurvival + resourceBonus - penalty + dataPath
     fun asMap(): Map<String, Int> = linkedMapOf(
         "confirmed" to confirmed,
         "latency" to latency,
@@ -213,7 +238,8 @@ data class ScoreParts(
         "jitter" to jitter,
         "junk_survival" to junkSurvival,
         "resource_bonus" to resourceBonus,
-        "penalty" to -penalty
+        "penalty" to -penalty,
+        "data_path" to dataPath
     )
 }
 
@@ -238,6 +264,13 @@ data class Candidate(
 ) {
     val score: Int get() = parts.total
     val junk: dev.warpscout.core.model.JunkProfile get() = config.junk
+
+    /**
+     * Годится в очередь: сервер ответил, и данные через него пошли (или их не проверяли — старые
+     * отчёты), либо изнутри туннеля открылся хоть один сайт. «Рукопожатие есть, данных нет» и
+     * молчащие точки — нет: подключение к ним кончается «вверх есть, вниз 0».
+     */
+    val usable: Boolean get() = resourcesOk > 0 || (stats.replies > 0 && !stats.dataBlocked)
 }
 
 data class TuningReport(
@@ -249,5 +282,9 @@ data class TuningReport(
     val endpointsTested: Int,
     val notes: List<String> = emptyList()
 ) {
-    val best: Candidate? get() = candidates.maxByOrNull { it.score }
+    /**
+     * Лучший из годных (см. [Candidate.usable]). Раньше — просто максимум балла, и при «живых 0»
+     * лучшим становилась молчащая точка с 60 баллами: её конфиг записывался как подобранный.
+     */
+    val best: Candidate? get() = candidates.filter { it.usable }.maxByOrNull { it.score }
 }

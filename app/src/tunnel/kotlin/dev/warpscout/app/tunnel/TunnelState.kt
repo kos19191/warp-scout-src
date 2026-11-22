@@ -142,6 +142,18 @@ object TunnelState {
             publishNow(urgent = true)
         }
 
+    /**
+     * Рукопожатие прошло, сервис проверяет, идут ли данные (с этого момента; 0 — не проверяет).
+     * Срочно: перебор точек в интерфейсе по нему продлевает ожидание попытки (см. `TunnelStatus.dataCheckAt`).
+     */
+    @Volatile
+    var dataCheckAt: Long = 0L
+        set(v) {
+            if (field == v) return
+            field = v
+            publishNow(urgent = true)
+        }
+
     /** Метки дозора для текущей сети (см. `TunnelStatus.marks`). */
     @Volatile
     var marks: String = ""
@@ -286,6 +298,7 @@ object TunnelState {
         speedBytes = speedBytes,
         speedFull = speedFull,
         speedRunningSince = speedRunningSince,
+        dataCheckAt = dataCheckAt,
         bytesUp = TunnelDebug.bytesUp,
         bytesDown = TunnelDebug.bytesDown,
         handshakeAttempts = TunnelDebug.handshakeAttempts,
@@ -319,6 +332,7 @@ object TunnelState {
             speedBytes = snapshot.speedBytes
             speedFull = snapshot.speedFull
             speedRunningSince = snapshot.speedRunningSince
+            dataCheckAt = snapshot.dataCheckAt
         } finally {
             mirroring = false
         }
@@ -333,6 +347,7 @@ object TunnelState {
         up = false
         error = null
         gaveUp = false
+        dataCheckAt = 0L
         phase = TunnelStatus.PHASE_STARTING
     }
 

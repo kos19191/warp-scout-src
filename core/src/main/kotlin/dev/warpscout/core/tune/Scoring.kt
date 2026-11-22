@@ -16,7 +16,10 @@ import dev.warpscout.core.model.Verdict
  *  • jitter         — разброс;
  *  • junk_survival  — handshake дошёл, даже когда перед ним летел мусор профиля (значит DPI его не режет);
  *  • resource_bonus — сколько целевых сайтов открылось через эту конфигурацию (когда проверяли туннелем);
- *  • penalty        — закрытый порт / не разрешился хост.
+ *  • penalty        — закрытый порт / не разрешился хост;
+ *  • data_path      — после рукопожатия пришёл ответ через туннель (+300) или нет (−900). Минус
+ *                     больше любого набора прочих плюсов: «рукопожатие есть, данных нет» не должно
+ *                     обгонять точку, через которую данные идут (журнал 22.11: «вверх 5542, вниз 0»).
  */
 data class Weights(
     val handshakeOk: Int = 1000,
@@ -36,7 +39,9 @@ data class Weights(
     val junkBlocked: Int = 150,
     val closedPenalty: Int = 500,
     val dnsPenalty: Int = 800,
-    val perResourceOk: Int = 60
+    val perResourceOk: Int = 60,
+    val dataOk: Int = 300,
+    val dataBlocked: Int = 900
 )
 
 object Scoring {
@@ -72,6 +77,12 @@ object Scoring {
             stats.samples.any { it.verdict == Verdict.DNS_FAIL } -> weights.dnsPenalty
             else -> 0
         }
+        // Данные после рукопожатия — главный признак «точка работает», а не только «сервер жив».
+        val data = when {
+            stats.dataTried == 0 -> 0
+            stats.dataReplies > 0 -> weights.dataOk
+            else -> -weights.dataBlocked
+        }
         return ScoreParts(
             confirmed = maxOf(0, confirmed),
             latency = latency,
@@ -79,7 +90,8 @@ object Scoring {
             jitter = jitter,
             junkSurvival = junk,
             resourceBonus = resource,
-            penalty = penalty
+            penalty = penalty,
+            dataPath = data
         )
     }
 }

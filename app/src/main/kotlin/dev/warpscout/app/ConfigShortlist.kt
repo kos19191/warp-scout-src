@@ -61,7 +61,12 @@ object ConfigShortlist {
          * Как проверяли: true — только рукопожатием (мобильная сеть, подобранная с Wi-Fi: туннель
          * через неё не поднять, не уходя с Wi-Fi), false — как обычно.
          */
-        val handshakeOnly: Boolean = false
+        val handshakeOnly: Boolean = false,
+        /**
+         * За сколько пришёл ответ через туннель этой точки при подборе, мс; -1 — данные не
+         * проверяли (записи старых версий). С 1.10.29 в тройку попадают только точки с данными.
+         */
+        val dataMs: Int = -1
     )
 
     /**
@@ -157,6 +162,7 @@ object ConfigShortlist {
                 append("network=").append(e.network).append('\n')
                 append("speed=").append(e.speedKbps).append('\n')
                 append("hsOnly=").append(if (e.handshakeOnly) 1 else 0).append('\n')
+                append("data=").append(e.dataMs).append('\n')
                 append("conf=").append(encode(e.configText)).append('\n')
             }
         }
@@ -197,7 +203,8 @@ object ConfigShortlist {
             savedAt = map["saved"]?.toLongOrNull() ?: 0L,
             network = map["network"].orEmpty(),
             speedKbps = map["speed"]?.toIntOrNull() ?: -1,
-            handshakeOnly = map["hsOnly"] == "1"
+            handshakeOnly = map["hsOnly"] == "1",
+            dataMs = map["data"]?.toIntOrNull() ?: -1
         )
     }
 

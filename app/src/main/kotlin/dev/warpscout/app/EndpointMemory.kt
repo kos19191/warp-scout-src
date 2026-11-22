@@ -78,6 +78,38 @@ object EndpointMemory {
         }
     }
 
+    /**
+     * Забыть точку для этой сети — если запомнена именно она. Нужна, когда точка отвечает на
+     * рукопожатие, но не пропускает данные: иначе каждый переподъём начинался бы с неё снова (журнал
+     * 22.11: три переподключения подряд на 188.114.97.1:500, и ни одного на следующую точку).
+     */
+    fun forget(context: Context, netKind: String, endpoint: String) {
+        if (netKind.isBlank() || endpoint.isBlank()) return
+        val kind = NetIdentity.kindPart(netKind)
+        synchronized(lock) {
+            val target = file(context)
+            val all = LinkedHashMap(read(target))
+            var changed = false
+            for (key in listOf(netKind, kind)) {
+                if (key.isNotEmpty() && all[key] == endpoint) {
+                    all.remove(key)
+                    changed = true
+                }
+            }
+            if (!changed) return
+            runCatching {
+                val dir = target.parentFile ?: return
+                val text = all.entries.joinToString("\n") { (key, ep) -> "$key|$ep" } + "\n"
+                val tmp = File(dir, target.name + ".tmp")
+                tmp.writeText(text)
+                if (!tmp.renameTo(target)) {
+                    target.delete()
+                    if (!tmp.renameTo(target)) tmp.copyTo(target, overwrite = true)
+                }
+            }
+        }
+    }
+
     private fun file(context: Context): File =
         File(context.applicationContext.filesDir, FILE)
 

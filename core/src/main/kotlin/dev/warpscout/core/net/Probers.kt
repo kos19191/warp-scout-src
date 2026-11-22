@@ -7,6 +7,7 @@ import dev.warpscout.core.model.JunkProfile
 import dev.warpscout.core.model.ProbeSample
 import dev.warpscout.core.model.Verdict
 import dev.warpscout.core.model.WarpAccount
+import dev.warpscout.core.tunnel.DataProbe
 import dev.warpscout.core.wg.Wg
 import java.net.ConnectException
 import java.net.DatagramPacket
@@ -98,15 +99,27 @@ data class WgProbeResult(val stats: EndpointStats, val accepted: Boolean, val re
  */
 class WgProber(private val settings: NetSettings) {
 
+    /**
+     * [dataProbe] — после удачного рукопожатия проверить, идут ли данные: DNS-запрос внутри только
+     * что открытой сессии (см. [DataProbe]). Только для подбора, когда своего туннеля нет: рядом с
+     * работающим туннелем такой запрос сделал бы новую сессию текущей на сервере, и ответы
+     * работающему туннелю шли бы ключами пробы (поэтому дозор и проверка точки по просьбе экрана
+     * обходятся рукопожатием).
+     */
     fun probe(
         endpoint: Endpoint,
         account: WarpAccount,
         peerPublic: ByteArray,
-        junk: JunkProfile? = null
+        junk: JunkProfile? = null,
+        dataProbe: Boolean = false
     ): WgProbeResult {
         val samples = ArrayList<ProbeSample>()
         val replyTypes = mutableListOf<Int>()
         var accepted = false
+        // Данные проверяем один раз на удачное рукопожатие и не больше двух раз за пробу: ответ
+        // пришёл — дальше незачем, два раза подряд не пришёл — это уже не потеря пакета.
+        var dataSeen = false
+        var dataAttempts = 0
 
         val address = try {
             InetAddress.getByName(endpoint.host)
@@ -158,8 +171,16 @@ class WgProber(private val settings: NetSettings) {
                     val type = if (data.size >= 4) Crypto.readLe32(data, 0) else -1
                     replyTypes.add(type)
                     val reply = Wg.consumeResponse(data, initiation, peerPublic)
+                    // Чем открыта сессия (если открыта): по ним пойдёт проба данных.
+                    var sessionInit: Wg.Initiation? = null
+                    var sessionReply: Wg.ProbeReply? = null
                     var verdict = when (reply.kind) {
-                        Wg.ResponseKind.HANDSHAKE_RESPONSE -> { accepted = true; Verdict.HANDSHAKE_OK }
+                        Wg.ResponseKind.HANDSHAKE_RESPONSE -> {
+                            accepted = true
+                            sessionInit = initiation
+                            sessionReply = reply
+                            Verdict.HANDSHAKE_OK
+                        }
                         Wg.ResponseKind.COOKIE_REPLY -> { accepted = true; Verdict.COOKIE_REPLY }
                         Wg.ResponseKind.MISMATCH -> Verdict.UDP_SILENT
                         Wg.ResponseKind.MALFORMED -> Verdict.UDP_SILENT
@@ -171,18 +192,39 @@ class WgProber(private val settings: NetSettings) {
                         val retry = Wg.buildInitiation(
                             localPriv, localPub, peerPublic, Crypto.random.nextInt(), lastCookie = reply.cookie
                         )
-                        val ok = runCatching {
+                        val retryReply = runCatching {
                             socket.send(DatagramPacket(retry.packet, retry.packet.size))
                             val pkt2 = DatagramPacket(ByteArray(2048), 2048)
                             socket.receive(pkt2)
                             Wg.consumeResponse(pkt2.data.copyOfRange(0, pkt2.length), retry, peerPublic)
-                                .kind == Wg.ResponseKind.HANDSHAKE_RESPONSE
-                        }.getOrDefault(false)
-                        if (ok) {
+                        }.getOrNull()
+                        if (retryReply?.kind == Wg.ResponseKind.HANDSHAKE_RESPONSE) {
                             accepted = true; verdict = Verdict.HANDSHAKE_OK; note += " +cookie-retry"
+                            sessionInit = retry
+                            sessionReply = retryReply
                         }
                     }
-                    samples.add(ProbeSample(endpoint, verdict, rtt, attempt, junk?.name ?: "none", note = note))
+                    var dataTried = false
+                    var dataMs: Double? = null
+                    val openedBy = sessionInit
+                    val openedWith = sessionReply
+                    if (dataProbe && !dataSeen && dataAttempts < 2 && openedBy != null && openedWith != null) {
+                        dataAttempts++
+                        dataTried = true
+                        dataMs = dataRoundTrip(socket, openedBy, openedWith, account)
+                        if (dataMs != null) {
+                            dataSeen = true
+                            note += " +данные ${dataMs.toLong()} мс"
+                        } else {
+                            note += " данных нет"
+                        }
+                    }
+                    samples.add(
+                        ProbeSample(
+                            endpoint, verdict, rtt, attempt, junk?.name ?: "none", note = note,
+                            dataTried = dataTried, dataMs = dataMs
+                        )
+                    )
                 } catch (e: SocketTimeoutException) {
                     samples.add(ProbeSample(endpoint, Verdict.UDP_SILENT, null, attempt, junk?.name ?: "none",
                         note = "нет ответа ${settings.timeoutMs}мс"))
@@ -205,6 +247,55 @@ class WgProber(private val settings: NetSettings) {
         val replies = samples.count { it.verdict in setOf(Verdict.HANDSHAKE_OK, Verdict.COOKIE_REPLY, Verdict.TLS_OK) }
         val best = samples.minByOrNull { it.verdict.rank }?.verdict ?: Verdict.ERROR
         return WgProbeResult(EndpointStats(endpoint, samples, best, replies, samples.size), accepted, replyTypes)
+    }
+
+    /**
+     * Данные после рукопожатия: DNS-запрос внутри только что открытой сессии и ответ на него.
+     * Возвращает время ответа (мс) или null — ответа нет. Сокет тот же, что у рукопожатия: сеть
+     * видит один поток, как у настоящего туннеля, — именно такой поток она и режет (или нет).
+     */
+    private fun dataRoundTrip(
+        socket: DatagramSocket,
+        init: Wg.Initiation,
+        reply: Wg.ProbeReply,
+        account: WarpAccount
+    ): Double? {
+        val session = reply.session ?: return null
+        val peerIndex = reply.peerSenderIndex ?: return null
+        val src = DataProbe.ipv4Of(account.ipv4) ?: DataProbe.ipv4Of("172.16.0.2") ?: return null
+        val port = DataProbe.randomPort(Crypto.random)
+        val txId = Crypto.random.nextInt(0x10000)
+        val packet = Wg.buildTransport(peerIndex, session, DataProbe.dnsQuery(src, port, txId)).first
+        // Ответ DNS внутри WARP приходит за время одного круга до Cloudflare: 0,9 с — с запасом,
+        // а на точке без данных проба не растягивает подбор на полные секунды таймаута.
+        val waitMs = settings.timeoutMs.coerceIn(400, 900)
+        val before = runCatching { socket.soTimeout }.getOrDefault(settings.timeoutMs)
+        val t0 = System.nanoTime()
+        val deadline = t0 + waitMs * 1_000_000L
+        var receiving = session
+        try {
+            socket.send(DatagramPacket(packet, packet.size))
+            val buf = ByteArray(2048)
+            while (true) {
+                val leftMs = (deadline - System.nanoTime()) / 1_000_000L
+                if (leftMs <= 0L) return null
+                socket.soTimeout = leftMs.toInt().coerceAtLeast(1)
+                val pkt = DatagramPacket(buf, buf.size)
+                try {
+                    socket.receive(pkt)
+                } catch (e: SocketTimeoutException) {
+                    return null
+                }
+                val data = pkt.data.copyOfRange(0, pkt.length)
+                val opened = Wg.openTransport(data, init.state.senderIndex, receiving) ?: continue
+                receiving = opened.second
+                if (DataProbe.isReply(opened.first, port, txId)) return (System.nanoTime() - t0) / 1e6
+            }
+        } catch (e: Exception) {
+            return null
+        } finally {
+            runCatching { socket.soTimeout = before }
+        }
     }
 
     /**
