@@ -313,4 +313,18 @@ object Wg {
 
     /** Публичный ключ → «sender index» (KEYID), как в WireGuard: первые 4 байта le32 от HASH(pub). */
     fun keyId(publicKey: ByteArray): Int = Crypto.readLe32(Blake2s.hash(publicKey), 0)
+
+    /**
+     * Пересчитать mac1 рукопожатия после замены типа сообщения (AmneziaWG: H1 у инициации, H2 у
+     * ответа). mac1 считается по байтам сообщения вместе с типом, поэтому сервер AmneziaWG ждёт его
+     * посчитанным уже по своему типу, а наша проверка ответа — по стандартному. [receiverStatic] —
+     * публичный ключ получателя: для инициации — ключ сервера, для ответа — наш. mac2 не трогаем:
+     * он нужен только под нагрузкой (cookie), и без cookie посчитать его заново нечем.
+     */
+    fun remac1(msg: ByteArray, receiverStatic: ByteArray) {
+        val macOff = msg.size - 32
+        if (macOff <= 0 || receiverStatic.size != KEY_LEN) return
+        val key = Blake2s.hash(LABEL_MAC1 + receiverStatic)
+        Blake2s.mac(key, msg.copyOfRange(0, macOff)).copyInto(msg, macOff)
+    }
 }

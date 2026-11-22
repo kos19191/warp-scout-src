@@ -81,6 +81,8 @@ object AllowListPlanner {
             val before = include.size
             // Подсети — даром: они уже в списке, их не надо резолвить, и в бюджет доменов не входят.
             include.addAll(p.prefixes)
+            // И подсети, без которых сервис из списка не работает (видео YouTube, см. EXTRA_PREFIXES).
+            AllowLists.EXTRA_PREFIXES[list.id]?.let { include.addAll(it) }
             val room = budget.coerceAtMost(p.domains.size).coerceAtLeast(0)
             if (budget > 0 && room > 0) {
                 val picked = p.domains.take(room)

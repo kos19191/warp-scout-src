@@ -29,6 +29,18 @@ data class CfTrace(
         const val URL_BY_IP = "https://1.1.1.1/cdn-cgi/trace"
 
         /**
+         * Страна из [summary] («HEL · RU · 2a09:…» → «RU»); пусто — если её там нет.
+         *
+         * С 1.10.31 на экране пишется «выход: RU», без площадки: «выход HEL» читался как страна
+         * (Хельсинки), хотя сайты видят российский адрес. Площадка — три буквы (код аэропорта),
+         * страна — две, адрес — цифры: путать их не с чем.
+         */
+        fun countryOf(summary: String?): String = summary.orEmpty().split('·')
+            .map { it.trim() }
+            .firstOrNull { it.length == 2 && it.all { c -> c in 'A'..'Z' } }
+            .orEmpty()
+
+        /**
          * Разобрать ответ. null — это не trace: страница портала Wi-Fi, обрезанный или пустой ответ.
          */
         fun parse(text: String?): CfTrace? {

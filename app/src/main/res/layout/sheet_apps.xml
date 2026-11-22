@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  «Приложения» упрощённого экрана (нижняя шторка): кто идёт через туннель. Три режима — все, только
-  выбранные, все кроме выбранных; список с иконками и поиском. Ничего не меняется до «Сохранить»:
-  при включённом туннеле сохранение переподключает его (список приложений — часть настроек
-  VpnService, на лету он не меняется).
+  «Туннелирование» упрощённого экрана (нижняя шторка, с 1.10.31; была «Приложения»): что идёт через
+  туннель. Сверху выбор — приложения, сайты или списки сайтов; приложения и сайты действуют вместе.
+  Приложения: все, только выбранные, все кроме выбранных — список с иконками и поиском. Сайты: свои
+  домены, адреса, подсети. Списки: категории галочками. Ничего не меняется до «Сохранить»: при
+  включённом туннеле сохранение переподключает его (это часть настроек VpnService).
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
@@ -29,70 +31,179 @@
         android:textAppearance="?attr/textAppearanceBodySmall"
         android:textColor="?attr/colorOnSurfaceVariant" />
 
-    <RadioGroup
-        android:id="@+id/appsModeGroup"
+    <com.google.android.material.button.MaterialButtonToggleGroup
+        android:id="@+id/sheetKindGroup"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical">
+        android:layout_marginBottom="6dp"
+        app:selectionRequired="true"
+        app:singleSelection="true">
 
-        <com.google.android.material.radiobutton.MaterialRadioButton
-            android:id="@+id/appsModeAll"
-            android:layout_width="match_parent"
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/sheetKindApps"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:text="@string/apps_all" />
+            android:layout_weight="1"
+            android:text="@string/tunnel_kind_apps" />
 
-        <com.google.android.material.radiobutton.MaterialRadioButton
-            android:id="@+id/appsModeOnly"
-            android:layout_width="match_parent"
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/sheetKindSites"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:text="@string/apps_only" />
+            android:layout_weight="1"
+            android:text="@string/tunnel_kind_sites" />
 
-        <com.google.android.material.radiobutton.MaterialRadioButton
-            android:id="@+id/appsModeExcept"
-            android:layout_width="match_parent"
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/sheetKindLists"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:text="@string/apps_except" />
-    </RadioGroup>
+            android:layout_weight="1"
+            android:text="@string/tunnel_kind_lists" />
+    </com.google.android.material.button.MaterialButtonToggleGroup>
 
     <LinearLayout
-        android:id="@+id/appsListBox"
+        android:id="@+id/sheetPanelApps"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical">
+
+        <RadioGroup
+            android:id="@+id/appsModeGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <com.google.android.material.radiobutton.MaterialRadioButton
+                android:id="@+id/appsModeAll"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/apps_all" />
+
+            <com.google.android.material.radiobutton.MaterialRadioButton
+                android:id="@+id/appsModeOnly"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/apps_only" />
+
+            <com.google.android.material.radiobutton.MaterialRadioButton
+                android:id="@+id/appsModeExcept"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/apps_except" />
+        </RadioGroup>
+
+        <LinearLayout
+            android:id="@+id/appsListBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:hint="@string/apps_search">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/appsSearch"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:imeOptions="actionSearch"
+                    android:inputType="text"
+                    android:maxLines="1" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <TextView
+                android:id="@+id/appsCount"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="6dp"
+                android:paddingBottom="2dp"
+                android:textAppearance="?attr/textAppearanceBodySmall"
+                android:textColor="?attr/colorOnSurfaceVariant" />
+
+            <!-- Высота задана: список прокручивается сам, шторка остаётся на месте. -->
+            <ListView
+                android:id="@+id/appsList"
+                android:layout_width="match_parent"
+                android:layout_height="320dp"
+                android:divider="@android:color/transparent"
+                android:dividerHeight="0dp"
+                android:fastScrollEnabled="true" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- «Сайты»: свои домены, адреса и подсети — по одному в строке. -->
+    <LinearLayout
+        android:id="@+id/sheetPanelSites"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/sheetSitesOn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/sheet_sites_switch" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="4dp"
+            android:text="@string/sites_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall"
+            android:textColor="?attr/colorOnSurfaceVariant" />
 
         <com.google.android.material.textfield.TextInputLayout
             style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:hint="@string/apps_search">
+            android:layout_marginTop="6dp"
+            android:hint="@string/hint_tunnel_sites">
 
             <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/appsSearch"
+                android:id="@+id/sheetSites"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:imeOptions="actionSearch"
-                android:inputType="text"
-                android:maxLines="1" />
+                android:gravity="top"
+                android:inputType="textMultiLine|textNoSuggestions"
+                android:maxLines="8"
+                android:minLines="4" />
         </com.google.android.material.textfield.TextInputLayout>
+    </LinearLayout>
 
-        <TextView
-            android:id="@+id/appsCount"
+    <!-- «Списки»: категории сайтов галочками (строит код). -->
+    <LinearLayout
+        android:id="@+id/sheetPanelLists"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/sheetListsOn"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingTop="6dp"
-            android:paddingBottom="2dp"
-            android:textAppearance="?attr/textAppearanceBodySmall"
-            android:textColor="?attr/colorOnSurfaceVariant" />
+            android:text="@string/sheet_lists_switch" />
 
-        <!-- Высота задана: список прокручивается сам, шторка остаётся на месте. -->
-        <ListView
-            android:id="@+id/appsList"
+        <!-- Высота задана, как у списка приложений: прокручиваются галочки, а не шторка. -->
+        <ScrollView
+            android:id="@+id/sheetListsScroll"
             android:layout_width="match_parent"
-            android:layout_height="320dp"
-            android:divider="@android:color/transparent"
-            android:dividerHeight="0dp"
-            android:fastScrollEnabled="true" />
+            android:layout_height="300dp"
+            android:layout_marginTop="4dp">
+
+            <LinearLayout
+                android:id="@+id/sheetListsBox"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+        </ScrollView>
     </LinearLayout>
 
     <LinearLayout

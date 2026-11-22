@@ -85,6 +85,9 @@ interface TunnelController {
      * приходит в снимке состояния: `speedState`, `speedKbps`, `speedPingMs`.
      */
     fun requestSpeedTest() {}
+
+    /** Адреса второго выхода обновились: сервис меняет таблицу на лету, не переподключаясь. */
+    fun reloadSecondRoutes() {}
 }
 
 class UnsupportedTunnelController : TunnelController {

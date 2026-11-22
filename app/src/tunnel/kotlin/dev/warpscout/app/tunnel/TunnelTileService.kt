@@ -100,7 +100,9 @@ class TunnelTileService : TileService() {
             !hasConfig -> Tile.STATE_UNAVAILABLE
             else -> Tile.STATE_INACTIVE
         }
-        tile.label = getString(R.string.tile_label)
+        // С 1.10.31 плитка называется так же, как приложение («WarpScout (tunnel)» или «WarpScout»),
+        // а состояние — строкой под названием.
+        tile.label = getString(R.string.app_name)
         val subtitle = getString(
             when {
                 TunnelState.up -> R.string.tile_on

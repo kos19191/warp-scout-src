@@ -27,6 +27,8 @@ import dev.warpscout.core.model.ResourceCheck
 import dev.warpscout.core.junk.JunkLibrary
 import dev.warpscout.core.keys.KeySource
 import dev.warpscout.core.lists.AllowListPlanner
+import dev.warpscout.core.lists.ProtonFree
+import dev.warpscout.core.lists.SiteList
 import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.net.SpeedTest
 import dev.warpscout.core.net.WarpDefaults
@@ -131,7 +133,6 @@ class MainActivity : AppCompatActivity() {
 
     /** Подбор запущен кнопкой подключения: когда закончится — сразу поднимаем туннель. */
     private var autoConnectAfterScan = false
-    private var endpointIndex = 0
     private var exitRegion = ""
     private var settingsReconnect: Runnable? = null
 
@@ -204,11 +205,9 @@ class MainActivity : AppCompatActivity() {
             // Номер сборки рядом с версией: мелкие доправки пересобирают ту же версию поверх, и
             // только так видно, какая именно сборка стоит. С 1.10.27 туннель есть в обеих сборках —
             // они различаются тем, каким экраном открываются.
-            binding.textVersion.text = getString(
-                R.string.version_footer,
-                BuildConfig.VERSION_NAME + " · " + BuildConfig.BUILD_REV,
-                getString(if (BuildConfig.FLAVOR == "tunnel") R.string.variant_tunnel else R.string.variant_scout)
-            )
+            // С 1.10.31 внизу — только название и номер релиза. Номер сборки и вариант остались в
+            // шапке выгружаемого журнала: по ним по-прежнему видно, какая сборка стоит.
+            binding.textVersion.text = getString(R.string.version_footer, BuildConfig.VERSION_NAME)
             // Упрощённый экран и выбор вида — после всего остального: им нужны готовые настройки,
             // список лучших точек и подпись версии. Сбой здесь не должен снимать весь экран.
             runCatching { setupSimple() }.onFailure { t ->
@@ -249,6 +248,8 @@ class MainActivity : AppCompatActivity() {
         stopTunnelPolling()
         tunnelHandler.removeCallbacks(bannerHide)
         tunnelHandler.removeCallbacks(simpleTick)
+        // Отложенное «изменено…» — сразу, а не после ухода с экрана.
+        dirtyLater?.let { tunnelHandler.removeCallbacks(it); it.run() }
         super.onPause()
     }
 
@@ -292,6 +293,13 @@ class MainActivity : AppCompatActivity() {
             // Адреса «умного» DNS — раз в сутки заново (они меняются, имя остаётся).
             refreshDnsByName(prefs.dnsIndex, force = false)
             startSimpleTick()
+            // Адреса сайтов второго выхода — тоже раз в сутки (с 1.10.31).
+            refreshSecondIfStale()
+            // Список бесплатных серверов Proton — раз в неделю.
+            refreshProtonIfStale()
+            updateSecondState()
+            // Вернулись из настроек «Установка неизвестных приложений» — ставим скачанное обновление.
+            resumePendingInstall()
         }.onFailure { t ->
             TunnelDebug.error("обновление экрана: " + SafeMode.describe(t))
             runCatching { banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true) }
@@ -339,7 +347,14 @@ class MainActivity : AppCompatActivity() {
         updateSecondState()
         suppressExportListener = false
         binding.editServer.setText(prefs.pinnedEndpoint)
-        binding.editAllowedIps.setText(prefs.allowedIpsText)
+        // Прежний ручной список CIDR (режим «вручную») становится «моими сайтами» (с 1.10.31).
+        prefs.migrateManualRoutes()
+        // Маршруты по спискам собраны прежней версией — считаем, что по нынешним отметкам: иначе
+        // первое же «Сохранить и применить» после обновления пересобирало бы их без причины.
+        if (prefs.listsBuiltSig.isBlank() && prefs.allowedIpsText.isNotBlank()) prefs.listsBuiltSig = listsSignature()
+        binding.editTunnelSites.setText(prefs.tunnelSites)
+        binding.switchSecondViaWarp.isChecked = prefs.secondViaWarp
+        runCatching { buildSecondSources() }
         binding.appsGroup.check(appsButtonId(prefs.appsMode))
         binding.checkListChecks.isChecked = prefs.checkByLists
         binding.textTargetNote.text = prefs.confTargetEnum().note
@@ -369,7 +384,13 @@ class MainActivity : AppCompatActivity() {
         prefs.secondConf = binding.editSecondConf.text?.toString()?.trim().orEmpty()
         prefs.secondDomains = binding.editSecondDomains.text?.toString()?.trim().orEmpty()
         prefs.pinnedEndpoint = binding.editServer.text?.toString()?.trim().orEmpty()
-        prefs.allowedIpsText = binding.editAllowedIps.text?.toString()?.trim()?.replace("\n", " ").orEmpty()
+        // Готовые маршруты (allowedIpsText, адреса своих сайтов) с экрана больше не читаются:
+        // их пишут только сборки — «Собрать маршруты», «Найти адреса сайтов», «Сохранить и применить».
+        prefs.tunnelSites = binding.editTunnelSites.text?.toString().orEmpty()
+        prefs.secondViaWarp = binding.switchSecondViaWarp.isChecked
+        if (secondChecks.isNotEmpty()) {
+            prefs.secondSources = secondChecks.filter { it.value.isChecked }.keys.toSet()
+        }
         prefs.checkByLists = binding.checkListChecks.isChecked
         prefs.allowBlockIds = listChecks.filter { it.value.isChecked && it.key in BLOCK_IDS }.map { it.key }.toSet()
         prefs.allowDirectIds = listChecks.filter { it.value.isChecked && it.key in DIRECT_IDS }.map { it.key }.toSet()
@@ -656,6 +677,260 @@ class MainActivity : AppCompatActivity() {
         binding.checkAppsSystem.setOnCheckedChangeListener { _, _ -> rebuildAppsList() }
         binding.editAppSearch.doAfterTextChanged { rebuildAppsList() }
         rebuildAppsList()
+        runCatching { setupTunnelTab() }.onFailure { t ->
+            TunnelDebug.error("вкладка «Туннелирование»: " + SafeMode.describe(t))
+        }
+    }
+
+    // ------------------------------------------------ туннелирование: сайты и списки (с 1.10.31)
+
+    /**
+     * Вкладка «Туннелирование»: сверху выбор — приложения, сайты или списки. Это выбор того, что
+     * настраиваем, а не режим: приложения и сайты действуют вместе. Режим маршрутов (все сайты /
+     * кроме российских / из списков / мои) — выпадающий список над сайтами и списками.
+     */
+    private fun setupTunnelTab() {
+        binding.tunnelKindGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            showTunnelPanel(
+                when (checkedId) {
+                    R.id.btnKindSites -> KIND_SITES
+                    R.id.btnKindLists -> KIND_LISTS
+                    else -> KIND_APPS
+                }
+            )
+        }
+        binding.tunnelKindGroup.check(
+            when (prefs.routesMode) {
+                3 -> R.id.btnKindSites
+                2 -> R.id.btnKindLists
+                else -> R.id.btnKindApps
+            }
+        )
+        showTunnelPanel(
+            when (prefs.routesMode) {
+                3 -> KIND_SITES
+                2 -> KIND_LISTS
+                else -> KIND_APPS
+            }
+        )
+        binding.editTunnelSites.doAfterTextChanged { text ->
+            val value = text?.toString().orEmpty()
+            if (value == prefs.tunnelSites) return@doAfterTextChanged
+            prefs.tunnelSites = value
+            // Вписали сайты — значит, через туннель должны идти они; стёрли всё — снова все сайты.
+            if (value.isNotBlank() && prefs.routesMode != 3) binding.spinnerRoutes.setSelection(3)
+            else if (value.isBlank() && prefs.routesMode == 3) binding.spinnerRoutes.setSelection(0)
+            updateSitesState()
+            updateTunnelSummary()
+            markSettingsDirtyLater(getString(R.string.dirty_sites))
+        }
+        binding.btnBuildSites.setOnClickListener { buildSites() }
+        updateSitesState()
+        updateTunnelSummary()
+    }
+
+    private fun showTunnelPanel(kind: Int) {
+        binding.panelApps.visibility = if (kind == KIND_APPS) View.VISIBLE else View.GONE
+        binding.panelRoutes.visibility = if (kind == KIND_APPS) View.GONE else View.VISIBLE
+        binding.panelSites.visibility = if (kind == KIND_SITES) View.VISIBLE else View.GONE
+        binding.panelLists.visibility = if (kind == KIND_LISTS) View.VISIBLE else View.GONE
+    }
+
+    /** Сколько маршрутов в строке CIDR через запятую. */
+    private fun routeCount(text: String): Int = text.split(',').count { it.isNotBlank() }
+
+    /**
+     * «Сейчас через туннель: …» и предупреждения о пустом выборе. Пустого туннеля не бывает: без
+     * отмеченных приложений и без собранных адресов через туннель идёт всё, — об этом и говорим.
+     */
+    private fun updateTunnelSummary() {
+        if (!uiReady()) return
+        runCatching {
+            val selected = prefs.appsSelected.size
+            val apps = when (prefs.appsMode) {
+                Prefs.APPS_ONLY -> if (selected == 0) getString(R.string.tunnel_sum_apps_all)
+                else getString(R.string.tunnel_sum_apps_only, selected)
+                Prefs.APPS_EXCEPT -> if (selected == 0) getString(R.string.tunnel_sum_apps_all)
+                else getString(R.string.tunnel_sum_apps_except, selected)
+                else -> getString(R.string.tunnel_sum_apps_all)
+            }
+            val sitesRoutes = routeCount(prefs.tunnelSitesCidrs)
+            val listRoutes = routeCount(prefs.allowedIpsText)
+            val routes = when (prefs.routesMode) {
+                1 -> getString(R.string.tunnel_sum_routes_preset)
+                2 -> if (listRoutes == 0) getString(R.string.tunnel_sum_routes_all)
+                else getString(R.string.tunnel_sum_routes_lists, listRoutes)
+                3 -> if (sitesRoutes == 0) getString(R.string.tunnel_sum_routes_all)
+                else getString(R.string.tunnel_sum_routes_sites, sitesRoutes)
+                else -> getString(R.string.tunnel_sum_routes_all)
+            }
+            val text = buildString {
+                append(getString(R.string.tunnel_sum, apps, routes))
+                if (prefs.appsMode == Prefs.APPS_ONLY && selected == 0) {
+                    append("\n").append(getString(R.string.tunnel_warn_apps_empty))
+                }
+                if ((prefs.routesMode == 2 && listRoutes == 0) || (prefs.routesMode == 3 && sitesRoutes == 0)) {
+                    append("\n").append(getString(R.string.tunnel_warn_routes_empty))
+                }
+                // Приложения выбраны, а сайты — только из списков или свои: у приложений вроде YouTube
+                // видео идёт с серверов, которых в списках нет, и оно пойдёт мимо туннеля.
+                if (prefs.appsMode == Prefs.APPS_ONLY && selected > 0 && (prefs.routesMode == 2 || prefs.routesMode == 3)) {
+                    append("\n").append(getString(R.string.tunnel_warn_apps_routes))
+                }
+                append(otherProfileNote())
+            }
+            binding.textTunnelSummary.text = text
+        }
+    }
+
+    /** Что с моими сайтами: сколько вписано, сколько маршрутов собрано, не правили ли с тех пор. */
+    private fun updateSitesState() {
+        if (!uiReady()) return
+        runCatching {
+            val parsed = SiteList.parse(prefs.tunnelSites)
+            val built = routeCount(prefs.tunnelSitesCidrs)
+            val text = buildString {
+                when {
+                    parsed.isEmpty -> append(getString(R.string.sites_state_none))
+                    prefs.tunnelSitesSig != prefs.tunnelSites.trim() || built == 0 ->
+                        append(getString(R.string.sites_state_dirty))
+                    else -> append(
+                        getString(
+                            R.string.sites_state_built, parsed.total, built,
+                            agoText(prefs.tunnelSitesAt)
+                        )
+                    )
+                }
+                if (parsed.bad.isNotEmpty()) {
+                    append("\n").append(getString(R.string.sites_bad, parsed.bad.take(5).joinToString(", ")))
+                }
+            }
+            binding.textSitesState.text = text
+        }
+    }
+
+    /** «Найти адреса сайтов»: домены → адреса через DoH, режим — «только мои сайты». */
+    private fun buildSites() {
+        persistUi()
+        if (SiteList.parse(prefs.tunnelSites).isEmpty) {
+            toast(getString(R.string.sites_state_none))
+            return
+        }
+        binding.btnBuildSites.isEnabled = false
+        binding.textSitesState.setText(R.string.sites_resolving)
+        Thread {
+            val result = runCatching { buildSitesSync() }
+            runOnUiThread {
+                if (!uiReady()) return@runOnUiThread
+                binding.btnBuildSites.isEnabled = true
+                result.onSuccess { n ->
+                    if (n > 0) {
+                        if (prefs.routesMode != 3) binding.spinnerRoutes.setSelection(3)
+                        toast(getString(R.string.sites_built, n))
+                        markSettingsDirty(getString(R.string.dirty_sites))
+                    } else {
+                        toast(getString(R.string.sites_failed))
+                    }
+                }.onFailure { toast(it.message ?: it.javaClass.simpleName) }
+                updateSitesState()
+                updateTunnelSummary()
+                refreshRoutesState()
+            }
+        }.apply { isDaemon = true; name = "warpscout-sites" }.start()
+    }
+
+    /** Мои сайты → маршруты (сеть: не из UI-потока). Возвращает число маршрутов. */
+    private fun buildSitesSync(): Int {
+        val text = prefs.tunnelSites
+        val parsed = SiteList.parse(text)
+        val resolved = if (parsed.hosts.isEmpty()) emptyMap() else AllowListPlanner.resolveAll(SiteList.withWww(parsed.hosts))
+        val cidrs = SiteList.cidrs(parsed, resolved)
+        if (cidrs.isNotEmpty()) {
+            prefs.tunnelSitesCidrs = cidrs.joinToString(", ")
+            prefs.tunnelSitesSig = text.trim()
+            prefs.tunnelSitesAt = System.currentTimeMillis()
+        }
+        TunnelDebug.stage("мои сайты: ${parsed.total} → ${cidrs.size} маршрутов")
+        return cidrs.size
+    }
+
+    /** Какие списки отмечены — по подписи видно, что выбор поменялся после сборки маршрутов. */
+    private fun listsSignature(): String =
+        (prefs.allowBlockIds.sorted() + listOf("|") + prefs.allowDirectIds.sorted()).joinToString(",")
+
+    /** Маршруты по спискам (сеть: не из UI-потока): недостающие списки скачиваются сами. */
+    private fun buildListsSync(): String {
+        val ids = (prefs.allowBlockIds.ifEmpty { dev.warpscout.core.lists.AllowLists.DEFAULT_BLOCK_IDS.toSet() } +
+            prefs.allowDirectIds).toList()
+        val cache = lists.cached()
+        val missing = ids.filter { cache[it] == null }
+        if (missing.isNotEmpty()) lists.refresh(missing) { line -> runOnUiThread { sink().log(line) } }
+        val r = lists.buildPlan(prefs) { line -> runOnUiThread { sink().log(line) } }
+        val summary = lists.savePlan(prefs, r.plan)
+        prefs.listsBuiltSig = listsSignature()
+        return summary
+    }
+
+    /** Идёт сборка перед «Сохранить и применить» — второй раз не запускаем. */
+    private var preparingRoutes = false
+
+    /**
+     * «Сохранить и применить» (с 1.10.31): сначала собрать то, что не собрано или устарело, —
+     * адреса своих сайтов, маршруты по спискам, адреса второго выхода, — потом применить. Помнить
+     * про отдельные кнопки «Собрать» больше не нужно: одна кнопка делает всё.
+     */
+    private fun applyWithRoutes(why: String, upText: String? = null, downText: String? = null) {
+        runCatching { persistUi() }
+        val needSites = prefs.routesMode == 3 && prefs.tunnelSites.isNotBlank() &&
+            (prefs.tunnelSitesSig != prefs.tunnelSites.trim() || prefs.tunnelSitesCidrs.isBlank())
+        val needLists = prefs.routesMode == 2 &&
+            (prefs.allowedIpsText.isBlank() || prefs.listsBuiltSig != listsSignature())
+        val needSecond = SecondRoutes.needsBuild(prefs)
+        if (!needSites && !needLists && !needSecond) {
+            saveAndApply(why, upText, downText)
+            scheduleSecondCheck()
+            return
+        }
+        if (preparingRoutes) {
+            banner(getString(R.string.routes_preparing))
+            return
+        }
+        preparingRoutes = true
+        banner(getString(R.string.routes_preparing))
+        Thread {
+            val errors = mutableListOf<String>()
+            if (needSites) {
+                runCatching { buildSitesSync() }
+                    .onSuccess { n -> if (n == 0) errors += getString(R.string.sites_failed) }
+                    .onFailure { errors += (it.message ?: it.javaClass.simpleName) }
+            }
+            if (needLists) runCatching { buildListsSync() }.onFailure { errors += (it.message ?: it.javaClass.simpleName) }
+            if (needSecond) {
+                runCatching {
+                    val r = SecondRoutes.build(this, prefs) { line -> runOnUiThread { sink().log(line) } }
+                    SecondRoutes.save(prefs, r)
+                    TunnelDebug.stage("второй выход: ${r.note()}")
+                    if (r.cidrs.isEmpty()) errors += "второй выход: " + r.note()
+                }.onFailure { errors += (it.message ?: it.javaClass.simpleName) }
+            }
+            runOnUiThread {
+                preparingRoutes = false
+                if (!uiReady()) return@runOnUiThread
+                runCatching {
+                    // Не собралось — применяем как есть и говорим об этом той же плашкой: иначе
+                    // «применяю…» сразу закрыла бы сообщение об ошибке.
+                    val failed = if (errors.isEmpty()) null
+                    else getString(R.string.routes_prepare_failed, errors.joinToString("; ").take(160))
+                    if (failed != null) TunnelDebug.stage("сборка перед применением: " + errors.joinToString("; "))
+                    saveAndApply(why, failed ?: upText, failed ?: downText)
+                    updateSitesState()
+                    updateTunnelSummary()
+                    updateSecondState()
+                    scheduleSecondCheck()
+                }.onFailure { t -> TunnelDebug.error("применение: " + SafeMode.describe(t)) }
+            }
+        }.apply { isDaemon = true; name = "warpscout-prepare" }.start()
     }
 
     private fun appsModeOf(buttonId: Int): Int = when (buttonId) {
@@ -692,15 +967,81 @@ class MainActivity : AppCompatActivity() {
         val before = appEntries.size
         Thread {
             val loaded = loadAppsSync()
+            val copies = DefaultApps.otherProfileCopies(this)
             runOnUiThread {
                 if (!::binding.isInitialized) return@runOnUiThread
                 appEntries = loaded
+                otherProfileCopies = copies
                 if (loaded.size != before) {
                     rebuildAppsList()
                     updateAppsState()
                 }
+                runCatching { applyDefaultApps() }.onFailure { t ->
+                    TunnelDebug.error("приложения по умолчанию: " + SafeMode.describe(t))
+                }
             }
         }.apply { isDaemon = true; name = "warpscout-apps" }.start()
+    }
+
+    /** Сервисы из набора по умолчанию, у которых есть копия в другом профиле Android. */
+    private var otherProfileCopies: List<String> = emptyList()
+
+    /** «⚠ Копия Telegram — в другом профиле…» с новой строки; пусто — копий нет. */
+    private fun otherProfileNote(): String =
+        if (otherProfileCopies.isEmpty()) ""
+        else "\n" + getString(R.string.apps_other_profile, otherProfileCopies.joinToString(", "))
+
+    /**
+     * Набор по умолчанию (с 1.10.31): Telegram, Instagram, YouTube, Facebook, X и их дубликаты (см.
+     * DefaultApps). Первый раз включаем «только выбранные», если человек сам ничего не выбирал;
+     * дальше отмечаем новые приложения из набора: поставили Telegram X — он тоже в туннеле. Галочку,
+     * снятую вручную, не возвращаем. Работающий туннель не переподключаем: список приложений
+     * применится при следующем подключении.
+     */
+    private fun applyDefaultApps() {
+        if (!uiReady() || appEntries.isEmpty()) return
+        val found = DefaultApps.find(appEntries.map { Triple(it.pkg, it.label, it.system) }, packageName)
+        val first = !prefs.appsDefaultsDone
+        if (first) prefs.appsDefaultsDone = true
+        if (found.isEmpty()) return
+        var modeChanged = false
+        if (first && prefs.appsMode == Prefs.APPS_ALL && prefs.appsSelected.isEmpty()) {
+            prefs.appsMode = Prefs.APPS_ONLY
+            modeChanged = true
+        }
+        if (prefs.appsMode != Prefs.APPS_ONLY) return
+        val add = found.keys - prefs.appsSelected - prefs.appsUnticked
+        if (add.isEmpty() && !modeChanged) return
+        prefs.appsSelected = prefs.appsSelected + add
+        runCatching { ServiceSettingsStore.syncFromPrefs(this) }
+        val names = add.map { labelOfPackage(it) }.sortedBy { it.lowercase() }
+        TunnelDebug.stage(
+            "приложения по умолчанию: " + (if (modeChanged) "включено «только выбранные»; " else "") +
+                "отмечены ${names.joinToString(", ")}"
+        )
+        suppressSettingsReconnect = true
+        runCatching {
+            binding.appsGroup.check(appsButtonId(prefs.appsMode))
+            rebuildAppsList()
+            updateAppsState()
+        }
+        suppressSettingsReconnect = false
+        updateSimple()
+        if (names.isNotEmpty()) {
+            banner(
+                getString(
+                    if (tunnel.supported && tunnel.isUp) R.string.apps_defaults_added_up else R.string.apps_defaults_added,
+                    names.joinToString(", ")
+                )
+            )
+        }
+    }
+
+    /** Галочку поставили или сняли руками: снятую с приложения из набора больше не возвращаем. */
+    private fun noteAppTick(pkg: String, checked: Boolean) {
+        val app = appEntries.firstOrNull { it.pkg == pkg }
+        if (DefaultApps.familyOf(pkg, app?.label.orEmpty(), app?.system ?: false) == null) return
+        prefs.appsUnticked = if (checked) prefs.appsUnticked - pkg else prefs.appsUnticked + pkg
     }
 
     private fun rebuildAppsList() {
@@ -721,7 +1062,10 @@ class MainActivity : AppCompatActivity() {
                 text = if (app.system) getString(R.string.app_row_system, app.label) else app.label
                 tag = app.pkg
                 isChecked = app.pkg in selected
-                setOnClickListener { saveAppsSelection() }
+                setOnClickListener {
+                    noteAppTick(app.pkg, isChecked)
+                    saveAppsSelection()
+                }
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
@@ -793,23 +1137,7 @@ class MainActivity : AppCompatActivity() {
 
             else -> getString(R.string.apps_all_state)
         }
-        binding.textAppsTraffic.text = if (tunnel.supported && tunnel.isUp) {
-            getString(
-                R.string.apps_traffic,
-                getString(
-                    R.string.tunnel_bytes,
-                    humanBytes(TunnelDebug.bytesUp), humanBytes(TunnelDebug.bytesDown)
-                )
-            )
-        } else {
-            getString(R.string.apps_traffic_off)
-        }
-    }
-
-    private fun humanBytes(value: Long): String = when {
-        value < 1024 -> getString(R.string.bytes_b, value)
-        value < 1024 * 1024 -> getString(R.string.bytes_kb, value / 1024)
-        else -> getString(R.string.bytes_mb, value / 1048576.0)
+        updateTunnelSummary()
     }
 
     // ------------------------------------------------ доступность (Журнал)
@@ -949,77 +1277,6 @@ class MainActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         }
-
-    // ---------------------------------------------------- расход по приложениям
-
-    /** Без «Доступа к истории использования» Android не отдаёт расход по приложениям. */
-    private fun hasUsageAccess(): Boolean = runCatching {
-        val ops = getSystemService(android.app.AppOpsManager::class.java)
-        val uid = android.os.Process.myUid()
-        val op = android.app.AppOpsManager.OPSTR_GET_USAGE_STATS
-        val mode = if (android.os.Build.VERSION.SDK_INT >= 29) {
-            ops.unsafeCheckOpNoThrow(op, uid, packageName)
-        } else {
-            @Suppress("DEPRECATION")
-            ops.checkOpNoThrow(op, uid, packageName)
-        }
-        mode == android.app.AppOpsManager.MODE_ALLOWED
-    }.getOrDefault(false)
-
-    /**
-     * Живой расход по приложениям. Честная оговорка: Android не умеет сказать «сколько ушло
-     * именно через туннель», поэтому считаем весь трафик приложения за время, пока туннель поднят.
-     * Для полного туннеля это одно и то же, для раздельного — верхняя оценка.
-     */
-    private fun showAppTraffic() {
-        if (!hasUsageAccess()) {
-            toast(getString(R.string.apps_traffic_need_access))
-            runCatching {
-                startActivity(android.content.Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS))
-            }
-            return
-        }
-        val from = tunnelStartedAtLocal.takeIf { it > 0L } ?: (System.currentTimeMillis() - 3_600_000L)
-        val to = System.currentTimeMillis()
-        val stats = runCatching { getSystemService(android.app.usage.NetworkStatsManager::class.java) }.getOrNull()
-        val rows = mutableListOf<Pair<String, Long>>()
-        if (stats != null) {
-            val types = listOf(
-                android.net.ConnectivityManager.TYPE_MOBILE,
-                android.net.ConnectivityManager.TYPE_WIFI
-            )
-            appEntries.forEach { app ->
-                val uid = runCatching { packageManager.getApplicationInfo(app.pkg, 0).uid }.getOrDefault(-1)
-                if (uid >= 0) {
-                    var bytes = 0L
-                    for (type in types) {
-                        bytes += runCatching {
-                            stats.queryDetailsForUid(type, null, from, to, uid).use { bucketSet ->
-                                var sum = 0L
-                                while (bucketSet.hasNextBucket()) {
-                                    val bucket = android.app.usage.NetworkStats.Bucket()
-                                    bucketSet.getNextBucket(bucket)
-                                    sum += bucket.rxBytes + bucket.txBytes
-                                }
-                                sum
-                            }
-                        }.getOrDefault(0L)
-                    }
-                    if (bytes > 0L) rows += app.label to bytes
-                }
-            }
-        }
-        binding.textAppsTraffic.text = if (rows.isEmpty()) {
-            getString(R.string.apps_traffic_none)
-        } else {
-            buildString {
-                appendLine(getString(R.string.apps_traffic_header))
-                rows.sortedByDescending { it.second }.take(12).forEach { row ->
-                    appendLine("• ${row.first} — ${humanBytes(row.second)}")
-                }
-            }
-        }
-    }
 
     /**
      * Подбор точек. [autoConnect] — после успешного подбора сразу поднять туннель.
@@ -1211,6 +1468,12 @@ class MainActivity : AppCompatActivity() {
                 if (mode == prefs.routesMode) return
                 prefs.routesMode = mode
                 refreshRoutesState()
+                updateTunnelSummary()
+                // «Только мои сайты» / «Только из списков» — сразу показываем, где их выбирать.
+                when (mode) {
+                    3 -> binding.tunnelKindGroup.check(R.id.btnKindSites)
+                    2 -> binding.tunnelKindGroup.check(R.id.btnKindLists)
+                }
                 markSettingsDirty(getString(R.string.dirty_routes_mode))
             }
 
@@ -1265,23 +1528,37 @@ class MainActivity : AppCompatActivity() {
             updateSecondState()
             markSettingsDirty(getString(R.string.dirty_second_exit))
         }
-        binding.btnSecondResolve.setOnClickListener { resolveSecondDomains() }
+        binding.btnSecondResolve.setOnClickListener { refreshSecondNow() }
+        binding.switchSecondViaWarp.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked == prefs.secondViaWarp) return@setOnCheckedChangeListener
+            prefs.secondViaWarp = isChecked
+            updateSecondState()
+            markSettingsDirty(getString(R.string.dirty_second_exit))
+        }
         // Конфиг второго выхода вставляют копипастом: пока он не разобран, включённый
         // переключатель ничего не значит. Поэтому состояние пересчитываем сразу, а не
         // после «Сохранить и применить».
         binding.editSecondConf.doAfterTextChanged {
             prefs.secondConf = it?.toString()?.trim().orEmpty()
             updateSecondState()
+            // Вставили конфиг Proton — свежий список бесплатных серверов (встроенный тоже годится).
+            refreshProtonIfStale()
+        }
+        runCatching { setupSecondCountry() }.onFailure { t ->
+            TunnelDebug.error("второй выход: выбор страны — " + SafeMode.describe(t))
         }
         binding.editSecondDomains.doAfterTextChanged {
-            prefs.secondDomains = it?.toString().orEmpty()
+            val value = it?.toString().orEmpty()
+            if (value == prefs.secondDomains) return@doAfterTextChanged
+            prefs.secondDomains = value
             updateSecondState()
+            markSettingsDirtyLater(getString(R.string.dirty_second_sources))
         }
 
-        binding.btnSaveAndApply.setOnClickListener { saveAndApply(getString(R.string.dirty_config)) }
+        binding.btnSaveAndApply.setOnClickListener { applyWithRoutes(getString(R.string.dirty_config)) }
         binding.btnSaveAndSend.setOnClickListener { saveAndSend() }
         binding.btnSaveScan.setOnClickListener { saveAndApply(getString(R.string.dirty_scan)) }
-        binding.btnSaveApps.setOnClickListener { saveAndApply(getString(R.string.dirty_apps)) }
+        binding.btnSaveApps.setOnClickListener { applyWithRoutes(getString(R.string.dirty_apps)) }
         binding.btnSaveDpi.setOnClickListener { saveAndApply(getString(R.string.dirty_junk)) }
         binding.cardBanner.setOnClickListener { hideBanner() }
 
@@ -1292,13 +1569,15 @@ class MainActivity : AppCompatActivity() {
         binding.btnBuildRoutes.setOnClickListener { buildRoutes() }
 
         binding.btnTunnelRefresh.setOnClickListener { updateTunnelDiagnostics() }
-        binding.btnAppTraffic.setOnClickListener { showAppTraffic() }
 
         binding.btnTunnelCopy.setOnClickListener {
             ConfigFiles.copyToClipboard(this, TunnelDebug.dump() + "\n\n" + CrashLog.describe(this))
             toast(getString(R.string.copied_ok))
         }
         binding.btnTunnelExport.setOnClickListener { exportJournal() }
+        // «Проверить обновления» рядом с версией (с 1.10.31) — то же, что кнопка в шапке
+        // упрощённого экрана. Только по нажатию: в фоне приложение никуда не ходит.
+        binding.btnCheckUpdate.setOnClickListener { checkForUpdate() }
 
         binding.btnStop.setOnClickListener {
             cancelled.set(true)
@@ -1491,7 +1770,6 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnTunnel.setOnClickListener { toggleTunnel() }
         binding.btnLogClear.setOnClickListener { clearJournal() }
-        binding.btnNextEndpoint.setOnClickListener { nextEndpoint() }
     }
 
     /**
@@ -1913,61 +2191,287 @@ class MainActivity : AppCompatActivity() {
         if (target != null) banner(getString(R.string.pin_reset_to_best, pinnedLine, target))
     }
 
-    // ---------------------------------------------------------- второй выход
+    // ------------------------------------------------ второй выход (с 1.10.31: сайты — сами)
+
+    // ------------------------------------------------ Proton VPN Free: автопоиск сервера (с 1.10.31)
+
+    /** Коды стран в выпадающем списке Proton: первая строка — «любая». */
+    private var secondCountryCodes: List<String> = emptyList()
 
     /**
-     * Домены → адреса через DoH. Системный резолвер не используем: он может отдать подменённые
-     * адреса, и правило уведёт не тот трафик. Дальше эти /32 и /128 раскладывает ExitRouter
-     * внутри сервиса: пакет на такой адрес уходит во второй туннель, остальные — в WARP.
+     * Страна второго выхода для Proton VPN Free: сервер в ней приложение находит само (см.
+     * SecondProton). Применится при следующем подключении — как и остальные настройки туннеля.
      */
-    private fun resolveSecondDomains() {
-        val hosts = binding.editSecondDomains.text?.toString().orEmpty()
-            .split(',', '\n', ';', ' ')
-            .map { it.trim().removePrefix("http://").removePrefix("https://").substringBefore('/') }
-            .filter { it.contains('.') }
-            .distinct()
-        if (hosts.isEmpty()) {
-            banner(getString(R.string.second_no_domains), error = true)
+    private fun setupSecondCountry() {
+        val codes = listOf("") + ProtonFree.countries(SecondProton.servers(this))
+        secondCountryCodes = codes
+        val labels = codes.map { code ->
+            if (code.isEmpty()) getString(R.string.second_country_any) else SecondProton.countryName(this, code)
+        }
+        binding.spinnerSecondCountry.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
+        binding.spinnerSecondCountry.setSelection(codes.indexOf(prefs.secondProtonCountry).coerceAtLeast(0))
+        binding.spinnerSecondCountry.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val code = secondCountryCodes.getOrNull(position) ?: return
+                if (code == prefs.secondProtonCountry) return
+                prefs.secondProtonCountry = code
+                TunnelDebug.stage("второй выход: страна — " + code.ifEmpty { "любая, ближние первыми" })
+                updateSecondState()
+                markSettingsDirty(getString(R.string.dirty_second_exit))
+            }
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+        }
+    }
+
+    /** «Proton VPN Free: сервер выбирается сам…» и на каком сервере второй выход сейчас. */
+    private fun renderSecondProton(up: Boolean, snap: TunnelStatus?) {
+        val proton = prefs.secondExitOn && ProtonFree.isProton(prefs.secondConf)
+        binding.panelSecondProton.visibility = if (proton) View.VISIBLE else View.GONE
+        if (!proton) return
+        val servers = SecondProton.servers(this)
+        val counts = ProtonFree.countries(servers).joinToString(", ") { code -> "$code ${servers.count { it.code == code }}" }
+        val fetched = SecondProton.fetchedAt(this)
+        val listAge = if (fetched > 0L) agoText(fetched) else getString(R.string.second_proton_builtin)
+        val peer = snap?.secondPeer.orEmpty()
+        // Сервер работает — с него и начнём в следующий раз.
+        if (up && snap?.second == TunnelStatus.SECOND_UP && peer.isNotBlank()) prefs.secondProtonLast = peer
+        binding.textSecondProton.text = buildString {
+            append(getString(R.string.second_proton_info, servers.size, counts, listAge))
+            if (up && peer.isNotBlank()) append("\n").append(getString(R.string.second_proton_now, peer))
+        }
+    }
+
+    private var protonRefreshAt = 0L
+
+    /** Список бесплатных серверов Proton — раз в неделю; не скачался — снова не раньше чем через час. */
+    private fun refreshProtonIfStale() {
+        if (!prefs.secondExitOn || !ProtonFree.isProton(prefs.secondConf) || !SecondProton.isStale(this)) return
+        val now = System.currentTimeMillis()
+        if (now - protonRefreshAt < 3_600_000L) return
+        protonRefreshAt = now
+        Thread {
+            val result = runCatching { SecondProton.refresh(this) }
+            runOnUiThread {
+                result.onSuccess { n ->
+                    TunnelDebug.stage("Proton Free: список серверов обновлён — бесплатных $n")
+                    runCatching { ServiceSettingsStore.syncFromPrefs(this) }
+                    if (uiReady()) {
+                        runCatching { setupSecondCountry() }
+                        updateSecondState()
+                    }
+                }.onFailure { TunnelDebug.stage("Proton Free: список серверов не обновился — ${it.message}") }
+            }
+        }.apply { isDaemon = true; name = "warpscout-proton" }.start()
+    }
+
+    /** Галочки «Через второй выход идут: …» (id списка → галочка). */
+    private val secondChecks = LinkedHashMap<String, MaterialCheckBox>()
+
+    /** Галочки источников второго выхода — по SecondRoutes.SOURCES, отметки из настроек. */
+    private fun buildSecondSources() {
+        val box = binding.secondSourcesBox
+        box.removeAllViews()
+        secondChecks.clear()
+        val chosen = prefs.secondSources
+        SecondRoutes.SOURCES.forEach { id ->
+            val cb = MaterialCheckBox(this).apply {
+                text = getString(secondSourceTitle(id))
+                isChecked = id in chosen
+                setOnClickListener {
+                    prefs.secondSources = secondChecks.filter { it.value.isChecked }.keys.toSet()
+                    updateSecondState()
+                    markSettingsDirty(getString(R.string.dirty_second_sources))
+                }
+            }
+            secondChecks[id] = cb
+            box.addView(cb)
+        }
+    }
+
+    private fun secondSourceTitle(id: String): Int = when (id) {
+        "ru-ip-blocked" -> R.string.second_src_ru_blocked
+        "openai" -> R.string.second_src_openai
+        "claude" -> R.string.second_src_claude
+        else -> R.string.second_src_google_ai
+    }
+
+    /**
+     * «Обновить адреса и проверить выход»: собрать адреса сейчас (списки + свои сайты, DoH),
+     * обновить таблицу работающего туннеля без переподключения и проверить страну выхода.
+     */
+    private fun refreshSecondNow() {
+        persistUi()
+        if (!prefs.secondExitOn || prefs.secondConf.isBlank()) {
+            updateSecondState()
+            banner(binding.textSecondState.text.toString(), error = true)
             return
         }
         binding.btnSecondResolve.isEnabled = false
         binding.textSecondState.text = getString(R.string.second_resolving)
         Thread {
-            val resolved = runCatching { AllowListPlanner.resolveAll(hosts) }.getOrDefault(emptyMap())
-            val cidrs = LinkedHashSet<String>()
-            resolved.values.flatten().forEach { ip ->
-                if (ip.isNotBlank()) cidrs += if (ip.contains(':')) "$ip/128" else "$ip/32"
-            }
+            val result = runCatching { SecondRoutes.build(this, prefs) { line -> runOnUiThread { sink().log(line) } } }
+            val changed = result.getOrNull()?.let { SecondRoutes.save(prefs, it) } ?: false
             runOnUiThread {
+                if (!uiReady()) return@runOnUiThread
                 binding.btnSecondResolve.isEnabled = true
-                prefs.secondDomains = hosts.joinToString(", ")
-                prefs.secondCidrs = cidrs.joinToString(", ")
+                result.onSuccess { r ->
+                    banner(getString(R.string.second_resolved, r.note()))
+                    TunnelDebug.stage("второй выход: ${r.note()}")
+                    if (changed && tunnel.supported && tunnel.isUp) tunnel.reloadSecondRoutes()
+                }.onFailure { banner(it.message ?: it.javaClass.simpleName, error = true) }
                 updateSecondState()
-                if (cidrs.isEmpty()) {
-                    banner(getString(R.string.second_no_domains), error = true)
-                } else {
-                    banner(getString(R.string.second_resolved, cidrs.size, hosts.size))
-                    markSettingsDirty(getString(R.string.dirty_second_cidrs))
+                runSecondCheck()
+            }
+        }.apply { isDaemon = true; name = "warpscout-second" }.start()
+    }
+
+    private var secondCheckRunning = false
+    private var secondRefreshRunning = false
+
+    /**
+     * Из какой страны выходит второй выход: запрос к chatgpt.com через туннель (его адреса всегда во
+     * втором выходе). Только когда туннель поднят — иначе проверять нечего.
+     */
+    private fun runSecondCheck() {
+        if (secondCheckRunning || !prefs.secondExitOn || prefs.secondConf.isBlank()) return
+        if (!tunnel.supported || !tunnel.isUp) {
+            updateSecondState()
+            return
+        }
+        // Второй выход в этой сессии не работает — запрос ушёл бы через WARP, и «выход: RU»
+        // приписался бы своему серверу. Не проверяем: состояние и так видно в строке выше.
+        val snap = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
+        if (snap?.second != TunnelStatus.SECOND_UP) {
+            updateSecondState()
+            return
+        }
+        secondCheckRunning = true
+        binding.textSecondState.text = getString(R.string.second_checking)
+        Thread {
+            val res = runCatching { SecondRoutes.checkExit() }
+                .getOrDefault("!|ошибка|${System.currentTimeMillis()}")
+            runOnUiThread {
+                secondCheckRunning = false
+                prefs.secondCheck = res
+                TunnelDebug.stage("второй выход: проверка — " + res.substringBeforeLast('|').replace('|', ' '))
+                if (uiReady()) updateSecondState()
+            }
+        }.apply { isDaemon = true; name = "warpscout-second-check" }.start()
+    }
+
+    /**
+     * После «Сохранить и применить» туннель переподключается: страну второго выхода проверяем,
+     * когда он поднимется (и только если второй выход в нём заработал).
+     */
+    private fun scheduleSecondCheck(attempt: Int = 0) {
+        if (!prefs.secondExitOn || prefs.secondConf.isBlank()) return
+        if (attempt == 0 && !(tunnel.supported && (tunnel.isUp || tunnel.active))) return
+        tunnelHandler.postDelayed({
+            runCatching {
+                if (isFinishing || isDestroyed) return@runCatching
+                val snap = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
+                val up = tunnel.supported && tunnel.isUp
+                when {
+                    up && snap?.second == TunnelStatus.SECOND_UP -> runSecondCheck()
+                    up && snap?.second == TunnelStatus.SECOND_FAILED -> updateSecondState()
+                    attempt < 8 -> scheduleSecondCheck(attempt + 1)
+                    else -> updateSecondState()
                 }
             }
-        }.apply { isDaemon = true; name = "warpscout-resolve-second" }.start()
+        }, if (attempt == 0) 6_000L else 5_000L)
+    }
+
+    /** Когда последний раз пробовали обновить адреса второго выхода сами. */
+    private var secondRefreshTriedAt = 0L
+
+    /**
+     * Раз в сутки адреса второго выхода — заново (когда приложение открыто и туннель работает).
+     * Таблицу сервис меняет на лету. Если выбор сайтов правили и не применили — не трогаем: это
+     * решит «Сохранить и применить».
+     */
+    private fun refreshSecondIfStale() {
+        if (secondRefreshRunning || preparingRoutes) return
+        // Не собралось (DoH молчит) — следующая попытка не раньше чем через полчаса.
+        if (System.currentTimeMillis() - secondRefreshTriedAt < 30 * 60_000L) return
+        if (!prefs.secondExitOn || prefs.secondConf.isBlank() || prefs.secondCidrs.isBlank()) return
+        if (System.currentTimeMillis() - prefs.secondRoutesAt < SecondRoutes.STALE_MS) return
+        if (SecondRoutes.signature(prefs) != prefs.secondBuiltSig) return
+        if (!tunnel.supported || !tunnel.isUp) return
+        secondRefreshRunning = true
+        secondRefreshTriedAt = System.currentTimeMillis()
+        Thread {
+            val result = runCatching { SecondRoutes.build(this, prefs) { } }
+            val changed = result.getOrNull()?.let { SecondRoutes.save(prefs, it) } ?: false
+            runOnUiThread {
+                secondRefreshRunning = false
+                result.onSuccess { r ->
+                    TunnelDebug.stage("второй выход: адреса обновлены сами — ${r.note()}")
+                    if (changed && tunnel.supported && tunnel.isUp) tunnel.reloadSecondRoutes()
+                }.onFailure { TunnelDebug.stage("второй выход: адреса не обновились — ${it.message}") }
+                if (uiReady()) updateSecondState()
+            }
+        }.apply { isDaemon = true; name = "warpscout-second-daily" }.start()
     }
 
     private fun updateSecondState() {
-        val cidrs = prefs.secondCidrs.split(',', '\n').count { it.isNotBlank() }
-        val domains = prefs.secondDomains.split(',', '\n').count { it.isNotBlank() }
-        val server = runCatching {
-            WgConf.toWarpConfig("второй выход", prefs.secondConf)?.endpoint?.render()
-        }.getOrNull()
-        binding.textSecondState.text = when {
-            !prefs.secondExitOn -> getString(R.string.second_off)
-            // Конфиг вставлен, но не разбирается — это единственная ошибка, которую человек
-            // не увидит сам: переключатель включён, а сервера фактически нет.
-            prefs.secondConf.isBlank() -> getString(R.string.second_need_conf)
-            server == null -> getString(R.string.second_bad_conf)
-            cidrs == 0 -> getString(R.string.second_need_cidrs)
-            else -> getString(R.string.second_on_summary, domains, cidrs, server) +
-                "\n" + getString(R.string.second_apply_note)
+        if (!uiReady()) return
+        runCatching {
+            val server = runCatching {
+                WgConf.toWarpConfig("второй выход", prefs.secondConf)?.endpoint?.render()
+            }.getOrNull()
+            val up = tunnel.supported && tunnel.isUp
+            val snap = if (up) runCatching { TunnelStatusBus.snapshot(this) }.getOrNull() else null
+            renderSecondProton(up, snap)
+            binding.textSecondState.text = buildString {
+                when {
+                    !prefs.secondExitOn -> append(getString(R.string.second_off))
+                    // Конфиг вставлен, но не разбирается — это единственная ошибка, которую человек
+                    // не увидит сам: переключатель включён, а сервера фактически нет.
+                    prefs.secondConf.isBlank() -> append(getString(R.string.second_need_conf))
+                    server == null -> append(getString(R.string.second_bad_conf))
+                    prefs.secondCidrs.isBlank() -> append(getString(R.string.second_need_cidrs))
+                    else -> {
+                        val transport = getString(
+                            if (prefs.secondViaWarp) R.string.second_transport_warp else R.string.second_transport_direct
+                        ) + if (dev.warpscout.core.tunnel.AwgChannel.paramsOf(prefs.secondConf) != null) " · AmneziaWG" else ""
+                        append(
+                            getString(
+                                R.string.second_on_summary, server, transport,
+                                prefs.secondRoutesNote.ifBlank { "адресов: ${routeCount(prefs.secondCidrs)}" },
+                                agoText(prefs.secondRoutesAt)
+                            )
+                        )
+                        if (SecondRoutes.signature(prefs) != prefs.secondBuiltSig) {
+                            append("\n").append(getString(R.string.second_changed))
+                        }
+                        // Что с ним в работающем туннеле — по снимку сервиса, а не по настройкам.
+                        if (up) {
+                            append("\n").append(
+                                when (snap?.second) {
+                                    TunnelStatus.SECOND_UP -> getString(R.string.second_state_up)
+                                    TunnelStatus.SECOND_STARTING -> getString(R.string.second_state_starting)
+                                    TunnelStatus.SECOND_FAILED -> getString(R.string.second_state_failed)
+                                    else -> getString(R.string.second_apply_note)
+                                }
+                            )
+                        }
+                        val check = prefs.secondCheck.split('|')
+                        val at = check.getOrNull(2)?.toLongOrNull() ?: 0L
+                        append("\n").append(
+                            when {
+                                check.size < 3 -> getString(R.string.second_check_none)
+                                check[0] == "!" -> getString(R.string.second_check_fail, check[1], clock(at))
+                                check[0] == "RU" -> getString(R.string.second_check_ru, clock(at))
+                                else -> getString(R.string.second_check_ok, check[0], check[1], clock(at))
+                            }
+                        )
+                        if (prefs.appsMode == Prefs.APPS_ONLY && prefs.appsSelected.isNotEmpty()) {
+                            append("\n").append(getString(R.string.second_apps_warn))
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -2370,7 +2874,15 @@ class MainActivity : AppCompatActivity() {
             val cb = MaterialCheckBox(this).apply {
                 text = list.title
                 isChecked = list.id in want
-                setOnClickListener { refreshRoutesState() }
+                setOnClickListener {
+                    // Отметили список — через туннель должны идти сайты из списков (с 1.10.31).
+                    prefs.allowBlockIds = listChecks.filter { it.value.isChecked && it.key in BLOCK_IDS }.map { it.key }.toSet()
+                    prefs.allowDirectIds = listChecks.filter { it.value.isChecked && it.key in DIRECT_IDS }.map { it.key }.toSet()
+                    if (prefs.routesMode != 2) binding.spinnerRoutes.setSelection(2)
+                    refreshRoutesState()
+                    updateTunnelSummary()
+                    markSettingsDirty(getString(R.string.dirty_lists))
+                }
             }
             listChecks[list.id] = cb
             box.addView(cb)
@@ -2385,6 +2897,8 @@ class MainActivity : AppCompatActivity() {
             if (age > 0L) append(" · ").append(dev.warpscout.core.lists.AllowLists.freshnessOf(age))
             if (prefs.routesMode == 2 && prefs.allowedIpsText.isBlank()) {
                 append("\n").append(getString(R.string.routes_none_yet))
+            } else if (prefs.routesMode == 2 && prefs.listsBuiltSig != listsSignature()) {
+                append("\n").append(getString(R.string.routes_lists_changed))
             }
             if (cached.isEmpty()) append("\n").append(getString(R.string.routes_download_hint))
         }
@@ -2426,7 +2940,7 @@ class MainActivity : AppCompatActivity() {
                 binding.btnBuildRoutes.isEnabled = true
                 result.onSuccess { r ->
                     val summary = lists.savePlan(prefs, r.plan)
-                    binding.editAllowedIps.setText(r.plan.allowedIps.replace(", ", ",\n"))
+                    prefs.listsBuiltSig = listsSignature()
                     binding.spinnerRoutes.setSelection(2)
                     toast(getString(R.string.routes_built, summary))
                     if (r.missing().isNotEmpty()) {
@@ -2436,6 +2950,7 @@ class MainActivity : AppCompatActivity() {
                     toast(it.message ?: it.javaClass.simpleName)
                 }
                 refreshRoutesState()
+                updateTunnelSummary()
             }
         }.apply { isDaemon = true }.start()
     }
@@ -2523,7 +3038,12 @@ class MainActivity : AppCompatActivity() {
             }
             banner(getString(R.string.banner_no_config_scanning))
             animateShield()
-            startScan(autoConnect = true)
+            // Первый подбор на Wi-Fi — сразу и для мобильной сети (с 1.10.31): её проверяем через
+            // SIM-карту, не уходя с Wi-Fi. Уйдёт человек из дома — точки для мобильной уже готовы.
+            val onWifi = ConfigShortlist.group(TuningCache.transportOf(this)) == ConfigShortlist.GROUP_WIFI
+            val both = onWifi && CellularNetwork.maybeAvailable(this)
+            if (both) TunnelDebug.stage("первый подбор: Wi-Fi и сразу мобильная сеть")
+            startScan(autoConnect = true, mode = if (both) Engine.SCAN_BOTH else Engine.SCAN_CURRENT)
             return
         }
         if (!tunnel.ensurePermission(this)) return
@@ -2703,6 +3223,9 @@ class MainActivity : AppCompatActivity() {
                     // Ручное подключение тоже наполняет кеш: следующая «Подбор» начнётся с этой точки.
                     runCatching { TuningCache.save(this, used.endpoint, used.junk.name) }
                     probeExitRegion()
+                    // Второй выход: страна выхода — когда он поднимется; адреса — если устарели.
+                    scheduleSecondCheck()
+                    refreshSecondIfStale()
                 } else {
                     TunnelDebug.error(
                         getString(R.string.no_candidates_up, candidates.size),
@@ -2749,13 +3272,33 @@ class MainActivity : AppCompatActivity() {
         banner(getString(R.string.banner_unsaved))
     }
 
+    private var dirtyLater: Runnable? = null
+
+    /**
+     * То же для полей со списками сайтов: отмечаем, когда человек перестал печатать. Иначе каждая
+     * буква писала бы в журнал «изменено…» — в журнале 2122 так набралось девять строк подряд.
+     */
+    private fun markSettingsDirtyLater(why: String) {
+        if (suppressSettingsReconnect) return
+        dirtyLater?.let { tunnelHandler.removeCallbacks(it) }
+        val r = Runnable {
+            dirtyLater = null
+            if (uiReady()) runCatching { markSettingsDirty(why) }
+        }
+        dirtyLater = r
+        tunnelHandler.postDelayed(r, 1500L)
+    }
+
     /**
      * «Сохранить и применить»: сохраняем экран в Prefs и — если туннель поднят — переподключаем
      * его с новыми настройками (до трёх попыток). Если туннель не поднят, применять нечего:
      * настройки вступят в силу при следующем подключении.
      */
-    private fun saveAndApply(why: String) {
+    private fun saveAndApply(why: String, upText: String? = null, downText: String? = null) {
         persistUi()
+        // Сервис (процесс туннеля) читает общий снимок настроек: при переподключении по сети он
+        // должен взять новые маршруты, даже если туннель сейчас выключен и подключения отсюда нет.
+        runCatching { ServiceSettingsStore.syncFromPrefs(this) }
         updateServerNote()
         refreshRoutesState()
         binding.textConfig.text = runCatching { currentConfig()?.let { currentConfigText(it) } }.getOrNull().orEmpty()
@@ -2765,7 +3308,7 @@ class MainActivity : AppCompatActivity() {
                 banner(getString(R.string.banner_saved_only))
                 return
             }
-            banner(getString(R.string.banner_applying))
+            banner(upText ?: getString(R.string.banner_applying))
             Thread {
                 runCatching { tunnel.stop() }
                 runCatching { tunnel.waitStopped(3000) }
@@ -2777,7 +3320,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }.apply { isDaemon = true; name = "warpscout-apply" }.start()
         } else {
-            banner(getString(R.string.banner_saved_only))
+            banner(downText ?: getString(R.string.banner_saved_only))
         }
     }
 
@@ -2962,36 +3505,6 @@ class MainActivity : AppCompatActivity() {
     private fun pointKey(cfg: WarpConfig): String =
         cfg.endpoint.render() + "|" + cfg.junk.name
 
-    /** «Другая точка входа»: следующая из очереди, сразу с переподключением. */
-    private fun nextEndpoint() {
-        if (!tunnel.supported) {
-            toast(getString(R.string.tunnel_unavailable))
-            return
-        }
-        val base = currentConfig() ?: return noConfig()
-        val list = tunnelCandidates(base)
-        if (list.isEmpty()) return noConfig()
-        endpointIndex = (endpointIndex + 1) % list.size
-        val chosen = list[endpointIndex]
-        prefs.lastEndpoint = chosen.endpoint.render()
-        updateEndpointNote()
-        if (tunnel.isUp) {
-            tunnel.stop()
-            tunnelStartedAtLocal = 0L
-            exitRegion = ""
-            binding.btnTunnel.setText(R.string.btn_tunnel_on)
-            Thread {
-                // Раньше здесь была фиксированная пауза 900 мс — «на глазок». Если сервис
-                // освобождался позже, старт упирался в «уже поднимается» и подключение молча
-                // не происходило. Теперь ждём фактического завершения прошлой сессии.
-                tunnel.waitStopped(6000)
-                runOnUiThread { connectWithFallback(chosen) }
-            }.apply { isDaemon = true }.start()
-        } else {
-            connectWithFallback(chosen)
-        }
-    }
-
     private fun endpointOf(text: String): dev.warpscout.core.model.Endpoint? {
         val t = text.trim()
         if (t.isEmpty()) return null
@@ -3012,7 +3525,10 @@ class MainActivity : AppCompatActivity() {
         val serviceExit = runCatching {
             TunnelStatusBus.snapshot(this).takeIf { it.up && it.linkWeb == TunnelStatus.LINK_OK }?.linkExit
         }.getOrNull().orEmpty()
-        val region = serviceExit.ifBlank { exitRegion }.ifBlank { prefs.lastExitRegion }.ifBlank { getString(R.string.region_unknown) }
+        // С 1.10.31 — только страна («выход: RU»): площадка Cloudflare (HEL, DME) читалась как страна.
+        val region = listOf(serviceExit, exitRegion, prefs.lastExitRegion)
+            .map { dev.warpscout.core.net.CfTrace.countryOf(it) }
+            .firstOrNull { it.isNotBlank() } ?: getString(R.string.region_unknown)
         binding.textEndpointNow.text = getString(
             R.string.endpoint_now,
             now.ifBlank { "—" },
@@ -3319,14 +3835,8 @@ class MainActivity : AppCompatActivity() {
     /** Пока true — тумблеры вида выставляются кодом, и их слушатели молчат. */
     private var suppressModeListener = false
 
-    /** Когда человек нажал «Скорость» (для «замеряю…», пока сервис не ответил). */
-    private var speedRequestedAt = 0L
-
-    /** Прошлый отсчёт трафика для «сейчас ↓ … ↑ …»: (время, принято, отправлено). */
+    /** Прошлый отсчёт трафика для «↓ … · ↑ …» на кнопке: (время, принято, отправлено). */
     private var trafficSample: Triple<Long, Long, Long>? = null
-
-    /** Обычный цвет крупной цифры скорости: на него возвращаемся после «встаёт» красным. */
-    private var speedValueColors: android.content.res.ColorStateList? = null
 
     /** Какое состояние сейчас нарисовано на кнопке: по нему таймер решает, что показывать. */
     private var lastOrbState = PowerOrbView.STATE_OFF
@@ -3354,6 +3864,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun clock(ms: Long): String =
         java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(ms))
+
+    /** «только что» / «12 мин назад» / «3 ч назад» / «2 дн назад»; 0 — «ещё не собирались». */
+    private fun agoText(at: Long): String {
+        if (at <= 0L) return getString(R.string.second_never)
+        val min = ((System.currentTimeMillis() - at) / 60_000L).coerceAtLeast(0L)
+        return when {
+            min < 1 -> "только что"
+            min < 60 -> "$min мин назад"
+            min < 48 * 60 -> "${min / 60} ч назад"
+            else -> "${min / 1440} дн назад"
+        }
+    }
 
     /** Отметка дозора словами, без точки-маркера: «отвечает, проверено в 14:24». null — не знаем. */
     private fun markText(endpoint: String, marks: Map<String, PointMark>): String? {
@@ -3404,14 +3926,14 @@ class MainActivity : AppCompatActivity() {
     private fun setupSimple() {
         val s = binding.simple
         s.simpleOrb.setOnClickListener { onSimpleOrbClick() }
-        s.simpleCardSpeed.setOnClickListener { onSimpleSpeedClick() }
+        // «Туннелирование» (с 1.10.31) — на месте карточки скорости: приложения, сайты, списки.
+        s.simpleCardTunnel.setOnClickListener { showAppsSheet() }
         s.simpleCardBackup.setOnClickListener { showBackupSheet() }
-        s.simpleApps.setOnClickListener { showAppsSheet() }
         // Шапка: два частых действия — подобрать точку заново (на Wi-Fi заодно и для мобильной
-        // сети, не уходя с Wi-Fi) и отправить журнал одним нажатием.
+        // сети, не уходя с Wi-Fi) и проверить обновления (с 1.10.31; журнал выгружается только
+        // в расширенном виде).
         s.simpleRescan.setOnClickListener { onSimpleRescanClick() }
-        s.simpleSendLog.setOnClickListener { runCatching { exportJournal() } }
-        speedValueColors = s.simpleSpeedValue.textColors
+        s.simpleUpdate.setOnClickListener { checkForUpdate() }
         s.simpleVersion.text = binding.textVersion.text
         // Один и тот же тумблер «Расширенный режим» в обоих видах (с 1.10.30): в упрощённом он
         // выключен, в расширенном включён. Раньше в расширенном стоял «Упрощённый режим», и тумблер
@@ -3510,18 +4032,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** «Скорость»: полный замер через туннель (до 10 МБ / 6 с), итог придёт в снимке сервиса. */
-    private fun onSimpleSpeedClick() {
-        if (!tunnel.supported || !tunnel.isUp) {
-            banner(getString(R.string.simple_speed_need_tunnel))
-            return
-        }
-        speedRequestedAt = System.currentTimeMillis()
-        tunnel.requestSpeedTest()
-        banner(getString(R.string.simple_speed_started))
-        updateSimple()
-    }
-
     /**
      * «Подобрать точку заново» из шапки. На Wi-Fi с SIM-картой — заодно и тройку для мобильной сети
      * (через неё же, не уходя с Wi-Fi). Туннель на время замеров гаснет и возвращается сам.
@@ -3595,15 +4105,19 @@ class MainActivity : AppCompatActivity() {
                 sub = getString(R.string.simple_tap_to_stop)
             }
             else -> {
+                // С 1.10.31 без подсказки «нажмите, чтобы включить»: кнопка и так одна.
                 state = PowerOrbView.STATE_OFF
                 title = getString(R.string.simple_state_off)
-                sub = getString(R.string.simple_tap_to_connect)
+                sub = ""
             }
         }
         lastOrbState = state
         s.simpleOrbView.setState(state)
         if (s.simpleState.text.toString() != title) s.simpleState.text = title
         if (s.simpleTimer.text.toString() != sub) s.simpleTimer.text = sub
+        // Пустая строка не должна занимать место: надпись «Выключено» стоит ровно по центру кнопки.
+        val timerVisibility = if (sub.isBlank()) View.GONE else View.VISIBLE
+        if (s.simpleTimer.visibility != timerVisibility) s.simpleTimer.visibility = timerVisibility
         // Кольцо-прогресс и строка «что сейчас делаю» (с 1.10.30): пока идёт подбор — доля кольца
         // и шаг подбора; пока подключаемся — светлая дуга бежит по кольцу, а под кнопкой видно,
         // к какой точке и что именно проверяется.
@@ -3630,82 +4144,29 @@ class MainActivity : AppCompatActivity() {
             )
         )
 
-        // Где мы: вид сети, точка входа и (если проверка связи прошла) площадка выхода.
+        // Где мы: вид сети, точка входа и (если проверка связи прошла) страна выхода. С 1.10.31 —
+        // «выход: RU», а не площадка Cloudflare: «выход HEL» читалось как Финляндия, хотя сайты
+        // видят российский адрес.
         val endpoint = if (up) TunnelDebug.endpoint.trim().ifBlank { snap?.endpoint.orEmpty() } else ""
         val net = netKindNow().ifBlank { "сеть" }
-        val colo = snap?.takeIf { linkFresh && it.linkWeb == TunnelStatus.LINK_OK }?.linkExit
-            ?.substringBefore(" · ")?.trim().orEmpty()
+        val country = dev.warpscout.core.net.CfTrace.countryOf(
+            snap?.takeIf { linkFresh && it.linkWeb == TunnelStatus.LINK_OK }?.linkExit
+        )
         val where = when {
             endpoint.isBlank() -> ""
-            colo.isNotBlank() -> getString(R.string.simple_where_region, net, endpoint, colo)
+            country.isNotBlank() -> getString(R.string.simple_where_region, net, endpoint, country)
             else -> getString(R.string.simple_where, net, endpoint)
         }
         s.simpleWhere.text = where
         s.simpleWhere.visibility = if (where.isBlank()) View.INVISIBLE else View.VISIBLE
 
-        // Скорость через туннель: крупно — последний замер, мелко — пинг, сколько качается сейчас
-        // и для кого (при выбранных приложениях через туннель идут только они).
-        val now = System.currentTimeMillis()
-        val speedFresh = up && snap != null && snap.speedAt > 0L && snap.speedAt >= snap.startedAt
-        val measuring = up && snap != null && snap.speedRunningSince > 0L && now - snap.speedRunningSince < 30_000L
-        val waitingSpeed = up && speedRequestedAt > 0L && (snap?.speedAt ?: 0L) < speedRequestedAt &&
-            now - speedRequestedAt < 20_000L
-        // Сразу после подъёма автозамер ещё не прошёл (сначала проверка связи) — пишем «замеряю…».
-        val firstPending = up && !speedFresh && prefs.featSpeedAuto && (snap?.startedAt ?: 0L) > 0L &&
-            now - (snap?.startedAt ?: 0L) < 25_000L
-        var speedBad = false
-        val speedValue = when {
-            !up -> getString(R.string.simple_dash)
-            measuring || waitingSpeed || firstPending -> getString(R.string.simple_speed_measuring)
-            !speedFresh || snap == null -> getString(R.string.simple_dash)
-            snap.speedState == TunnelStatus.SPEED_OK ->
-                (if (snap.speedFull) "" else "≈ ") + SpeedTest.human(snap.speedKbps)
-            snap.speedState == TunnelStatus.SPEED_FROZEN -> {
-                speedBad = true
-                getString(R.string.simple_speed_frozen)
-            }
-            snap.speedState == TunnelStatus.SPEED_BYPASS -> getString(R.string.simple_speed_bypass)
-            else -> {
-                speedBad = true
-                getString(R.string.simple_speed_fail)
-            }
-        }
-        if (s.simpleSpeedValue.text.toString() != speedValue) s.simpleSpeedValue.text = speedValue
-        if (speedBad) {
-            s.simpleSpeedValue.setTextColor(ContextCompat.getColor(this, R.color.check_fail))
-        } else {
-            speedValueColors?.let { s.simpleSpeedValue.setTextColor(it) }
-        }
-        val pingText = when {
-            !up -> ""
-            speedFresh && snap?.speedState == TunnelStatus.SPEED_FROZEN && (snap?.speedBytes ?: 0L) > 0L ->
-                getString(R.string.simple_speed_frozen_after, ((snap?.speedBytes ?: 0L) / 1024).toInt())
-            speedFresh && (snap?.speedPingMs ?: -1) >= 0 -> getString(R.string.simple_speed_ping, snap?.speedPingMs ?: 0)
-            !speedFresh && !measuring && !waitingSpeed && !firstPending -> getString(R.string.simple_speed_tap)
-            else -> ""
-        }
-        s.simpleSpeedPing.text = pingText
-        s.simpleSpeedPing.visibility = if (pingText.isBlank()) View.GONE else View.VISIBLE
+        // Скорость — на самой кнопке (живой поток раз в секунду, см. updateLiveRate); ручного
+        // замера больше нет (с 1.10.31). На месте её карточки — «Туннелирование».
         if (!up) {
-            s.simpleSpeedNow.text = ""
-            s.simpleSpeedNow.visibility = View.GONE
             trafficSample = null
+            if (s.simpleRate.visibility != View.GONE) s.simpleRate.visibility = View.GONE
         }
-        val selectedApps = prefs.appsSelected.size
-        val appsLine = when {
-            prefs.appsMode == Prefs.APPS_ONLY && selectedApps > 0 ->
-                resources.getQuantityString(R.plurals.simple_speed_apps, selectedApps, selectedApps)
-            prefs.appsMode == Prefs.APPS_EXCEPT && selectedApps > 0 ->
-                getString(R.string.simple_speed_apps_except, selectedApps)
-            else -> ""
-        }
-        s.simpleSpeedApps.text = appsLine
-        s.simpleSpeedApps.visibility = if (appsLine.isBlank()) View.GONE else View.VISIBLE
-        s.simpleApps.text = when {
-            prefs.appsMode == Prefs.APPS_ONLY && selectedApps > 0 -> getString(R.string.simple_apps_only, selectedApps)
-            prefs.appsMode == Prefs.APPS_EXCEPT && selectedApps > 0 -> getString(R.string.simple_apps_except, selectedApps)
-            else -> getString(R.string.simple_apps_all)
-        }
+        renderTunnelCard()
 
         // Резервная точка текущей сети (у Wi-Fi и мобильной — свои) и что о ней знает дозор.
         val marks = parseMarks(snap?.marks)
@@ -3731,23 +4192,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * «Сейчас ↓ … ↑ …» — сколько качается в эту секунду. Считаем по трафику своего приложения:
+     * «↓ … · ↑ …» на кнопке — сколько качается в эту секунду. Считаем по трафику своего приложения:
      * через его сокет идёт весь туннель (в зашифрованном виде), так что это и есть поток всех
      * приложений в туннеле. Снимок сервиса для этого не годится: он обновляется раз в минуту.
+     * С 1.10.31 это и есть «скорость» упрощённого экрана — без ручного замера.
      */
     private fun updateLiveRate() {
         val s = binding.simple
         val on = lastOrbState == PowerOrbView.STATE_ON || lastOrbState == PowerOrbView.STATE_ERROR
         if (!on) {
             trafficSample = null
-            if (s.simpleSpeedNow.visibility != View.GONE) s.simpleSpeedNow.visibility = View.GONE
+            if (s.simpleRate.visibility != View.GONE) s.simpleRate.visibility = View.GONE
             return
         }
         val uid = android.os.Process.myUid()
         val rx = android.net.TrafficStats.getUidRxBytes(uid)
         val tx = android.net.TrafficStats.getUidTxBytes(uid)
         if (rx < 0L || tx < 0L) {
-            s.simpleSpeedNow.visibility = View.GONE
+            s.simpleRate.visibility = View.GONE
             return
         }
         val t = android.os.SystemClock.elapsedRealtime()
@@ -3759,8 +4221,9 @@ class MainActivity : AppCompatActivity() {
         // Байты за миллисекунды × 8 = килобиты в секунду.
         val down = ((rx - prev.second).coerceAtLeast(0L) * 8L / dt).toInt()
         val upRate = ((tx - prev.third).coerceAtLeast(0L) * 8L / dt).toInt()
-        s.simpleSpeedNow.text = getString(R.string.simple_speed_now, SpeedTest.human(down), SpeedTest.human(upRate))
-        s.simpleSpeedNow.visibility = View.VISIBLE
+        val text = getString(R.string.simple_rate, SpeedTest.human(down), SpeedTest.human(upRate))
+        if (s.simpleRate.text.toString() != text) s.simpleRate.text = text
+        s.simpleRate.visibility = View.VISIBLE
     }
 
     /** «00:12:34» от начала текущей сессии (время помнит сервис — переживает перезапуск экрана). */
@@ -3866,17 +4329,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Шторка «Приложения»: режим (все / только выбранные / все, кроме выбранных) и список с
-     * иконками и поиском. До «Сохранить» ничего не меняется; сохранение при включённом туннеле
-     * переподключает его — список приложений задаётся при подъёме туннеля и на лету не меняется.
+     * Шторка «Туннелирование» (с 1.10.31; была «Приложения»): сверху — приложения, сайты или
+     * списки. Приложения: все / только выбранные / все, кроме выбранных, — список с иконками и
+     * поиском. Сайты: свои домены, адреса и подсети. Списки: категории галочками. До «Сохранить»
+     * ничего не меняется; сохранение собирает адреса и при включённом туннеле переподключает его —
+     * список приложений и маршруты задаются при подъёме туннеля.
      */
     private fun showAppsSheetUnsafe() {
         val dialog = com.google.android.material.bottomsheet.BottomSheetDialog(this)
         val sheet = dev.warpscout.app.databinding.SheetAppsBinding.inflate(layoutInflater)
-        val startMode = prefs.appsMode
-        val startSelected = prefs.appsSelected
-        var mode = startMode
-        val selected = startSelected.toMutableSet()
+        val start = TunnelChoice(
+            appsMode = prefs.appsMode,
+            apps = prefs.appsSelected,
+            routes = prefs.routesMode,
+            sites = prefs.tunnelSites,
+            block = prefs.allowBlockIds,
+        )
+        var mode = start.appsMode
+        val selected = start.apps.toMutableSet()
         var apps: List<AppEntry> = appEntries
         val icons = HashMap<String, android.graphics.drawable.Drawable?>()
         var visibleApps: List<AppEntry> = emptyList()
@@ -3918,7 +4388,7 @@ class MainActivity : AppCompatActivity() {
             visibleApps = if (needsList) visibleList() else emptyList()
             adapter.notifyDataSetChanged()
             sheet.appsCount.text = if (apps.isEmpty()) getString(R.string.sheet_apps_loading)
-            else getString(R.string.sheet_apps_count, selected.size)
+            else getString(R.string.sheet_apps_count, selected.size) + otherProfileNote()
         }
 
         sheet.appsList.adapter = adapter
@@ -3927,7 +4397,7 @@ class MainActivity : AppCompatActivity() {
         sheet.appsList.setOnItemClickListener { _, _, position, _ ->
             val app = visibleApps.getOrNull(position) ?: return@setOnItemClickListener
             if (!selected.add(app.pkg)) selected.remove(app.pkg)
-            sheet.appsCount.text = getString(R.string.sheet_apps_count, selected.size)
+            sheet.appsCount.text = getString(R.string.sheet_apps_count, selected.size) + otherProfileNote()
             adapter.notifyDataSetChanged()
         }
         sheet.appsModeGroup.check(
@@ -3946,10 +4416,80 @@ class MainActivity : AppCompatActivity() {
             refresh()
         }
         sheet.appsSearch.doAfterTextChanged { refresh() }
+
+        // Что настраиваем: приложения, сайты или списки. Открываем там, что сейчас действует.
+        fun showKind(kind: Int) {
+            sheet.sheetPanelApps.visibility = if (kind == KIND_APPS) View.VISIBLE else View.GONE
+            sheet.sheetPanelSites.visibility = if (kind == KIND_SITES) View.VISIBLE else View.GONE
+            sheet.sheetPanelLists.visibility = if (kind == KIND_LISTS) View.VISIBLE else View.GONE
+        }
+        val startKind = when (start.routes) {
+            3 -> KIND_SITES
+            2 -> KIND_LISTS
+            else -> KIND_APPS
+        }
+        sheet.sheetKindGroup.check(
+            when (startKind) {
+                KIND_SITES -> R.id.sheetKindSites
+                KIND_LISTS -> R.id.sheetKindLists
+                else -> R.id.sheetKindApps
+            }
+        )
+        showKind(startKind)
+        sheet.sheetKindGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            showKind(
+                when (checkedId) {
+                    R.id.sheetKindSites -> KIND_SITES
+                    R.id.sheetKindLists -> KIND_LISTS
+                    else -> KIND_APPS
+                }
+            )
+        }
+
+        // Сайты и списки — взаимоисключающие режимы маршрутов: включили одно — другое выключается.
+        sheet.sheetSites.setText(start.sites)
+        sheet.sheetSitesOn.isChecked = start.routes == 3
+        sheet.sheetListsOn.isChecked = start.routes == 2
+        sheet.sheetSitesOn.setOnCheckedChangeListener { _, on -> if (on) sheet.sheetListsOn.isChecked = false }
+        sheet.sheetListsOn.setOnCheckedChangeListener { _, on -> if (on) sheet.sheetSitesOn.isChecked = false }
+        // Вписали первый сайт — значит, хотят именно их: переключатель включается сам.
+        var sitesWereBlank = start.sites.isBlank()
+        sheet.sheetSites.doAfterTextChanged { text ->
+            val blank = text?.toString().isNullOrBlank()
+            if (sitesWereBlank && !blank) sheet.sheetSitesOn.isChecked = true
+            sitesWereBlank = blank
+        }
+        val blockChecks = LinkedHashMap<String, MaterialCheckBox>()
+        dev.warpscout.core.lists.AllowLists.bySide(dev.warpscout.core.lists.ListSide.BLOCK).forEach { list ->
+            val cb = MaterialCheckBox(this).apply {
+                text = list.title
+                isChecked = list.id in start.block
+            }
+            cb.setOnClickListener { if (cb.isChecked) sheet.sheetListsOn.isChecked = true }
+            blockChecks[list.id] = cb
+            sheet.sheetListsBox.addView(cb)
+        }
+        runCatching { sheet.sheetListsScroll.isNestedScrollingEnabled = true }
+
         sheet.appsCancel.setOnClickListener { dialog.dismiss() }
         sheet.appsSave.setOnClickListener {
+            val routes = when {
+                sheet.sheetSitesOn.isChecked -> 3
+                sheet.sheetListsOn.isChecked -> 2
+                // Выключили «только сайты/списки» — снова все сайты; «кроме российских» не трогаем.
+                start.routes == 2 || start.routes == 3 -> 0
+                else -> start.routes
+            }
+            val now = TunnelChoice(
+                appsMode = mode,
+                apps = selected.toSet(),
+                routes = routes,
+                sites = sheet.sheetSites.text?.toString().orEmpty(),
+                block = blockChecks.filter { it.value.isChecked }.keys.toSet(),
+            )
             dialog.dismiss()
-            saveAppsFromSheet(mode, selected.toSet(), startMode, startSelected)
+            saveTunnelSheet(now, start)
         }
         refresh()
         // Список приложений мог ещё не прочитаться (его читаем в фоне при открытии экрана).
@@ -3969,38 +4509,245 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    /** «Сохранить» в шторке приложений: записать выбор и, если туннель включён, переподключить. */
-    private fun saveAppsFromSheet(mode: Int, selected: Set<String>, startMode: Int, startSelected: Set<String>) {
-        if (mode == startMode && selected == startSelected) {
+    /** Выбор в шторке «Туннелирование»: приложения + режим маршрутов + свои сайты + списки. */
+    private data class TunnelChoice(
+        val appsMode: Int,
+        val apps: Set<String>,
+        val routes: Int,
+        val sites: String,
+        val block: Set<String>,
+    )
+
+    /**
+     * «Сохранить» в шторке: записать выбор, показать то же на вкладке «Туннелирование» и применить —
+     * адреса сайтов соберутся сами, при включённом туннеле он переподключится.
+     */
+    private fun saveTunnelSheet(now: TunnelChoice, start: TunnelChoice) {
+        if (now == start) {
             banner(getString(R.string.apps_unchanged))
             return
         }
-        prefs.appsMode = mode
-        prefs.appsSelected = selected
+        prefs.appsMode = now.appsMode
+        // Только то, что изменили в шторке: пока она была открыта, набор по умолчанию мог отметить
+        // новое приложение — его не теряем. Снятые руками приложения из набора больше не отмечаем.
+        val removed = start.apps - now.apps
+        val added = now.apps - start.apps
+        prefs.appsSelected = (prefs.appsSelected - removed) + added
+        removed.forEach { noteAppTick(it, checked = false) }
+        added.forEach { noteAppTick(it, checked = true) }
+        prefs.tunnelSites = now.sites
+        if (now.block != start.block) prefs.allowBlockIds = now.block
+        prefs.routesMode = now.routes
         TunnelDebug.stage(
-            "приложения (упрощённый экран): " + when (mode) {
-                Prefs.APPS_ONLY -> "только выбранные (${selected.size})"
-                Prefs.APPS_EXCEPT -> "все, кроме ${selected.size}"
-                else -> "все через туннель"
-            }
+            "туннелирование (упрощённый экран): " + when (now.appsMode) {
+                Prefs.APPS_ONLY -> "только выбранные приложения (${now.apps.size})"
+                Prefs.APPS_EXCEPT -> "все приложения, кроме ${now.apps.size}"
+                else -> "все приложения"
+            } + " · " + prefs.routesModeName()
         )
-        // Вкладка «Приложения» расширенного режима должна показывать то же самое. Её слушатель на
-        // выставление кодом не реагирует (иначе была бы плашка «изменено, не применено»).
+        // Вкладка «Туннелирование» расширенного вида должна показывать то же самое: «Сохранить и
+        // применить» записывает настройки с экрана, и старый вид затёр бы выбор из шторки. Её
+        // слушатели на выставление кодом не реагируют (иначе была бы плашка «изменено»).
         runCatching {
             suppressSettingsReconnect = true
-            binding.appsGroup.check(appsButtonId(mode))
+            binding.appsGroup.check(appsButtonId(now.appsMode))
             rebuildAppsList()
             updateAppsState()
-        }
+            binding.editTunnelSites.setText(now.sites)
+            binding.spinnerRoutes.setSelection(now.routes)
+            buildListsChecks()
+            binding.tunnelKindGroup.check(
+                when (now.routes) {
+                    3 -> R.id.btnKindSites
+                    2 -> R.id.btnKindLists
+                    else -> R.id.btnKindApps
+                }
+            )
+            refreshRoutesState()
+            updateSitesState()
+            updateTunnelSummary()
+        }.onFailure { t -> TunnelDebug.error("туннелирование: вкладка не обновилась — " + SafeMode.describe(t)) }
         suppressSettingsReconnect = false
-        if (tunnel.supported && (tunnel.isUp || tunnel.active)) {
-            banner(getString(R.string.apps_saved_reconnect))
-            saveAndApply("приложения")
-        } else {
-            banner(getString(R.string.apps_saved))
-        }
+        applyWithRoutes(
+            "туннелирование",
+            upText = getString(R.string.tunneling_saved_reconnect),
+            downText = getString(R.string.tunneling_saved),
+        )
         updateSimple()
     }
+
+    /**
+     * Карточка «Туннелирование» упрощённого экрана: крупно — какие приложения, мелко — какие сайты.
+     * Нажатие открывает шторку с теми же тремя разделами.
+     */
+    private fun renderTunnelCard() {
+        val s = binding.simple
+        val selected = prefs.appsSelected.size
+        val value = when {
+            prefs.appsMode == Prefs.APPS_ONLY && selected > 0 -> getString(R.string.simple_tun_apps_only, selected)
+            prefs.appsMode == Prefs.APPS_EXCEPT && selected > 0 -> getString(R.string.simple_tun_apps_except, selected)
+            else -> getString(R.string.simple_tun_apps_all)
+        }
+        val sitesCount = SiteList.parse(prefs.tunnelSites).total
+        val sub = when (prefs.routesMode) {
+            1 -> getString(R.string.simple_tun_sites_preset)
+            2 -> getString(R.string.simple_tun_sites_lists)
+            3 -> if (sitesCount > 0) getString(R.string.simple_tun_sites_mine, sitesCount)
+            else getString(R.string.simple_tun_sites_all)
+            else -> getString(R.string.simple_tun_sites_all)
+        }
+        if (s.simpleTunnelValue.text.toString() != value) s.simpleTunnelValue.text = value
+        if (s.simpleTunnelSub.text.toString() != sub) s.simpleTunnelSub.text = sub
+    }
+
+    // ------------------------------------------------ обновления (с 1.10.31)
+
+    /** Проверка или скачивание идёт — второй раз не запускаем. */
+    private var updateBusy = false
+
+    /** Скачанное обновление ждёт разрешения «Установка неизвестных приложений». */
+    private var pendingInstall: File? = null
+
+    /**
+     * «Проверить обновления»: последний релиз на GitHub. Есть новее (или свежая пересборка той же
+     * версии) — спрашиваем, скачать ли; нет — так и говорим. Только по нажатию.
+     */
+    private fun checkForUpdate() {
+        if (updateBusy) {
+            banner(getString(R.string.update_busy))
+            return
+        }
+        updateBusy = true
+        banner(getString(R.string.update_checking))
+        Thread {
+            val result = runCatching {
+                Updater.check(BuildConfig.VERSION_NAME, BuildConfig.BUILD_REV, BuildConfig.FLAVOR)
+            }
+            runOnUiThread {
+                updateBusy = false
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                runCatching {
+                    result.onSuccess { r ->
+                        when (r) {
+                            is Updater.Check.Latest -> banner(getString(R.string.update_latest, r.version))
+                            is Updater.Check.NoAsset ->
+                                banner(getString(R.string.update_no_asset, r.tag, r.want), error = true)
+                            is Updater.Check.Newer -> offerUpdate(
+                                r.release,
+                                getString(R.string.update_available_title, r.release.version),
+                                getString(R.string.update_available_msg, BuildConfig.VERSION_NAME, sizeText(r.release.size))
+                            )
+                            is Updater.Check.Rebuild -> offerUpdate(
+                                r.release,
+                                getString(R.string.update_rebuild_title, r.release.version),
+                                getString(R.string.update_rebuild_msg, BuildConfig.BUILD_REV, r.remoteRev, sizeText(r.release.size))
+                            )
+                        }
+                    }.onFailure { t ->
+                        TunnelDebug.stage("обновления: проверка не прошла — ${t.message ?: t.javaClass.simpleName}")
+                        banner(getString(R.string.update_check_failed, t.message ?: t.javaClass.simpleName), error = true)
+                    }
+                }.onFailure { t -> TunnelDebug.error("обновления: " + SafeMode.describe(t)) }
+            }
+        }.apply { isDaemon = true; name = "warpscout-update-check" }.start()
+    }
+
+    private fun sizeText(bytes: Long): String =
+        if (bytes <= 0L) "APK" else String.format(java.util.Locale.US, "%.1f МБ", bytes / 1_048_576.0)
+
+    private fun offerUpdate(release: Updater.Release, title: String, message: String) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton(R.string.update_download) { _, _ -> downloadUpdate(release) }
+            .setNegativeButton(R.string.update_later, null)
+            .show()
+    }
+
+    private fun downloadUpdate(release: Updater.Release) {
+        if (updateBusy) {
+            banner(getString(R.string.update_busy))
+            return
+        }
+        updateBusy = true
+        banner(getString(R.string.update_downloading, 0))
+        TunnelDebug.stage("обновления: скачиваю ${release.apkName}")
+        val dir = File(cacheDir, "updates")
+        Thread {
+            var lastPct = -1
+            val result = runCatching {
+                Updater.download(release, dir) { pct ->
+                    // Плашку обновляем шагами по 5 %, а не на каждый пакет.
+                    if (pct >= 0 && pct / 5 != lastPct / 5) {
+                        lastPct = pct
+                        runOnUiThread {
+                            if (!isFinishing && !isDestroyed) banner(getString(R.string.update_downloading, pct))
+                        }
+                    }
+                }
+            }
+            runOnUiThread {
+                updateBusy = false
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                runCatching {
+                    result.onSuccess { file ->
+                        TunnelDebug.stage("обновления: скачано ${file.name}, открываю установщик")
+                        installUpdate(file)
+                    }.onFailure { t ->
+                        TunnelDebug.stage("обновления: не скачалось — ${t.message ?: t.javaClass.simpleName}")
+                        banner(
+                            if (t is Updater.BadHash) getString(R.string.update_bad_hash)
+                            else getString(R.string.update_failed, t.message ?: t.javaClass.simpleName),
+                            error = true
+                        )
+                    }
+                }.onFailure { t -> TunnelDebug.error("обновления: " + SafeMode.describe(t)) }
+            }
+        }.apply { isDaemon = true; name = "warpscout-update-download" }.start()
+    }
+
+    /**
+     * Отдать файл установщику Android. Ставить приложения из WarpScout Android разрешает только
+     * после отдельного согласия: без него открываем настройки, а установка продолжится, когда
+     * человек вернётся (см. [resumePendingInstall]).
+     */
+    private fun installUpdate(file: File) {
+        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+            pendingInstall = file
+            updatePrefs().edit().putString("pending", file.absolutePath)
+                .putLong("pendingAt", System.currentTimeMillis()).apply()
+            banner(getString(R.string.update_need_permission))
+            runCatching {
+                startActivity(
+                    Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
+                )
+            }.onFailure { t -> banner(getString(R.string.update_failed, t.message ?: t.javaClass.simpleName), error = true) }
+            return
+        }
+        pendingInstall = null
+        updatePrefs().edit().clear().apply()
+        runCatching { startActivity(Updater.installIntent(this, file)) }
+            .onFailure { t -> banner(getString(R.string.update_failed, t.message ?: t.javaClass.simpleName), error = true) }
+    }
+
+    /**
+     * Вернулись из настроек «Установка неизвестных приложений»: разрешили — ставим скачанное.
+     * Путь к файлу помним и на диске: после смены разрешения Android может перезапустить процесс.
+     */
+    private fun resumePendingInstall() {
+        runCatching {
+            val sp = updatePrefs()
+            val file = pendingInstall ?: sp.getString("pending", null)?.let { File(it) }
+                ?.takeIf { System.currentTimeMillis() - sp.getLong("pendingAt", 0L) < 30 * 60_000L }
+                ?: return
+            if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) return
+            pendingInstall = null
+            sp.edit().clear().apply()
+            if (file.exists()) installUpdate(file)
+        }
+    }
+
+    private fun updatePrefs() = getSharedPreferences("warpscout_update", MODE_PRIVATE)
 
     // ------------------------------------------------ тема оформления
 
@@ -4087,6 +4834,11 @@ class MainActivity : AppCompatActivity() {
         const val TAB_START = 0
         const val TAB_CONFIG = 2
         const val TAB_LOG = 4
+
+        /** Что настраивается на вкладке «Туннелирование» и в шторке (с 1.10.31). */
+        const val KIND_APPS = 0
+        const val KIND_SITES = 1
+        const val KIND_LISTS = 2
 
         /** Сколько держится панель «успех». */
         const val BANNER_MS = 8000L

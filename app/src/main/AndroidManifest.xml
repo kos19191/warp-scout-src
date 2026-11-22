@@ -18,12 +18,10 @@
          в Google Play такое разрешение требует отдельного обоснования. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
-    <!-- Расход по приложениям (NetworkStatsManager). Разрешение выдаётся вручную в настройках:
-         без него Android не отдаёт статистику ни одному приложению. -->
-    <uses-permission
-        android:name="android.permission.PACKAGE_USAGE_STATS"
-        tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- «Обновления» (с 1.10.31): скачанный APK ставится поверх по нажатию — Android сам
+         спрашивает подтверждение. Без этого разрешения установщик даже не откроется. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- Подбор занимает минуты: пока он идёт, процесс держится foreground-сервисом, иначе
          сворачивание экрана могло оборвать скан, ничего не сказав пользователю. -->

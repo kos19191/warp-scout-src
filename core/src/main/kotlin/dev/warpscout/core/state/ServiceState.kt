@@ -121,6 +121,17 @@ data class TunnelStatus(
      * секунде: «работает» теперь объявляется только после ответа через туннель.
      */
     val dataCheckAt: Long = 0L,
+    /**
+     * Второй выход в текущей сессии (с 1.10.31): [SECOND_OFF], [SECOND_STARTING], [SECOND_UP],
+     * [SECOND_FAILED]. По нему экран честно пишет «второй выход работает / не поднялся», а не
+     * гадает по настройкам.
+     */
+    val second: Int = SECOND_OFF,
+    /**
+     * Сервер второго выхода, на котором он сейчас работает или к которому подключается (с 1.10.31,
+     * автопоиск Proton Free): «NL-FREE#12». Пусто — свой сервер из конфига.
+     */
+    val secondPeer: String = "",
 ) {
 
     val isStarting: Boolean get() = phase == PHASE_STARTING || phase == PHASE_RECONNECTING
@@ -162,6 +173,8 @@ data class TunnelStatus(
         "speedFull" to JsonVal.bool(speedFull),
         "speedRunningSince" to JsonVal.num(speedRunningSince),
         "dataCheckAt" to JsonVal.num(dataCheckAt),
+        "second" to JsonVal.num(second),
+        "secondPeer" to JsonVal.str(secondPeer),
     ).render()
 
     companion object {
@@ -223,6 +236,18 @@ data class TunnelStatus(
         /** Не вышло: причина в `error`, ждать больше нечего. */
         const val PHASE_FAILED = 5
 
+        /** Второй выход в этой сессии не включён (или туннеля нет). */
+        const val SECOND_OFF = 0
+
+        /** Второй выход поднимается (ждёт основной туннель или рукопожатие своего сервера). */
+        const val SECOND_STARTING = 1
+
+        /** Второй выход работает: свой сервер ответил на рукопожатие. */
+        const val SECOND_UP = 2
+
+        /** Второй выход не поднялся или упал — его сайты идут через основной туннель. */
+        const val SECOND_FAILED = 3
+
         fun fromJson(text: String?): TunnelStatus? {
             if (text.isNullOrBlank()) return null
             val obj = runCatching { parseJson(text) as? JsonVal.Obj }.getOrNull() ?: return null
@@ -261,6 +286,8 @@ data class TunnelStatus(
                 speedFull = obj.bool("speedFull") ?: false,
                 speedRunningSince = obj.lng("speedRunningSince"),
                 dataCheckAt = obj.lng("dataCheckAt"),
+                second = obj.lng("second").toInt(),
+                secondPeer = obj.str("secondPeer").orEmpty(),
             )
         }
     }
@@ -322,6 +349,16 @@ data class ServiceSettings(
     val freezeReconnect: Boolean = true,
     /** В раздельном режиме отправлять запросы к DNS через туннель (см. SplitRoutes.withDns). */
     val dnsInTunnel: Boolean = true,
+    /**
+     * Второй выход — внутри основного туннеля (с 1.10.31): провайдер видит только WARP, а «голый»
+     * WireGuard до своего сервера в России часто режут. false — напрямую, как раньше.
+     */
+    val secondViaWarp: Boolean = true,
+    /**
+     * Серверы второго выхода по порядку перебора (с 1.10.31, автопоиск Proton Free): строки
+     * «имя|адрес|порт|ключ», см. ProtonFree.encode. Пусто — один сервер из конфига, как раньше.
+     */
+    val secondPeers: List<String> = emptyList(),
 ) {
 
     fun toJson(): String = JsonVal.obj(
@@ -341,6 +378,8 @@ data class ServiceSettings(
         "speedAuto" to JsonVal.bool(speedAuto),
         "freezeReconnect" to JsonVal.bool(freezeReconnect),
         "dnsInTunnel" to JsonVal.bool(dnsInTunnel),
+        "secondViaWarp" to JsonVal.bool(secondViaWarp),
+        "secondPeers" to JsonVal.arr(secondPeers.map { JsonVal.str(it) }),
     ).render()
 
     companion object {
@@ -375,6 +414,8 @@ data class ServiceSettings(
                 speedAuto = obj.bool("speedAuto") ?: true,
                 freezeReconnect = obj.bool("freezeReconnect") ?: true,
                 dnsInTunnel = obj.bool("dnsInTunnel") ?: true,
+                secondViaWarp = obj.bool("secondViaWarp") ?: true,
+                secondPeers = strings(obj, "secondPeers"),
             )
         }
     }

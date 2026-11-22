@@ -174,6 +174,13 @@ class VpnTunnelController(private val context: Context) : TunnelController {
 
     override fun requestSpeedTest() = WarpVpnService.requestSpeedTest(context)
 
+    override fun reloadSecondRoutes() {
+        // Сервис читает адреса из общего снимка настроек, а не из Prefs интерфейса: сначала его
+        // обновить, иначе сервис перечитал бы прежние адреса.
+        runCatching { dev.warpscout.app.status.ServiceSettingsStore.syncFromPrefs(context) }
+        WarpVpnService.reloadSecondRoutes(context)
+    }
+
     // Причину отказа называет сервис, а живёт она в снимке его состояния: в процессе интерфейса
     // TunnelDebug.lastError почти всегда пуст, и вместо причины показывалось «нет ответа».
     override fun lastError(): String? = TunnelState.error ?: TunnelDebug.lastError

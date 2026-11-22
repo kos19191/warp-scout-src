@@ -160,6 +160,39 @@ class PacketQueueIn(private val name: String) : InputStream() {
         closed = true
     }
 
+    /**
+     * Отдельный читатель очереди (с 1.10.31): его закрытие не закрывает саму очередь. Второй выход
+     * меняет сервер (автопоиск Proton Free) — data plane прежнего сервера при остановке закрывает
+     * свой вход, и без этого очередь закрылась бы вместе с ним: диспетчер вернул бы сайты второго
+     * выхода в WARP на время смены сервера.
+     */
+    fun view(): InputStream = object : InputStream() {
+        @Volatile
+        private var viewClosed = false
+
+        override fun read(): Int {
+            val buf = ByteArray(1)
+            val n = read(buf, 0, 1)
+            return if (n <= 0) -1 else buf[0].toInt() and 0xFF
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            while (true) {
+                if (viewClosed || (closed && queue.isEmpty())) return -1
+                val packet = queue.poll(250, TimeUnit.MILLISECONDS) ?: continue
+                // Вид закрыли, пока ждали: пакет теряется (TCP повторит), очередь — нет.
+                if (viewClosed) return -1
+                val n = minOf(len, packet.size)
+                System.arraycopy(packet, 0, b, off, n)
+                return n
+            }
+        }
+
+        override fun close() {
+            viewClosed = true
+        }
+    }
+
     override fun toString(): String = "PacketQueueIn($name)"
 }
 
@@ -183,7 +216,7 @@ class SharedPacketOut(private val out: OutputStream) : OutputStream() {
  */
 class TunDispatcher(
     private val tun: InputStream,
-    private val router: ExitRouter,
+    router: ExitRouter,
     private val lanes: List<PacketQueueIn>,
     /**
      * Ждать данных в tun (см. `DataPlane.tunReady`). Дескриптор tun неблокирующий: пустое чтение
@@ -196,6 +229,13 @@ class TunDispatcher(
 
     @Volatile
     private var stopped = false
+
+    /**
+     * Таблица «адрес → выход». Меняется на лету (с 1.10.31): адреса сайтов второго выхода
+     * обновляются раз в сутки, и ради новой таблицы рвать работающий туннель незачем.
+     */
+    @Volatile
+    var router: ExitRouter = router
 
     var sentPrimary: Long = 0L
         private set

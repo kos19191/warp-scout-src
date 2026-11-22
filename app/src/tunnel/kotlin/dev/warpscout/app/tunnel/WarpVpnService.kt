@@ -20,6 +20,7 @@ import dev.warpscout.core.config.SplitRoutes
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.crypto.Crypto
 import dev.warpscout.core.junk.JunkLibrary
+import dev.warpscout.core.lists.ProtonFree
 import dev.warpscout.core.model.AddrFamily
 import dev.warpscout.core.model.Endpoint
 import dev.warpscout.core.model.JunkChunk
@@ -42,6 +43,14 @@ import dev.warpscout.core.tunnel.PacketQueueIn
 import dev.warpscout.core.tunnel.SharedPacketOut
 import dev.warpscout.core.tunnel.TunDispatcher
 import dev.warpscout.core.tunnel.SocketUdpChannel
+import dev.warpscout.core.tunnel.AwgChannel
+import dev.warpscout.core.tunnel.ExitNat
+import dev.warpscout.core.tunnel.InnerUdpChannel
+import dev.warpscout.core.tunnel.NatPacketIn
+import dev.warpscout.core.tunnel.NatPacketOut
+import dev.warpscout.core.tunnel.PacketMath
+import dev.warpscout.core.tunnel.TapPacketOut
+import dev.warpscout.core.tunnel.UdpChannel
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -202,6 +211,11 @@ class WarpVpnService : VpnService() {
             energyText().let { if (it.isEmpty()) "" else ", $it" }
         val threads = threadCpuLine()
         val tail = if (threads.isBlank()) "" else ", $threads"
+        // Тихий подбор для Wi-Fi проверяем здесь: строка статистики пишется раз в ~5 минут и при
+        // погашенном экране. Сама проверка — в своём потоке: этот поток — таймер data plane.
+        if (screenOffAt > 0L && !quietScanRunning) {
+            Thread({ runCatching { maybeQuietScan() } }, "warpscout-quiet-check").apply { isDaemon = true }.start()
+        }
         return "$base, $env$tail"
     }
 
@@ -697,6 +711,10 @@ class WarpVpnService : VpnService() {
             handleSpeedRequest(startId)
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_SECOND_ROUTES) {
+            handleSecondRoutes(startId)
+            return START_NOT_STICKY
+        }
         // ГЛАВНОЕ ПРАВИЛО ANDROID: после startForegroundService() сервис обязан вызвать
         // startForeground() примерно за 5 секунд, иначе процесс убивают с
         // ForegroundServiceDidNotStartInTimeException — без записи в журнал, и туннель умирает
@@ -982,7 +1000,10 @@ class WarpVpnService : VpnService() {
 
         // Второй выход: другой сервер для выбранных подсетей (страна/провайдер на выбор).
         // Внутри WARP выбрать регион нельзя, поэтому «регион для сайта» = второй туннель рядом.
-        val secondCfg = secondConfig()
+        // С 1.10.31 серверов второго выхода может быть несколько (автопоиск Proton Free): начинаем с
+        // первого по порядку, дальше перебирает поток второго выхода (см. ниже).
+        val secondList = secondCandidates(secondConfig())
+        val secondCfg = secondList.firstOrNull()?.second
         val router = secondCfg?.let { ExitRouter.of(ExitRouter.parse(serviceSettings().secondCidrs)) }
             ?.takeIf { !it.isEmpty } ?: ExitRouter.EMPTY
         val multiExit = secondCfg != null && !router.isEmpty
@@ -991,13 +1012,17 @@ class WarpVpnService : VpnService() {
         TunnelDebug.stage(if (multiExit) "второй выход включён" else "второй выход выключен")
 
         val builder = builderFor(cfg)
-        if (multiExit) {
+        if (multiExit && !isFullTunnel(cfg)) {
             // В split-режиме подсети второго выхода должны попадать в tun, иначе они уйдут мимо.
+            // При «весь трафик» они и так в tun: тысячи лишних маршрутов не добавляем (с 1.10.31
+            // адресов второго выхода стало много — сайты из списков «заблокировано для РФ»).
             router.cidrs.forEach { cidr ->
                 val host = cidr.substringBefore('/').trim()
                 val bits = cidr.substringAfter('/', "").trim().toIntOrNull()
                 if (host.isNotEmpty() && bits != null) runCatching { builder.addRoute(host, bits) }
             }
+        }
+        if (multiExit) {
             TunnelDebug.stage("второй выход: ${router.size} подсетей, сервер ${secondCfg?.endpoint?.render()}")
         }
 
@@ -1041,16 +1066,53 @@ class WarpVpnService : VpnService() {
 
         // Со вторым выходом tun читает диспетчер, а каждый data plane читает свою очередь.
         // Без второго выхода — ровно прежнее поведение (прямые потоки), регрессии быть не должно.
-        val secondSock = if (multiExit && secondCfg != null) openSecondSocket(secondCfg) else null
+        // С 1.10.31 второй выход по умолчанию идёт внутри WARP (см. planSecondExit), тогда своего
+        // сокета у него нет: его датаграммы уходят пакетами в основной туннель.
+        val secondPlan = if (multiExit && secondCfg != null) planSecondExit(cfg, secondCfg) else null
+        val secondSock = if (secondPlan != null && !secondPlan.inner && secondCfg != null) {
+            openSecondSocket(secondCfg, secondPlan.remote)
+        } else {
+            null
+        }
+        val secondReady = secondPlan != null && (secondPlan.inner || secondSock != null)
+        // Экрану — честно: второй выход в этой сессии поднимается, не поднялся или не включён.
+        TunnelState.second = when {
+            !multiExit -> TunnelStatus.SECOND_OFF
+            secondReady -> TunnelStatus.SECOND_STARTING
+            else -> TunnelStatus.SECOND_FAILED
+        }
         val rawIn = FileInputStream(pfd.fileDescriptor)
         // Ожидание данных в tun — poll() по его дескриптору вместо паузы 20 мс между пустыми
         // чтениями (см. DataPlane.tunReady и waitTunReadable).
         val tunFd = pfd.fileDescriptor
         val tunWait: (Long) -> Boolean = { ms -> waitTunReadable(tunFd, ms) }
         val rawOut = FileOutputStream(pfd.fileDescriptor)
-        val lanes = if (secondSock != null) listOf(PacketQueueIn("основной"), PacketQueueIn("второй")) else emptyList()
+        val lanes = if (secondReady) listOf(PacketQueueIn("основной"), PacketQueueIn("второй")) else emptyList()
         val tunOut: OutputStream = if (lanes.isEmpty()) rawOut else SharedPacketOut(rawOut)
         val tunIn: InputStream = if (lanes.isEmpty()) rawIn else lanes[0]
+        // Второй выход внутри WARP: его датаграммы — обычные пакеты основного туннеля (к адресу
+        // своего сервера), а ответы сервера основной туннель отдаёт ему, а не в tun.
+        val innerChannel = if (secondReady && secondPlan?.inner == true && secondPlan.local4 != null &&
+            secondPlan.remote4 != null && secondCfg != null
+        ) {
+            InnerUdpChannel(
+                inject = { packet -> lanes[0].offer(packet) },
+                localIp = secondPlan.local4,
+                remoteIp = secondPlan.remote4,
+                remotePort = secondCfg.endpoint.port,
+                maxPacket = cfg.mtu.coerceIn(576, 1420),
+            )
+        } else {
+            null
+        }
+        // Ответы своего сервера забирает текущий канал второго выхода: при автопоиске Proton (с
+        // 1.10.31) сервер меняется на ходу, а с ним — и канал.
+        val innerRef = java.util.concurrent.atomic.AtomicReference<InnerUdpChannel?>(innerChannel)
+        val primaryOut: OutputStream = if (innerChannel != null) {
+            TapPacketOut(tunOut) { packet, len -> innerRef.get()?.accept(packet, len) ?: false }
+        } else {
+            tunOut
+        }
         val splitter = if (lanes.isNotEmpty()) {
             TunDispatcher(rawIn, router, lanes, tunReady = tunWait) { line -> TunnelDebug.stage(line) }
         } else {
@@ -1067,7 +1129,7 @@ class WarpVpnService : VpnService() {
             // Остановка и смена сети будят его закрытием сокета, а не таймаутом.
             udp = SocketUdpChannel(socket, cfg.endpoint, 0),
             tunInput = tunIn,
-            tunOutput = tunOut,
+            tunOutput = primaryOut,
             config = cfg,
             // Пять инициаций с интервалом 400 мс: первая же обычно отвечает за доли секунды,
             // а если датаграмм потерялся — следующая уходит не через 1.5 с, а почти сразу.
@@ -1221,47 +1283,180 @@ class WarpVpnService : VpnService() {
 
         // Второй выход запускаем сразу после основного: он независим (своя сессия, свой rekey),
         // и его падение не должно ронять туннель — трафик просто продолжит идти через WARP.
-        val secondary = if (lanes.size > 1 && secondCfg != null && secondSock != null) {
-            DataPlane(
-                udp = SocketUdpChannel(secondSock, secondCfg.endpoint, 0),
-                tunInput = lanes[1],
-                tunOutput = tunOut,
-                config = secondCfg,
-                settings = NetSettings(attempts = 3, timeoutMs = 1000, retryEveryMs = 500, junkPacketsBeforeHandshake = 1),
-                log = { line ->
-                    when {
-                        line.contains("туннель поднят") ->
-                            TunnelDebug.ok("второй выход поднят: ${secondCfg.endpoint.render()}")
-                        line.contains("не прошёл") || line.contains("невозможен") ->
-                            // С 1.10.26 метка времени в инициации — стандартная TAI64N. Свой сервер
-                            // помнит самую большую метку от прошлых версий (она была записана не тем
-                            // порядком байт) и, пока не перезапущен, новые инициации считает повтором.
-                            TunnelDebug.error(
-                                "второй выход: $line",
-                                "проверь второй конфиг и его endpoint; если сервер перестал отвечать сразу после " +
-                                    "обновления до 1.10.26 — перезапусти на нём WireGuard/AmneziaWG"
-                            )
-                        else -> TunnelDebug.stage("второй: $line")
+        //
+        // С 1.10.31 серверов может быть несколько (автопоиск Proton Free): не ответил или сессия
+        // умерла — берётся следующий. Очередь второго выхода на время смены не закрывается, и сайты
+        // не уходят в WARP. Один сервер (свой конфиг) — как раньше, только с одним повтором.
+        val lane2 = lanes.getOrNull(1)
+        if (lane2 != null && secondCfg != null && secondPlan != null && (innerChannel != null || secondSock != null)) {
+            val inner = innerChannel != null
+
+            // Data plane одного сервера. Канал до него — внутри WARP или свой сокет; поверх —
+            // AmneziaWG, если в конфиге свои типы пакетов (H1–H4) или добавки (S1–S4).
+            fun buildSecond(plan: SecondPlan, candCfg: WarpConfig, label: String, base: UdpChannel): DataPlane {
+                val udp2: UdpChannel = plan.awg?.let { params ->
+                    AwgChannel(base, params, plan.localPublic, plan.peerPublic)
+                } ?: base
+                val nat = plan.nat
+                var self: DataPlane? = null
+                val dp = DataPlane(
+                    udp = udp2,
+                    // Адрес отправителя — из второго конфига: сервер принимает только тот адрес, что
+                    // сам выдал. Пакет IPv6 при сервере без IPv6 не теряется молча — приложению сразу
+                    // уходит отказ, и оно повторяет по IPv4. Читаем через «вид» очереди: остановка
+                    // этого сервера не закрывает саму очередь (см. PacketQueueIn.view).
+                    tunInput = NatPacketIn(lane2.view(), nat, plan.mss) { reject ->
+                        runCatching { tunOut.write(reject, 0, reject.size) }
+                    },
+                    tunOutput = NatPacketOut(tunOut, nat, plan.mss),
+                    config = candCfg,
+                    // Внутри WARP ответ идёт дольше (через Cloudflare до своего сервера): попыток больше.
+                    settings = if (inner) {
+                        NetSettings(attempts = 5, timeoutMs = 2000, retryEveryMs = 800, junkPacketsBeforeHandshake = 1)
+                    } else {
+                        NetSettings(attempts = 3, timeoutMs = 1000, retryEveryMs = 500, junkPacketsBeforeHandshake = 1)
+                    },
+                    // Сессия умерла (rekey не проходит, ответов нет) — останавливаем её: перебор
+                    // возьмёт этот же сервер ещё раз или следующий. Раньше она числилась «поднятой»
+                    // до переподключения всего туннеля, а сайты второго выхода не открывались.
+                    onFatal = { reason ->
+                        TunnelDebug.stage("второй выход ($label): $reason")
+                        runCatching { self?.stop() }
+                    },
+                    log = { line ->
+                        when {
+                            line.contains("туннель поднят") -> {
+                                TunnelDebug.ok("второй выход поднят: $label")
+                                if (myEpoch == epoch.get()) TunnelState.second = TunnelStatus.SECOND_UP
+                            }
+                            line.contains("не прошёл") || line.contains("невозможен") ->
+                                // С 1.10.26 метка времени в инициации — стандартная TAI64N. Свой сервер
+                                // помнит самую большую метку от прошлых версий (она была записана не тем
+                                // порядком байт) и, пока не перезапущен, новые инициации считает повтором.
+                                TunnelDebug.error(
+                                    "второй выход ($label): $line",
+                                    if (secondList.size > 1) "беру следующий сервер"
+                                    else "проверь второй конфиг и его endpoint; если сервер перестал отвечать сразу после " +
+                                        "обновления до 1.10.26 — перезапусти на нём WireGuard/AmneziaWG"
+                                )
+                            else -> TunnelDebug.stage("второй: $line")
+                        }
+                    }
+                )
+                self = dp
+                return dp
+            }
+
+            // Сколько неудач подряд терпим: при списке серверов — до восьми разных, при своём
+            // конфиге — две попытки.
+            val maxFails = if (secondList.size > 1) minOf(secondList.size, 8) else 2
+            val secondThread = Thread {
+                // Внутри WARP второму выходу нужен работающий основной туннель: его инициации
+                // идут через WARP. Пока WARP не ответил, они пропали бы впустую.
+                if (inner) {
+                    val primaryUp = runCatching { handshake.await(30, TimeUnit.SECONDS) }.getOrDefault(false)
+                    if (!primaryUp || myEpoch != epoch.get() || stopped.get()) {
+                        runCatching { lane2.close() }
+                        TunnelDebug.stage("второй выход не запущен: основной туннель не поднялся")
+                        if (myEpoch == epoch.get()) TunnelState.second = TunnelStatus.SECOND_FAILED
+                        return@Thread
                     }
                 }
-            )
-        } else {
-            null
-        }
-        if (secondary != null) {
-            val lane2 = lanes.getOrNull(1)
-            val secondThread = Thread {
-                val ok2 = runCatching { secondary.run() }.getOrDefault(false)
+                var index = 0
+                var fails = 0
+                var attempt = 0
+                var totalUp = 0L
+                var totalDown = 0L
+                while (alive()) {
+                    val (peerName, candCfg) = secondList[index % secondList.size]
+                    val label = peerName.ifBlank { candCfg.endpoint.render() }
+                    // Первая попытка — на том, что уже подготовлено; дальше канал каждый раз новый:
+                    // остановленный data plane свой канал закрыл.
+                    val plan: SecondPlan?
+                    val base: UdpChannel?
+                    if (attempt == 0) {
+                        plan = secondPlan
+                        base = innerChannel ?: secondSock?.let { SocketUdpChannel(it, candCfg.endpoint, 0) }
+                    } else {
+                        plan = planSecondExit(cfg, candCfg)?.takeIf { !inner || (it.local4 != null && it.remote4 != null) }
+                        base = when {
+                            plan == null -> null
+                            inner -> InnerUdpChannel(
+                                inject = { packet -> lanes[0].offer(packet) },
+                                localIp = plan.local4!!,
+                                remoteIp = plan.remote4!!,
+                                remotePort = candCfg.endpoint.port,
+                                maxPacket = cfg.mtu.coerceIn(576, 1420),
+                            ).also { innerRef.set(it) }
+                            else -> openSecondSocket(candCfg, plan.remote)?.let { sock ->
+                                val old = synchronized(life) {
+                                    val prev = secondSocket
+                                    secondSocket = sock
+                                    prev
+                                }
+                                runCatching { old?.close() }
+                                SocketUdpChannel(sock, candCfg.endpoint, 0)
+                            }
+                        }
+                    }
+                    attempt++
+                    var lived = 0L
+                    var wasUp = false
+                    if (plan != null && base != null) {
+                        val dp = buildSecond(plan, candCfg, label, base)
+                        val owns = synchronized(life) {
+                            if (alive()) {
+                                plane2 = dp
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        if (!owns) {
+                            runCatching { dp.stop() }
+                            break
+                        }
+                        TunnelState.secondPeer = peerName
+                        val startedAt = System.currentTimeMillis()
+                        runCatching { dp.run() }
+                        lived = System.currentTimeMillis() - startedAt
+                        wasUp = dp.handshakeOk
+                        totalUp += dp.bytesUp
+                        totalDown += dp.bytesDown
+                    }
+                    if (!alive()) break
+                    // Проработал хотя бы минуту — сервер живой, сессия просто кончилась: тот же сервер
+                    // ещё раз. Не ответил или умер сразу — следующий.
+                    if (wasUp && lived >= 60_000L) {
+                        fails = 0
+                    } else {
+                        fails++
+                        index++
+                    }
+                    if (fails >= maxFails) break
+                    TunnelState.second = TunnelStatus.SECOND_STARTING
+                    val next = secondList[index % secondList.size]
+                    val nextLabel = next.first.ifBlank { next.second.endpoint.render() }
+                    TunnelDebug.stage(
+                        if (wasUp) "второй выход: сессия на $label закончилась — подключаю $nextLabel"
+                        else "второй выход: $label не ответил — пробую $nextLabel"
+                    )
+                    try {
+                        Thread.sleep(if (wasUp) 2_000L else 500L)
+                    } catch (e: InterruptedException) {
+                        break
+                    }
+                }
                 // Очередь закрываем: диспетчер увидит это и вернёт подсети в основной туннель.
-                runCatching { lane2?.close() }
+                runCatching { lane2.close() }
+                if (alive()) TunnelState.second = TunnelStatus.SECOND_FAILED
                 TunnelDebug.stage(
-                    "второй выход остановлен: ${if (ok2) "закрыт" else "аварийно"}, " +
-                        "прошло ${secondary.bytesUp} вверх / ${secondary.bytesDown} вниз"
+                    "второй выход остановлен: прошло $totalUp вверх / $totalDown вниз" +
+                        (if (fails >= maxFails) " — серверы не ответили, сайты второго выхода идут через WARP" else "")
                 )
             }.apply { isDaemon = true; name = "warpscout-vpn-2" }
             val ownsSecond = synchronized(life) {
                 if (alive()) {
-                    plane2 = secondary
                     secondSocket = secondSock
                     worker2 = secondThread
                     secondThread.start()
@@ -1271,7 +1466,7 @@ class WarpVpnService : VpnService() {
                 }
             }
             if (!ownsSecond) {
-                runCatching { secondary.stop() }
+                runCatching { lane2.close() }
                 runCatching { secondSock?.close() }
             }
         } else {
@@ -1929,6 +2124,33 @@ class WarpVpnService : VpnService() {
     }
 
     /** Экран попросил замерить скорость (нажатие на «Скорость»). */
+    /**
+     * Адреса сайтов второго выхода обновились (раз в сутки, см. SecondRoutes в интерфейсе) —
+     * меняем таблицу на лету, не переподключая туннель. Если второй выход сейчас не работает,
+     * новые адреса просто подхватит следующее подключение.
+     */
+    private fun handleSecondRoutes(startId: Int) {
+        val splitter = dispatcher
+        val running = plane != null && worker?.isAlive == true && TunnelState.up
+        if (!running) {
+            idleStop(startId)
+            return
+        }
+        if (splitter == null) {
+            TunnelDebug.stage("адреса второго выхода обновлены — применятся при следующем подключении")
+            return
+        }
+        val router = runCatching { ExitRouter.of(ExitRouter.parse(serviceSettings().secondCidrs)) }.getOrNull()
+        if (router == null || router.isEmpty) return
+        splitter.router = router
+        val split = lastConfigText?.let { text -> runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull() }
+            ?.let { !isFullTunnel(it) } ?: false
+        TunnelDebug.stage(
+            "второй выход: адреса обновлены на лету — ${router.size} подсетей" +
+                if (split) " (новые адреса вне маршрутов туннеля заработают после переподключения)" else ""
+        )
+    }
+
     private fun handleSpeedRequest(startId: Int) {
         val running = plane != null && worker?.isAlive == true && TunnelState.up
         if (!running) {
@@ -2093,6 +2315,28 @@ class WarpVpnService : VpnService() {
         dev.warpscout.app.status.ServiceSettingsStore.read(this)
             ?: dev.warpscout.core.state.ServiceSettings()
 
+    /**
+     * Серверы второго выхода по порядку (с 1.10.31). Proton Free — список из настроек: ключ клиента
+     * тот же, меняются ключ и адрес сервера (см. ProtonFree). Иначе — один сервер из конфига.
+     * Имя пустое — свой сервер из конфига.
+     */
+    private fun secondCandidates(base: WarpConfig?): List<Pair<String, WarpConfig>> {
+        if (base == null) return emptyList()
+        val peers = serviceSettings().secondPeers.mapNotNull { ProtonFree.decode(it) }
+        val list = peers.mapNotNull { srv ->
+            runCatching {
+                srv.name to base.copy(
+                    endpoint = Endpoint(srv.ip, srv.port),
+                    account = base.account.copy(peerPublicB64 = srv.publicKey),
+                )
+            }.getOrNull()
+        }
+        if (list.isNotEmpty()) {
+            TunnelDebug.stage("второй выход: Proton Free, автопоиск — ${list.size} серверов, первый ${list.first().first}")
+        }
+        return list.ifEmpty { listOf("" to base) }
+    }
+
     /** Конфиг второго выхода (null — выключен или пустой). */
     private fun secondConfig(): WarpConfig? {
         val settings = serviceSettings()
@@ -2102,8 +2346,90 @@ class WarpVpnService : VpnService() {
         return runCatching { WgConf.toWarpConfig("второй выход", text) }.getOrNull()
     }
 
+    /**
+     * Как поднимать второй выход (с 1.10.31).
+     *
+     * [inner] — внутри основного туннеля (WARP): провайдер видит только WARP. [nat] — подмена
+     * адреса отправителя на адрес из второго конфига (без неё обычный сервер WireGuard молча
+     * отбрасывал наши пакеты: у них был адрес WARP). [awg] — параметры AmneziaWG, если сервер их ждёт.
+     * [mss] — предел сегмента TCP для туннеля в туннеле (0 — не урезать).
+     */
+    private class SecondPlan(
+        val inner: Boolean,
+        val remote: java.net.InetAddress?,
+        val local4: ByteArray?,
+        val remote4: ByteArray?,
+        val nat: ExitNat,
+        val awg: AwgChannel.Params?,
+        val localPublic: ByteArray,
+        val peerPublic: ByteArray,
+        val mss: Int,
+    )
+
+    private fun planSecondExit(cfg: WarpConfig, second: WarpConfig): SecondPlan? {
+        val settings = serviceSettings()
+        val localPublic = runCatching { Crypto.publicOf(Crypto.unBase64(second.account.privateB64)) }.getOrNull()
+        val peerPublic = runCatching { Crypto.unBase64(second.account.peerPublicB64) }.getOrNull()
+        if (localPublic == null || peerPublic == null || localPublic.size != 32 || peerPublic.size != 32) {
+            TunnelDebug.error("второй выход: ключи конфига не читаются", "трафик идёт через WARP")
+            return null
+        }
+        val remote = resolveOutside(second.endpoint.host)
+        if (remote == null) {
+            TunnelDebug.error(
+                "второй выход: адрес сервера ${second.endpoint.host} не найден",
+                "трафик идёт через WARP; проверь Endpoint во втором конфиге"
+            )
+            return null
+        }
+        val tun6 = cfg.account.ipv6?.takeIf { cfg.enableIpv6Address && it.isNotBlank() }
+        val nat = ExitNat.of(cfg.account.ipv4, tun6, settings.secondConf)
+        val awg = AwgChannel.paramsOf(settings.secondConf)
+        val local4 = PacketMath.addrOf(cfg.account.ipv4)
+        val remote4 = remote.address.takeIf { it.size == 4 }
+        // Внутри WARP — только к IPv4-адресу сервера (пакеты-обёртки собираются IPv4).
+        val inner = settings.secondViaWarp && local4 != null && remote4 != null
+        if (settings.secondViaWarp && !inner) {
+            TunnelDebug.stage("второй выход: у сервера нет IPv4-адреса — подключаюсь напрямую, не через WARP")
+        }
+        // Обёртка внутри WARP: 20 (IPv4) + 8 (UDP) + 32 (WireGuard) + добавка S4; и ещё 60 на
+        // заголовки IPv6 + TCP — так сегмент влезает в MTU основного туннеля без дробления.
+        val mss = if (inner) (cfg.mtu.coerceIn(576, 1420) - 28 - 32 - (awg?.s4 ?: 0) - 60).coerceAtLeast(536) else 0
+        TunnelDebug.stage(
+            "второй выход: " + (if (inner) "через WARP" else "напрямую") +
+                " к ${remote.hostAddress}:${second.endpoint.port}" +
+                (if (nat.v4) ", адрес отправителя — из второго конфига" else ", адреса IPv4 во втором конфиге нет") +
+                (if (tun6 != null && !nat.v6) ", IPv6 у сервера нет — сайты пойдут по IPv4" else "") +
+                (awg?.let { ", AmneziaWG ${it.describe()}" } ?: "")
+        )
+        return SecondPlan(inner, remote, local4, remote4, nat, awg, localPublic, peerPublic, mss)
+    }
+
+    /**
+     * Адрес сервера второго выхода по имени — через настоящую сеть, мимо своего же туннеля: пока
+     * туннель поднимается, запрос имени через него ушёл бы в никуда.
+     */
+    private fun resolveOutside(host: String): java.net.InetAddress? {
+        PacketMath.addrOf(host)?.let { bytes -> return runCatching { java.net.InetAddress.getByAddress(bytes) }.getOrNull() }
+        val cm = getSystemService(android.net.ConnectivityManager::class.java)
+        val networks = runCatching {
+            cm?.allNetworks.orEmpty().filter { n ->
+                val caps = cm?.getNetworkCapabilities(n) ?: return@filter false
+                caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
+            }
+        }.getOrDefault(emptyList())
+        val ordered = listOfNotNull(underlyingNetwork()) + networks
+        for (n in ordered.distinct()) {
+            val all = runCatching { n.getAllByName(host).toList() }.getOrNull().orEmpty()
+            (all.firstOrNull { it.address.size == 4 } ?: all.firstOrNull())?.let { return it }
+        }
+        return runCatching { java.net.InetAddress.getAllByName(host).toList() }.getOrNull().orEmpty()
+            .let { all -> all.firstOrNull { it.address.size == 4 } ?: all.firstOrNull() }
+    }
+
     /** Отдельный защищённый сокет для второго выхода: свой protect() обязателен, иначе петля. */
-    private fun openSecondSocket(cfg: WarpConfig): DatagramSocket? {
+    private fun openSecondSocket(cfg: WarpConfig, remote: java.net.InetAddress?): DatagramSocket? {
         val socket = runCatching {
             DatagramSocket(null).apply { reuseAddress = true; soTimeout = 1500 }
         }.getOrNull() ?: return null
@@ -2113,7 +2439,10 @@ class WarpVpnService : VpnService() {
             return null
         }
         val connected = runCatching {
-            socket.connect(InetSocketAddress(cfg.endpoint.host, cfg.endpoint.port))
+            socket.connect(
+                if (remote != null) InetSocketAddress(remote, cfg.endpoint.port)
+                else InetSocketAddress(cfg.endpoint.host, cfg.endpoint.port)
+            )
         }.isSuccess
         if (!connected) {
             runCatching { socket.close() }
@@ -2419,6 +2748,10 @@ class WarpVpnService : VpnService() {
         runCatching { d?.stop() }
         runCatching { p2?.stop() }
         runCatching { s2?.close() }
+        if (p2 != null) {
+            TunnelState.second = TunnelStatus.SECOND_OFF
+            TunnelState.secondPeer = ""
+        }
         w2?.let { if (it !== Thread.currentThread()) runCatching { it.join(500) } }
         runCatching { p?.stop() }
         // Поток закрыт → читающий его цикл выйдет сам; join только из чужого потока.
@@ -2584,16 +2917,33 @@ class WarpVpnService : VpnService() {
     private fun watchScreen() {
         val receiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action == Intent.ACTION_SCREEN_ON) onScreenOn()
+                when (intent?.action) {
+                    Intent.ACTION_SCREEN_ON -> {
+                        screenOffAt = 0L
+                        onScreenOn()
+                    }
+                    // С 1.10.31 — и выключение: по нему считается «телефон не используется» для
+                    // тихого подбора Wi-Fi (см. maybeQuietScan).
+                    Intent.ACTION_SCREEN_OFF -> screenOffAt = System.currentTimeMillis()
+                }
             }
         }
         synchronized(life) {
             if (!destroyed && screenReceiver == null) {
-                // SCREEN_ON — системное защищённое сообщение: флаг экспорта для него не нужен.
+                // SCREEN_ON/OFF — системные защищённые сообщения: флаг экспорта для них не нужен.
                 val registered = runCatching {
-                    registerReceiver(receiver, android.content.IntentFilter(Intent.ACTION_SCREEN_ON))
+                    registerReceiver(
+                        receiver,
+                        android.content.IntentFilter().apply {
+                            addAction(Intent.ACTION_SCREEN_ON)
+                            addAction(Intent.ACTION_SCREEN_OFF)
+                        }
+                    )
                 }.isSuccess
-                if (registered) screenReceiver = receiver
+                if (registered) {
+                    screenReceiver = receiver
+                    if (!isScreenOn() && screenOffAt == 0L) screenOffAt = System.currentTimeMillis()
+                }
             }
         }
     }
@@ -2608,6 +2958,11 @@ class WarpVpnService : VpnService() {
     }
 
     private fun onScreenOn() {
+        // Идёт тихий подбор — человек взял телефон: подбор прерываем, туннель возвращаем сразу.
+        if (quietScanRunning) {
+            abortQuietScan()
+            return
+        }
         if (destroyed || !wanted || TunnelState.up) return
         // Только когда туннель лежит и ждёт: идущий подъём или переподъём не трогаем.
         val phase = TunnelState.phase
@@ -2976,8 +3331,12 @@ class WarpVpnService : VpnService() {
     /** Сколько точек проверять подробно: рукопожатие с шумом и данные через туннель. */
     private val RESCUE_REFINE = 8
 
-    @Volatile
-    private var lastRescueAt = 0L
+    /**
+     * Когда сервис последний раз подбирал сам — отдельно для Wi-Fi и мобильной (с 1.10.31). Пауза
+     * была общей: если на мобильной подбор прошёл 10 минут назад, на новой Wi-Fi без связи сервис
+     * ждал бы ещё 20 минут, хотя эта сеть — другая.
+     */
+    private val lastRescueAtBy = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     private val rescueBusy = java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -2998,13 +3357,17 @@ class WarpVpnService : VpnService() {
     private fun startRescue(why: String): Boolean {
         if (destroyed || !wanted || stopped.get()) return false
         val now = System.currentTimeMillis()
-        if (lastRescueAt > 0L && now - lastRescueAt < RESCUE_GAP_MS) return false
+        // Ключ сети сервиса — «мобильная·25001» или «Wi-Fi·192.168.1.1»: группу берём по виду сети.
+        val group = if (dev.warpscout.app.NetIdentity.isMobile(memoryNetKind())) ConfigShortlist.GROUP_MOBILE
+        else ConfigShortlist.GROUP_WIFI
+        val last = lastRescueAtBy[group] ?: 0L
+        if (last > 0L && now - last < RESCUE_GAP_MS) return false
         val text = lastConfigText ?: return false
         val cfg = runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull() ?: return false
         val peer = runCatching { Crypto.unBase64(cfg.account.peerPublicB64) }.getOrNull()
             ?.takeIf { it.size == 32 } ?: return false
         if (!rescueBusy.compareAndSet(false, true)) return true
-        lastRescueAt = now
+        lastRescueAtBy[group] = now
         val netAtStart = memoryNetKind()
         // Своё поколение ожиданий: «Выключить», новое «Включить» или смена сети отменяют подбор.
         val gen = waitGen.incrementAndGet()
@@ -3019,7 +3382,7 @@ class WarpVpnService : VpnService() {
                     // Подбор прервали. Если телефон перешёл на другую сеть, следующий цикл неудач на
                     // ней вправе подобрать заново, не дожидаясь получаса; на той же сети — нет, иначе
                     // включение экрана раз за разом перезапускало бы подбор и тратило батарею.
-                    if (memoryNetKind() != netAtStart) lastRescueAt = 0L
+                    if (memoryNetKind() != netAtStart) lastRescueAtBy.remove(group)
                     return@Thread
                 }
                 if (found.isEmpty()) {
@@ -3190,6 +3553,129 @@ class WarpVpnService : VpnService() {
         forceFastRetry = true
         autoRebind = true
         restartAfterNetworkChange("подбор нашёл ${best.first.endpoint.render()}", R.string.status_reconnect_net)
+    }
+
+    // ------------------------------------------------------------ тихий подбор для Wi-Fi (с 1.10.31)
+    //
+    // Сценарий из разговора 22.11: первый подбор был на мобильной, потом телефон перешёл на Wi-Fi, и
+    // точки мобильной там работают — своих точек у Wi-Fi так и нет. Когда экран выключен 5 минут
+    // подряд, подбираем точки для Wi-Fi тихо: туннель примерно на минуту гаснет и возвращается сам.
+    // Один раз: после подбора у Wi-Fi есть свои точки (их держит дозор). Включили экран — подбор
+    // прерывается, туннель сразу возвращается на прежнюю точку. Заряд ниже 20 % и не на зарядке —
+    // ждём зарядки. Работающий туннель ради подбора больше ничем не прерывается.
+
+    private val QUIET_IDLE_MS = 5 * 60_000L
+    private val QUIET_MIN_BATTERY = 20
+
+    /** На той же сети — не чаще раза в 6 часов: подбор мог ничего не найти. */
+    private val QUIET_RETRY_MS = 6 * 3_600_000L
+
+    /** Когда погас экран; 0 — горит. */
+    @Volatile
+    private var screenOffAt = 0L
+
+    @Volatile
+    private var quietScanRunning = false
+
+    /** Тихий подбор прерван включением экрана — туннель возвращаем на прежнюю точку. */
+    @Volatile
+    private var quietAborted = false
+
+    @Volatile
+    private var quietTriedNet = ""
+
+    @Volatile
+    private var quietTriedAt = 0L
+
+    /** Заряд в процентах (−1 — не знаем) и подключена ли зарядка. */
+    private fun batteryState(): Pair<Int, Boolean> = runCatching {
+        val sticky = registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = sticky?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = sticky?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100) ?: 100
+        val plugged = (sticky?.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0
+        (if (level < 0 || scale <= 0) -1 else level * 100 / scale) to plugged
+    }.getOrDefault(-1 to false)
+
+    /** Пора ли тихо подобрать точки для Wi-Fi. Зовётся со строкой статистики (раз в ~5 минут). */
+    private fun maybeQuietScan() {
+        if (destroyed || !wanted || stopped.get() || !TunnelState.up || quietScanRunning || rescueBusy.get()) return
+        val offAt = screenOffAt
+        val now = System.currentTimeMillis()
+        if (offAt <= 0L || isScreenOn() || now - offAt < QUIET_IDLE_MS) return
+        val kind = memoryNetKind()
+        if (dev.warpscout.app.NetIdentity.isMobile(kind) || !kind.startsWith(dev.warpscout.app.NetIdentity.WIFI)) return
+        // Свои точки у Wi-Fi уже есть — подбирать нечего.
+        val own = runCatching { ConfigShortlist.forGroup(this, ConfigShortlist.GROUP_WIFI) }.getOrDefault(emptyList())
+        if (own.isNotEmpty()) return
+        if (quietTriedNet == kind && now - quietTriedAt < QUIET_RETRY_MS) return
+        val (pct, charging) = batteryState()
+        if (pct in 0 until QUIET_MIN_BATTERY && !charging) return
+        quietTriedNet = kind
+        quietTriedAt = now
+        startQuietScan(now - offAt)
+    }
+
+    private fun startQuietScan(idleMs: Long) {
+        val text = lastConfigText ?: return
+        val cfg = runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull() ?: return
+        val peer = runCatching { Crypto.unBase64(cfg.account.peerPublicB64) }.getOrNull()
+            ?.takeIf { it.size == 32 } ?: return
+        if (!rescueBusy.compareAndSet(false, true)) return
+        quietScanRunning = true
+        quietAborted = false
+        TunnelDebug.stage(
+            "тихий подбор: у Wi-Fi нет своих точек, экран выключен ${idleMs / 60_000} мин — подбираю для этой Wi-Fi " +
+                "(туннель вернётся сам, а включишь экран — сразу)"
+        )
+        // Сессию гасим так же, как перед переподъёмом: проба тем же ключом рядом с работающей
+        // сессией отбирает её у туннеля (WARP помнит один адрес на ключ).
+        epoch.incrementAndGet()
+        stopped.set(true)
+        TunnelState.up = false
+        starting = false
+        TunnelState.busy = false
+        closeAll()
+        stopped.set(false)
+        val gen = waitGen.incrementAndGet()
+        TunnelState.phase = TunnelStatus.PHASE_RECONNECTING
+        TunnelState.status = "подбираю точки для этой Wi-Fi — туннель вернётся сам"
+        postNotification(TunnelState.status)
+        Thread({
+            var found: List<RescuePoint> = emptyList()
+            try {
+                found = runRescue(cfg, peer, gen)
+            } catch (e: Throwable) {
+                runCatching {
+                    TunnelDebug.stage("тихий подбор не удался: ${e.javaClass.simpleName} ${e.message.orEmpty().take(80)}")
+                }
+            } finally {
+                rescueBusy.set(false)
+                quietScanRunning = false
+            }
+            if (destroyed || !wanted) return@Thread
+            when {
+                quietAborted -> {
+                    TunnelDebug.stage("тихий подбор прерван: экран включён — возвращаю туннель")
+                    restartAfterNetworkChange("экран включён во время подбора", R.string.status_reconnect_net)
+                }
+                // Подбор отменило другое событие (смена сети, «Включить», «Выключить»): подъёмом там
+                // уже занялись — сами не вмешиваемся.
+                gen != waitGen.get() -> Unit
+                found.isEmpty() -> {
+                    TunnelDebug.stage("тихий подбор: новых точек не нашлось — возвращаю прежнюю")
+                    restartAfterNetworkChange("тихий подбор окончен", R.string.status_reconnect_net)
+                }
+                // Найденные — в тройку Wi-Fi (тройка мобильной остаётся), туннель — на лучшую.
+                else -> applyRescue(found, cfg, text)
+            }
+        }, "warpscout-quiet-scan").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }.start()
+    }
+
+    /** Экран включили посреди тихого подбора: остановить его, туннель вернёт поток подбора. */
+    private fun abortQuietScan() {
+        if (!quietScanRunning) return
+        quietAborted = true
+        waitGen.incrementAndGet()
     }
 
     /** Цикл удался: промолчавшие в нём точки — в конец перебора (рядом нашлась живая, сеть ни при чём). */
@@ -3777,6 +4263,9 @@ class WarpVpnService : VpnService() {
         /** Замерить скорость через туннель полной загрузкой (см. handleSpeedRequest). */
         const val ACTION_SPEED = "dev.warpscout.app.tunnel.SPEED"
 
+        /** Адреса второго выхода обновились: сменить таблицу на лету (см. handleSecondRoutes). */
+        const val ACTION_SECOND_ROUTES = "dev.warpscout.app.tunnel.SECOND_ROUTES"
+
         /** Старт для проверки в подборе: без автозамера скорости (подбор мерит сам). */
         const val EXTRA_QUIET = "quiet"
 
@@ -3861,6 +4350,13 @@ class WarpVpnService : VpnService() {
         fun requestSpeedTest(context: Context) {
             runCatching {
                 context.startService(Intent(context, WarpVpnService::class.java).apply { action = ACTION_SPEED })
+            }
+        }
+
+        /** Сообщить сервису, что адреса второго выхода обновились (см. handleSecondRoutes). */
+        fun reloadSecondRoutes(context: Context) {
+            runCatching {
+                context.startService(Intent(context, WarpVpnService::class.java).apply { action = ACTION_SECOND_ROUTES })
             }
         }
 

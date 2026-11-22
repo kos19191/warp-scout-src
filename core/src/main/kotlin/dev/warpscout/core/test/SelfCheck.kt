@@ -48,6 +48,14 @@ import dev.warpscout.core.tune.Weights
 import dev.warpscout.core.wg.Wg
 import dev.warpscout.core.tune.NoiseBook
 import dev.warpscout.core.tunnel.DataGate
+import dev.warpscout.core.lists.SiteList
+import dev.warpscout.core.lists.ProtonFree
+import dev.warpscout.core.tunnel.PacketQueueIn
+import dev.warpscout.core.tunnel.AwgChannel
+import dev.warpscout.core.tunnel.ExitNat
+import dev.warpscout.core.tunnel.Icmp6Reject
+import dev.warpscout.core.tunnel.InnerUdpChannel
+import dev.warpscout.core.tunnel.PacketMath
 import dev.warpscout.core.presets.Presets
 import dev.warpscout.core.model.ResourceResult
 
@@ -136,6 +144,20 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("списки allow-domains, маршруты, цели экспорта") {
             allowListsAndRoutes()
             confTargets()
+        }
+        section("второй выход и свои сайты (1.10.31)") {
+            siteListChecks()
+            secondExitNat()
+            secondExitInner()
+            secondExitAwg()
+            secondExitPipeline()
+            expect(
+                "снимок: состояние второго выхода переживает JSON",
+                TunnelStatus.fromJson(TunnelStatus(second = TunnelStatus.SECOND_UP).toJson())?.second,
+                TunnelStatus.SECOND_UP
+            )
+            expect("снимок: старый формат — второй выход выключен", TunnelStatus.fromJson("{}")?.second, TunnelStatus.SECOND_OFF)
+            protonFreeChecks()
         }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
@@ -2084,6 +2106,16 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             tight.include.any { it == "91.108.4.0/22" } && tight.include.count { it.endsWith("/32") } <= 2,
             tight.include.take(6).joinToString())
         check("маршруты: сводка объяснимая", plan.summary().contains("маршрутов"), plan.summary())
+        // 1.10.31: у списка youtube — ещё и сети Google, откуда идёт видео (googlevideo.com заранее не развернуть).
+        val yt = AllowListPlanner.plan(
+            listOf(AllowList("youtube", "YouTube", ListSide.BLOCK, "x")), emptyList(),
+            mapOf("youtube" to AllowLists.Parsed(listOf("youtube.com"), emptyList())),
+            fullTunnel = false, maxDomains = 6, resolver = resolver
+        )
+        check("маршруты: видео YouTube — сети Google в маршрутах",
+            "142.250.0.0/15" in yt.include && "173.194.0.0/16" in yt.include && "2a00:1450::/32" in yt.include,
+            yt.include.take(6).joinToString())
+        check("маршруты: чужому списку сети Google не добавляются", plan.include.none { it == "142.250.0.0/15" })
         val full = AllowListPlanner.plan(block, direct, maps, fullTunnel = true)
         expect("маршруты: «весь трафик» = два default-маршрута", full.allowedIps, "0.0.0.0/0, ::/0")
         check("маршруты: пустой кеш не рождает битый конфиг",
@@ -2117,6 +2149,410 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             AllowLists.byId.getValue("telegram").hasSubnets)
         val fresh = AllowLists.freshnessOf(System.currentTimeMillis() - 3L * 3_600_000L)
         check("списки: свежесть по-человечески", fresh.contains("3 ч"), fresh)
+    }
+
+    // ------------------------------------------------ 1.10.31: второй выход и свои сайты
+
+    private fun ipText(p: ByteArray, off: Int): String =
+        (0 until 4).joinToString(".") { (p[off + it].toInt() and 0xFF).toString() }
+
+    /** IPv4-пакет: заголовок 20 байт и [l4] после него; сумма заголовка посчитана. */
+    private fun ip4(src: String, dst: String, proto: Int, l4: ByteArray): ByteArray {
+        val p = ByteArray(20 + l4.size)
+        p[0] = 0x45
+        PacketMath.put16(p, 2, p.size)
+        p[8] = 64
+        p[9] = proto.toByte()
+        System.arraycopy(PacketMath.addrOf(src)!!, 0, p, 12, 4)
+        System.arraycopy(PacketMath.addrOf(dst)!!, 0, p, 16, 4)
+        PacketMath.put16(p, 10, PacketMath.checksum(p, 0, 20))
+        System.arraycopy(l4, 0, p, 20, l4.size)
+        return p
+    }
+
+    /** TCP SYN с опцией MSS и верной суммой (IPv4). */
+    private fun tcpSyn4(src: String, dst: String, mss: Int): ByteArray {
+        val t = ByteArray(24)
+        PacketMath.put16(t, 0, 40000)
+        PacketMath.put16(t, 2, 443)
+        t[12] = (6 shl 4).toByte()
+        t[13] = 0x02
+        PacketMath.put16(t, 14, 65535)
+        t[20] = 2
+        t[21] = 4
+        PacketMath.put16(t, 22, mss)
+        val p = ip4(src, dst, 6, t)
+        val pseudo = PacketMath.sum(p, 12, 8) + 6L + 24L
+        PacketMath.put16(p, 36, PacketMath.checksum(p, 20, 24, pseudo))
+        return p
+    }
+
+    private fun udp4(src: String, sport: Int, dst: String, dport: Int, payload: ByteArray): ByteArray {
+        val u = ByteArray(8 + payload.size)
+        PacketMath.put16(u, 0, sport)
+        PacketMath.put16(u, 2, dport)
+        PacketMath.put16(u, 4, u.size)
+        System.arraycopy(payload, 0, u, 8, payload.size)
+        val p = ip4(src, dst, 17, u)
+        val pseudo = PacketMath.sum(p, 12, 8) + 17L + u.size
+        var c = PacketMath.checksum(p, 20, u.size, pseudo)
+        if (c == 0) c = 0xFFFF
+        PacketMath.put16(p, 26, c)
+        return p
+    }
+
+    private fun ip4Ok(p: ByteArray): Boolean = PacketMath.fold(PacketMath.sum(p, 0, 20)) == 0xFFFF
+
+    private fun l4v4Ok(p: ByteArray, proto: Int): Boolean {
+        val len = PacketMath.u16(p, 2) - 20
+        return PacketMath.fold(PacketMath.sum(p, 20, len, PacketMath.sum(p, 12, 8) + proto + len)) == 0xFFFF
+    }
+
+    /** IPv6-пакет с TCP SYN (20 байт TCP) и верной суммой. */
+    private fun tcpSyn6(src: String, dst: String): ByteArray {
+        val p = ByteArray(60)
+        p[0] = 0x60
+        PacketMath.put16(p, 4, 20)
+        p[6] = 6
+        p[7] = 64
+        System.arraycopy(PacketMath.addrOf(src)!!, 0, p, 8, 16)
+        System.arraycopy(PacketMath.addrOf(dst)!!, 0, p, 24, 16)
+        PacketMath.put16(p, 40, 40001)
+        PacketMath.put16(p, 42, 443)
+        p[52] = (5 shl 4).toByte()
+        p[53] = 0x02
+        val pseudo = PacketMath.sum(p, 8, 32) + 20L + 6L
+        PacketMath.put16(p, 56, PacketMath.checksum(p, 40, 20, pseudo))
+        return p
+    }
+
+    private fun l4v6Ok(p: ByteArray, proto: Int): Boolean {
+        val len = PacketMath.u16(p, 4)
+        return PacketMath.fold(PacketMath.sum(p, 40, len, PacketMath.sum(p, 8, 32) + proto + len)) == 0xFFFF
+    }
+
+    private fun siteListChecks() {
+        expect("выход: страна из «HEL · RU · адрес»", dev.warpscout.core.net.CfTrace.countryOf("HEL · RU · 185.1.2.3"), "RU")
+        expect("выход: IPv6-адрес не путается со страной", dev.warpscout.core.net.CfTrace.countryOf("FRA · DE · 2a09:bac1::1"), "DE")
+        expect("выход: нет страны — пусто", dev.warpscout.core.net.CfTrace.countryOf("не определён"), "")
+
+        val sites = SiteList.parse(
+            "https://chatgpt.com/c/1\n*.openai.com, 1.2.3.4\n10.1.2.3/24 # офис\nсайт.рф\n2a00:1450::1\nмусор!\nexample.com:8443"
+        )
+        expect("сайты: домены из ссылок, масок, кириллицы и «домен:порт»", sites.hosts,
+            listOf("chatgpt.com", "openai.com", "xn--80aswg.xn--p1ai", "example.com"))
+        expect("сайты: адрес, подсеть с обнулённым узлом, IPv6", sites.prefixes,
+            listOf("1.2.3.4/32", "10.1.2.0/24", "2a00:1450::1/128"))
+        expect("сайты: непонятное не принято, а названо", sites.bad, listOf("мусор!"))
+        expect("сайты: www-вариант только у домена второго уровня",
+            SiteList.withWww(listOf("chatgpt.com", "api.openai.com")), listOf("chatgpt.com", "www.chatgpt.com", "api.openai.com"))
+        val routes = SiteList.cidrs(sites, mapOf(
+            "chatgpt.com" to listOf("104.18.32.47", "2606:4700:0:0:0:0:6812:202f"),
+            "openai.com" to emptyList()
+        ))
+        check("сайты: адреса доменов стали маршрутами",
+            "104.18.32.47/32" in routes && "2606:4700::6812:202f/128" in routes && "10.1.2.0/24" in routes, routes.toString())
+        expect("сайты: подсеть IPv6 нормализуется", SiteList.cidrOf("2001:db8::1/32"), "2001:db8::/32")
+        expect("сайты: битая маска — не подсеть", SiteList.cidrOf("1.2.3.4/40"), null)
+
+        val old = ServiceSettings.fromJson("{\"ver\":1,\"secondExitOn\":true}")
+        check("настройки сервиса: старый снимок — второй выход через WARP", old?.secondViaWarp == true)
+        val direct = ServiceSettings.fromJson(ServiceSettings(secondViaWarp = false).toJson())
+        check("настройки сервиса: «напрямую» переживает запись и чтение", direct?.secondViaWarp == false)
+    }
+
+    private fun secondExitNat() {
+        val conf4 = "[Interface]\nPrivateKey = AAAA\nAddress = 10.8.0.2/32\n[Peer]\nPublicKey = BBBB\nEndpoint = 203.0.113.5:51820\n"
+        val nat = ExitNat.of("172.16.0.2", "2606:4700:110:8a36::1", conf4)
+        val syn = tcpSyn4("172.16.0.2", "104.18.32.47", 1460)
+        check("NAT: исходный пакет собран верно", ip4Ok(syn) && l4v4Ok(syn, 6))
+        check("NAT: пакет во второй выход принят", nat.outbound(syn, syn.size))
+        expect("NAT: отправитель — адрес из второго конфига", ipText(syn, 12), "10.8.0.2")
+        check("NAT: суммы IPv4 и TCP верны после подмены", ip4Ok(syn) && l4v4Ok(syn, 6))
+        nat.clampMss(syn, syn.size, 1160)
+        expect("NAT: MSS урезан под туннель в туннеле", PacketMath.u16(syn, 42), 1160)
+        check("NAT: сумма TCP верна после MSS", l4v4Ok(syn, 6))
+
+        val back = tcpSyn4("104.18.32.47", "10.8.0.2", 1400)
+        check("NAT: ответ принят", nat.inbound(back, back.size))
+        expect("NAT: получатель ответа — снова адрес tun", ipText(back, 16), "172.16.0.2")
+        check("NAT: суммы ответа верны", ip4Ok(back) && l4v4Ok(back, 6))
+
+        val dgram = udp4("172.16.0.2", 5353, "104.18.32.47", 443, ByteArray(33) { (it * 7).toByte() })
+        check("NAT: UDP (нечётная длина) — сумма верна после подмены", nat.outbound(dgram, dgram.size) && l4v4Ok(dgram, 17))
+
+        val v6 = tcpSyn6("2606:4700:110:8a36::1", "2606:4700::6812:202f")
+        check("NAT: IPv6 без IPv6 у второго сервера во второй выход не идёт", !nat.outbound(v6.copyOf(), v6.size))
+        val rej = Icmp6Reject.build(v6, v6.size)
+        check("отказ IPv6: «запрещено» возвращается отправителю",
+            rej != null && rej[40] == 1.toByte() && rej[41] == 1.toByte() &&
+                PacketMath.same(rej, 24, PacketMath.addrOf("2606:4700:110:8a36::1")!!))
+        check("отказ IPv6: сумма ICMPv6 верна", rej != null && l4v6Ok(rej, 58))
+
+        val conf6 = "[Interface]\nPrivateKey = AAAA\nAddress = fd00::2/128, 10.8.0.2/32\n[Peer]\nPublicKey = BBBB\n"
+        val nat6 = ExitNat.of("172.16.0.2", "2606:4700:110:8a36::1", conf6)
+        check("NAT: адреса берутся по виду, IPv6 может стоять первым", nat6.v4 && nat6.v6)
+        val v6b = tcpSyn6("2606:4700:110:8a36::1", "2606:4700::6812:202f")
+        check("NAT: IPv6 подменяется, сумма TCP верна",
+            nat6.outbound(v6b, v6b.size) && PacketMath.same(v6b, 8, PacketMath.addrOf("fd00::2")!!) && l4v6Ok(v6b, 6))
+        val same = ExitNat.of("172.16.0.2", null, "[Interface]\nAddress = 172.16.0.2/32\n")
+        val untouched = tcpSyn4("172.16.0.2", "1.1.1.1", 1460)
+        val copy = untouched.copyOf()
+        check("NAT: второй конфиг WARP (тот же адрес) — пакет не меняется",
+            same.outbound(untouched, untouched.size) && untouched.contentEquals(copy))
+    }
+
+    private fun secondExitInner() {
+        val sent = ArrayList<ByteArray>()
+        val ch = InnerUdpChannel(
+            inject = { sent += it },
+            localIp = PacketMath.addrOf("172.16.0.2")!!,
+            remoteIp = PacketMath.addrOf("203.0.113.5")!!,
+            remotePort = 51820,
+            maxPacket = 1280,
+            timeoutMs = 200L,
+            random = java.util.Random(1),
+        )
+        ch.send(ByteArray(148) { it.toByte() })
+        check("внутри WARP: датаграмма завёрнута в один IPv4/UDP-пакет",
+            sent.size == 1 && sent[0].size == 176 && ip4Ok(sent[0]) && l4v4Ok(sent[0], 17))
+        expect("внутри WARP: пакет идёт к своему серверу", ipText(sent[0], 16), "203.0.113.5")
+        val reply = udp4("203.0.113.5", 51820, "172.16.0.2", ch.localPort, ByteArray(92) { 5 })
+        check("внутри WARP: ответ сервера забран из основного туннеля", ch.accept(reply, reply.size))
+        expect("внутри WARP: ответ отдан второму туннелю", ch.receive()?.size, 92)
+        val alien = udp4("203.0.113.6", 51820, "172.16.0.2", ch.localPort, ByteArray(10))
+        check("внутри WARP: чужой пакет остаётся приложениям", !ch.accept(alien, alien.size))
+
+        sent.clear()
+        val big = ByteArray(1400) { (it % 251).toByte() }
+        ch.send(big)
+        val ordered = sent.sortedBy { PacketMath.u16(it, 6) and 0x1FFF }
+        val whole = java.io.ByteArrayOutputStream()
+        ordered.forEach { whole.write(it, 20, it.size - 20) }
+        val udp = whole.toByteArray()
+        val pseudo = PacketMath.sum(PacketMath.addrOf("172.16.0.2")!!, 0, 4) +
+            PacketMath.sum(PacketMath.addrOf("203.0.113.5")!!, 0, 4) + 17L + udp.size
+        check("внутри WARP: большая датаграмма — фрагменты не больше MTU",
+            sent.size == 2 && sent.all { it.size <= 1280 && ip4Ok(it) } &&
+                (PacketMath.u16(ordered[0], 6) and 0x2000) != 0 && (PacketMath.u16(ordered[1], 6) and 0x2000) == 0)
+        check("внутри WARP: из фрагментов собирается та же датаграмма",
+            udp.size == 8 + big.size && udp.copyOfRange(8, udp.size).contentEquals(big) &&
+                PacketMath.fold(PacketMath.sum(udp, 0, udp.size, pseudo)) == 0xFFFF)
+        ch.close()
+    }
+
+    /**
+     * Второй выход целиком, офлайн: data plane второго сервера ходит через [InnerUdpChannel]
+     * («основной туннель» здесь — прозрачная труба до локального сервера), пакеты приложений
+     * проходят подмену адреса туда и обратно. Сервер должен увидеть адрес из своего конфига,
+     * а приложение — ответ на свой адрес.
+     */
+    /**
+     * 1.10.31: Proton VPN Free с автопоиском — конфиг узнаётся, список gluetun разбирается, порядок
+     * перебора предсказуемый, а смена сервера не закрывает очередь второго выхода.
+     */
+    private fun protonFreeChecks() {
+        val key1 = "1fGFZtHU8r8qwdnron9E80NdvLw5WcUdhPgh7phzQnA="
+        val key2 = "cFWV9L1uNf/u4Hiojt0u4G4E4I12WB65JRq7nkHl0ns="
+        val conf = """
+            [Interface]
+            # Key for NL-FREE#1
+            PrivateKey = ${"A".repeat(43)}=
+            Address = 10.2.0.2/32
+            DNS = 10.2.0.1
+
+            [Peer]
+            # NL-FREE#1
+            PublicKey = $key1
+            AllowedIPs = 0.0.0.0/0
+            Endpoint = 195.242.214.66:51820
+        """.trimIndent()
+        check("Proton: конфиг узнан по адресу и DNS", ProtonFree.isProton(conf))
+        check("Proton: конфиг WARP — не Proton",
+            !ProtonFree.isProton("[Interface]\nAddress = 172.16.0.2/32\nDNS = 1.1.1.1\n[Peer]\nEndpoint = 162.159.192.1:2408"))
+        val peer = ProtonFree.peerOf(conf)
+        check("Proton: сервер из конфига прочитан", peer?.publicKey == key1 && peer.ip == "195.242.214.66" && peer.port == 51820,
+            peer.toString())
+        val json = """{"version":4,"servers":[
+            {"vpn":"openvpn","country":"Netherlands","server_name":"NL-FREE#9","free":true,"ips":["1.1.1.1"]},
+            {"vpn":"wireguard","country":"Netherlands","city":"Amsterdam","server_name":"NL-FREE#1","hostname":"node-nl-1.protonvpn.net","wgpubkey":"$key1","free":true,"ips":["195.242.214.66","2a0d::1"]},
+            {"vpn":"wireguard","country":"United States","city":"NYC","server_name":"US-FREE#5","wgpubkey":"$key2","free":true,"ips":["2a0d::5","10.9.8.7"]},
+            {"vpn":"wireguard","country":"Germany","server_name":"DE#3","wgpubkey":"$key2","ips":["9.9.9.9"]},
+            {"vpn":"wireguard","country":"Japan","server_name":"JP-FREE#2","wgpubkey":"bad","free":true,"ips":["8.8.8.8"]}
+        ]}"""
+        val parsed = ProtonFree.parseGluetun(json)
+        expect("Proton: из списка gluetun — только бесплатные WireGuard с ключом и IPv4", parsed.map { it.name }, listOf("NL-FREE#1", "US-FREE#5"))
+        expect("Proton: берётся адрес IPv4, даже если IPv6 первым", parsed.getOrNull(1)?.ip, "10.9.8.7")
+        expect("Proton: код страны из имени сервера", parsed.map { it.code }, listOf("NL", "US"))
+        expect("Proton: кеш — запись и чтение без потерь", ProtonFree.parseCompact(ProtonFree.render(parsed)), parsed)
+        val enc = ProtonFree.encode(parsed[0])
+        val dec = ProtonFree.decode(enc)
+        check("Proton: строка для сервиса — туда и обратно",
+            dec != null && dec.name == "NL-FREE#1" && dec.ip == "195.242.214.66" && dec.port == 51820 && dec.publicKey == key1, enc)
+        check("Proton: битая строка не принимается", ProtonFree.decode("x|1.2.3.4|99999|$key1") == null && ProtonFree.decode("кривая") == null)
+        check("Proton: встроенный список на месте",
+            ProtonFree.BUILTIN.size >= 50 && ProtonFree.BUILTIN.all { it.publicKey.length == 44 && it.ip.isNotBlank() },
+            "серверов ${ProtonFree.BUILTIN.size}")
+        val servers = listOf(
+            ProtonFree.Server("US-FREE#1", "United States", "", "10.0.0.1", key1),
+            ProtonFree.Server("NL-FREE#1", "Netherlands", "", "10.0.0.2", key1),
+            ProtonFree.Server("NL-FREE#2", "Netherlands", "", "10.0.0.3", key2),
+            ProtonFree.Server("JP-FREE#1", "Japan", "", "10.0.0.4", key2),
+        )
+        val any = ProtonFree.ordered(servers, prefer = "", lastGood = "", original = null, seed = 0)
+        expect("Proton: «любая страна» — ближние первыми", any.map { it.code }, listOf("NL", "NL", "US", "JP"))
+        val us = ProtonFree.ordered(servers, prefer = "US", lastGood = "NL-FREE#2", original = null, seed = 0)
+        expect("Proton: выбранная страна первой, прежний сервер другой страны — не первым", us.first().name, "US-FREE#1")
+        val last = ProtonFree.ordered(servers, prefer = "", lastGood = "JP-FREE#1", original = servers[2], seed = 0)
+        expect("Proton: работавший последним — первый, сервер из конфига — следом", last.take(2).map { it.name }, listOf("JP-FREE#1", "NL-FREE#2"))
+        check("Proton: без повторов", last.size == servers.size)
+        val rotated = ProtonFree.ordered(servers, prefer = "NL", lastGood = "", original = null, seed = 1)
+        expect("Proton: внутри страны — по кругу от дня", rotated.first().name, "NL-FREE#2")
+
+        // Смена сервера второго выхода: закрытие «вида» не закрывает очередь — диспетчер не вернёт
+        // сайты в WARP, а следующий сервер читает ту же очередь.
+        val lane = PacketQueueIn("второй")
+        val first = lane.view()
+        first.close()
+        check("очередь: закрытый вид не закрывает очередь", !lane.isClosed())
+        lane.offer(byteArrayOf(1, 2, 3))
+        val buf = ByteArray(8)
+        expect("очередь: следующий вид читает пакет", lane.view().read(buf, 0, buf.size), 3)
+        expect("очередь: закрытый вид больше не читает", first.read(buf, 0, buf.size), -1)
+        lane.close()
+        expect("очередь: закрытая очередь — конец и для вида", lane.view().read(buf, 0, buf.size), -1)
+
+        val settings = ServiceSettings(secondPeers = listOf(enc))
+        expect("настройки сервиса: серверы второго выхода переживают JSON", ServiceSettings.fromJson(settings.toJson())?.secondPeers, listOf(enc))
+        expect("настройки сервиса: старый снимок — серверов нет", ServiceSettings.fromJson("{}")?.secondPeers, emptyList<String>())
+        expect("снимок: сервер второго выхода переживает JSON",
+            TunnelStatus.fromJson(TunnelStatus(secondPeer = "NL-FREE#1").toJson())?.secondPeer, "NL-FREE#1")
+    }
+
+    private fun secondExitPipeline() {
+        val clientPriv = ByteArray(32) { (it * 3 + 29).toByte() }
+        val serverPriv = ByteArray(32) { (it * 5 + 31).toByte() }
+        val server = LoopbackServer(serverPriv, answerData = { tcpSyn4("104.18.32.47", "10.8.0.2", 1400) }).start()
+        val sock = java.net.DatagramSocket().apply {
+            connect(java.net.InetSocketAddress("127.0.0.1", server.port))
+            soTimeout = 200
+        }
+        val ch = InnerUdpChannel(
+            inject = { ip ->
+                val ihl = (ip[0].toInt() and 0x0F) * 4
+                val payload = ip.copyOfRange(ihl + 8, ip.size)
+                runCatching { sock.send(java.net.DatagramPacket(payload, payload.size)) }
+            },
+            localIp = PacketMath.addrOf("172.16.0.2")!!,
+            remoteIp = PacketMath.addrOf("203.0.113.5")!!,
+            remotePort = 51820,
+            maxPacket = 1420,
+            timeoutMs = 300L,
+        )
+        val stop = java.util.concurrent.atomic.AtomicBoolean(false)
+        val pump = Thread {
+            val buf = ByteArray(4096)
+            while (!stop.get()) {
+                val dp = java.net.DatagramPacket(buf, buf.size)
+                try {
+                    sock.receive(dp)
+                } catch (e: java.net.SocketTimeoutException) {
+                    continue
+                } catch (e: Exception) {
+                    break
+                }
+                val pkt = udp4("203.0.113.5", 51820, "172.16.0.2", ch.localPort, buf.copyOfRange(0, dp.length))
+                ch.accept(pkt, pkt.size)
+            }
+        }.apply { isDaemon = true; start() }
+        val tunIn = QueueInputStream()
+        val tunOut = QueueOutputStream()
+        val nat = ExitNat.of("172.16.0.2", null, "[Interface]\nAddress = 10.8.0.2/32\n")
+        val config = WarpConfig(
+            name = "второй выход",
+            account = WarpAccount(Crypto.base64(clientPriv), Crypto.base64(Crypto.publicOf(serverPriv))),
+            endpoint = Endpoint("203.0.113.5", 51820),
+            junk = JunkLibrary.none(),
+            persistentKeepalive = null
+        )
+        val log = StringBuilder()
+        val plane = dev.warpscout.core.tunnel.DataPlane(
+            ch,
+            dev.warpscout.core.tunnel.NatPacketIn(tunIn, nat),
+            dev.warpscout.core.tunnel.NatPacketOut(tunOut, nat),
+            config,
+            NetSettings(attempts = 3, timeoutMs = 1000)
+        ) { line -> log.append(line).append("; ") }
+        val thread = Thread { plane.run() }.apply { isDaemon = true; start() }
+        try {
+            tunIn.offer(tcpSyn4("172.16.0.2", "104.18.32.47", 1460))
+            val seen = server.firstPacket(8000)
+            check("второй выход целиком: рукопожатие через туннель в туннеле", plane.handshakeOk, log.toString())
+            check("второй выход целиком: сервер видит адрес из своего конфига",
+                seen != null && ipText(seen, 12) == "10.8.0.2" && ip4Ok(seen) && l4v4Ok(seen, 6),
+                server.error ?: "payload=${seen?.size}")
+            val back = tunOut.poll(3000L)
+            check("второй выход целиком: ответ пришёл приложению на адрес tun",
+                back != null && ipText(back, 16) == "172.16.0.2" && ip4Ok(back) && l4v4Ok(back, 6), "back=${back?.size}")
+        } finally {
+            plane.stop()
+            stop.set(true)
+            runCatching { thread.join(1500) }
+            runCatching { sock.close() }
+            runCatching { pump.join(1000) }
+            server.stop()
+        }
+    }
+
+    private fun secondExitAwg() {
+        val conf = "[Interface]\nPrivateKey = x\nJc = 3\nJmin = 10\nJmax = 50\nS1 = 15\nS2 = 20\n" +
+            "H1 = 1234567\nH2 = 2345678\nH3 = 3456789\nH4 = 4567890\n"
+        val params = AwgChannel.paramsOf(conf)
+        check("AmneziaWG: параметры разобраны", params != null && params.s1 == 15 && params.h4 == 4567890L..4567890L)
+        check("AmneziaWG: обычный WireGuard — без обёртки", AwgChannel.paramsOf("[Interface]\nPrivateKey = x\n") == null)
+        expect("AmneziaWG 2: диапазон типов", AwgChannel.paramsOf("[Interface]\nH1 = 100-200\n")?.h1, 100L..200L)
+        if (params == null) return
+
+        val out = ArrayList<ByteArray>()
+        val inbox = java.util.ArrayDeque<ByteArray>()
+        val rec = object : dev.warpscout.core.tunnel.UdpChannel {
+            override fun send(packet: ByteArray) {
+                out += packet.copyOf()
+            }
+            override fun receive(): ByteArray? = inbox.pollFirst()
+            override fun close() = Unit
+        }
+        val cPriv = ByteArray(32) { (it * 3 + 7).toByte() }
+        val sPriv = ByteArray(32) { (it * 5 + 11).toByte() }
+        val cPub = Crypto.publicOf(cPriv)
+        val sPub = Crypto.publicOf(sPriv)
+        val awg = AwgChannel(rec, params, cPub, sPub, java.util.Random(7))
+        val init = Wg.buildInitiation(cPriv, cPub, sPub, 0x1234)
+        awg.send(init.packet)
+        val sentInit = out.last()
+        check("AmneziaWG: Jc пакетов шума перед инициацией", out.size == 4 && out.dropLast(1).all { it.size in 10..50 })
+        check("AmneziaWG: S1 случайных байт и тип H1", sentInit.size == 15 + 148 && Crypto.readLe32(sentInit, 15) == 1234567)
+        val msg = sentInit.copyOfRange(15, sentInit.size)
+        val mac1 = Blake2s.mac(Blake2s.hash("mac1----".toByteArray() + sPub), msg.copyOfRange(0, 116))
+        check("AmneziaWG: mac1 посчитан по своему типу — сервер его примет", mac1.contentEquals(msg.copyOfRange(116, 132)))
+
+        val std = msg.copyOf().also { Crypto.le32(1).copyInto(it, 0) }
+        val (resp, _) = WgResponder.respondWithSession(std, sPriv)
+        val wrapped = resp.copyOf().also {
+            Crypto.le32(2345678).copyInto(it, 0)
+            Wg.remac1(it, cPub)
+        }
+        inbox.add(ByteArray(20) { 9 } + wrapped)
+        val got = awg.receive()
+        check("AmneziaWG: ответ распознан и приведён к WireGuard", got != null && got.size == 92 && Crypto.readLe32(got, 0) == 2)
+        val res = got?.let { Wg.consumeResponse(it, init, sPub) }
+        check("AmneziaWG: рукопожатие сходится", res?.kind == Wg.ResponseKind.HANDSHAKE_RESPONSE, res?.kind.toString())
+
+        out.clear()
+        awg.send(ByteArray(48).also { Crypto.le32(4).copyInto(it, 0) })
+        check("AmneziaWG: данные уходят с типом H4", out.size == 1 && Crypto.readLe32(out[0], 0) == 4567890)
+        inbox.add(ByteArray(48).also { Crypto.le32(4567890).copyInto(it, 0) })
+        check("AmneziaWG: входящие данные приведены к типу 4", awg.receive()?.let { Crypto.readLe32(it, 0) } == 4)
     }
 
     private fun confTargets() {

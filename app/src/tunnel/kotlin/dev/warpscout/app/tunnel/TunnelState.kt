@@ -163,6 +163,24 @@ object TunnelState {
             publishNow(urgent = false)
         }
 
+    /** Второй выход в этой сессии (`TunnelStatus.SECOND_*`, с 1.10.31). */
+    @Volatile
+    var second: Int = TunnelStatus.SECOND_OFF
+        set(v) {
+            if (field == v) return
+            field = v
+            publishNow(urgent = true)
+        }
+
+    /** Сервер второго выхода (автопоиск Proton Free, с 1.10.31): «NL-FREE#12»; пусто — из конфига. */
+    @Volatile
+    var secondPeer: String = ""
+        set(v) {
+            if (field == v) return
+            field = v
+            publishNow(urgent = false)
+        }
+
     /**
      * Итог проверки связи через туннель (см. `TunnelStatus.linkWeb` и соседние поля). Пишется
      * одним вызовом [setLink], чтобы снимок не ушёл с половиной полей от прошлой проверки.
@@ -299,6 +317,8 @@ object TunnelState {
         speedFull = speedFull,
         speedRunningSince = speedRunningSince,
         dataCheckAt = dataCheckAt,
+        second = second,
+        secondPeer = secondPeer,
         bytesUp = TunnelDebug.bytesUp,
         bytesDown = TunnelDebug.bytesDown,
         handshakeAttempts = TunnelDebug.handshakeAttempts,
@@ -333,6 +353,8 @@ object TunnelState {
             speedFull = snapshot.speedFull
             speedRunningSince = snapshot.speedRunningSince
             dataCheckAt = snapshot.dataCheckAt
+            second = snapshot.second
+            secondPeer = snapshot.secondPeer
         } finally {
             mirroring = false
         }

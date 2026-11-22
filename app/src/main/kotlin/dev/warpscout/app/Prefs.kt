@@ -137,6 +137,62 @@ class Prefs(private val context: Context) {
             pushToService()
         }
 
+    /**
+     * Какие списки «не работает с российских адресов» идут через второй выход (с 1.10.31). Сайты
+     * берутся из них сами — вписывать их руками не нужно; свои сайты — в [secondDomains].
+     */
+    var secondSources: Set<String>
+        get() = sp.getStringSet("secondSources", null) ?: SecondRoutes.DEFAULT_SOURCES
+        set(v) = sp.edit().putStringSet("secondSources", v).apply()
+
+    /** Когда адреса второго выхода собраны в последний раз (мс; 0 — ещё ни разу). */
+    var secondRoutesAt: Long
+        get() = sp.getLong("secondRoutesAt", 0L)
+        set(v) = sp.edit().putLong("secondRoutesAt", v).apply()
+
+    /** Сводка последней сборки для экрана: «сайтов 489 → адресов 1520». */
+    var secondRoutesNote: String
+        get() = sp.getString("secondRoutesNote", "").orEmpty()
+        set(v) = sp.edit().putString("secondRoutesNote", v).apply()
+
+    /** Что собирали: списки и свои сайты. Изменились — адреса пора собрать заново. */
+    var secondBuiltSig: String
+        get() = sp.getString("secondBuiltSig", "").orEmpty()
+        set(v) = sp.edit().putString("secondBuiltSig", v).apply()
+
+    /** Второй выход внутри WARP (по умолчанию) или напрямую — см. ServiceSettings.secondViaWarp. */
+    var secondViaWarp: Boolean
+        get() = sp.getBoolean("secondViaWarp", true)
+        set(v) {
+            sp.edit().putBoolean("secondViaWarp", v).apply()
+            pushToService()
+        }
+
+    /** Последняя проверка выхода: «DE|1.2.3.4|время» или «!|причина|время». */
+    var secondCheck: String
+        get() = sp.getString("secondCheck", "").orEmpty()
+        set(v) = sp.edit().putString("secondCheck", v).apply()
+
+    /**
+     * Proton VPN Free (с 1.10.31): страна второго выхода — код («NL»), пусто — любая, ближние
+     * первыми. Сервер в этой стране приложение выбирает само (см. SecondProton).
+     */
+    var secondProtonCountry: String
+        get() = sp.getString("secondProtonCountry", "").orEmpty()
+        set(v) {
+            sp.edit().putString("secondProtonCountry", v).apply()
+            pushToService()
+        }
+
+    /** Сервер Proton, на котором второй выход работал последним: с него и начинается перебор. */
+    var secondProtonLast: String
+        get() = sp.getString("secondProtonLast", "").orEmpty()
+        set(v) {
+            if (v == secondProtonLast) return
+            sp.edit().putString("secondProtonLast", v).apply()
+            pushToService()
+        }
+
     /** Период фонового подбора в часах: 0 — выключено. */
     var scheduleHours: Int
         get() = sp.getInt("scheduleHours", 6).coerceIn(0, 24)
@@ -216,9 +272,36 @@ class Prefs(private val context: Context) {
         get() = sp.getString("allowedIps", "").orEmpty()
         set(v) = sp.edit().putString("allowedIps", v.trim()).apply()
 
+    /**
+     * «Сайты» вкладки «Туннелирование» (с 1.10.31): домены, адреса и подсети — как вписаны.
+     * Режим маршрутов 3 («только мои сайты») пускает через туннель ровно их.
+     */
+    var tunnelSites: String
+        get() = sp.getString("tunnelSites", "").orEmpty()
+        set(v) = sp.edit().putString("tunnelSites", v).apply()
+
+    /** Адреса этих сайтов (CIDR через запятую), развёрнутые через DoH. */
+    var tunnelSitesCidrs: String
+        get() = sp.getString("tunnelSitesCidrs", "").orEmpty()
+        set(v) = sp.edit().putString("tunnelSitesCidrs", v.trim()).apply()
+
+    /** Текст поля на момент сборки: поле правили — адреса пора собрать заново. */
+    var tunnelSitesSig: String
+        get() = sp.getString("tunnelSitesSig", "").orEmpty()
+        set(v) = sp.edit().putString("tunnelSitesSig", v).apply()
+
+    var tunnelSitesAt: Long
+        get() = sp.getLong("tunnelSitesAt", 0L)
+        set(v) = sp.edit().putLong("tunnelSitesAt", v).apply()
+
     var routesGeneratedAt: Long
         get() = sp.getLong("routesGeneratedAt", 0L)
         set(v) = sp.edit().putLong("routesGeneratedAt", v).apply()
+
+    /** Какие списки были отмечены, когда собирались маршруты (с 1.10.31): поменяли — собрать заново. */
+    var listsBuiltSig: String
+        get() = sp.getString("listsBuiltSig", "").orEmpty()
+        set(v) = sp.edit().putString("listsBuiltSig", v).apply()
 
     /** Категории allow-domains: что туннелируем и что сознательно оставляем снаружи. */
     /**
@@ -233,6 +316,19 @@ class Prefs(private val context: Context) {
         }
 
     /** Пакеты, выбранные в режимах «только» и «кроме» (один список на оба режима). */
+    /**
+     * Набор по умолчанию (Telegram, Instagram, YouTube, Facebook, X — см. DefaultApps) уже
+     * применён: «только выбранные» включаются один раз, а не при каждом запуске (с 1.10.31).
+     */
+    var appsDefaultsDone: Boolean
+        get() = sp.getBoolean("appsDefaultsV1", false)
+        set(v) = sp.edit().putBoolean("appsDefaultsV1", v).apply()
+
+    /** Приложения из набора по умолчанию, с которых человек сам снял галочку: обратно не ставим. */
+    var appsUnticked: Set<String>
+        get() = sp.getStringSet("appsUnticked", emptySet()).orEmpty()
+        set(v) = sp.edit().putStringSet("appsUnticked", v.toSet()).apply()
+
     var appsSelected: Set<String>
         get() = sp.getStringSet("appsSelected", emptySet()).orEmpty()
         set(v) {
@@ -493,12 +589,32 @@ class Prefs(private val context: Context) {
      * разворачиваются в /32 и /128 через DoH, потому что WireGuard не умеет правила по именам).
      * Если плана нет — честно возвращаем «весь трафик», а не пустой конфиг, в котором ничего не едет.
      */
+    /**
+     * До 1.10.31 режим «вручную» брал AllowedIPs из поля CIDR (allowedIpsText). Теперь это «мои
+     * сайты»: прежний список переносится туда один раз. В нём были только адреса и подсети —
+     * маршруты готовы без сети, и туннель после обновления ведёт себя как раньше.
+     */
+    fun migrateManualRoutes() {
+        if (routesMode != 3 || tunnelSites.isNotBlank() || allowedIpsText.isBlank()) return
+        val text = allowedIpsText.split(',', '\n').map { it.trim() }.filter { it.isNotEmpty() }.joinToString("\n")
+        tunnelSites = text
+        val parsed = dev.warpscout.core.lists.SiteList.parse(text)
+        if (parsed.hosts.isEmpty() && parsed.prefixes.isNotEmpty()) {
+            tunnelSitesCidrs = dev.warpscout.core.lists.SiteList.cidrs(parsed, emptyMap()).joinToString(", ")
+            tunnelSitesSig = text.trim()
+            tunnelSitesAt = System.currentTimeMillis()
+        }
+    }
+
     fun allowedIps(): String {
         val plan = allowedIpsText
         val raw = when (routesMode) {
             1 -> dev.warpscout.core.presets.RoutePresets.BYPASS_WHITELIST_CSV
             2 -> plan.ifBlank { "0.0.0.0/0, ::/0" }
-            3 -> plan.ifBlank { "0.0.0.0/0, ::/0" }
+            // «Мои сайты» (с 1.10.31) — их адреса; до первой сборки — весь трафик. Прежний ручной
+            // список переносится сам (см. migrateManualRoutes) — и здесь тоже: туннель может
+            // подняться после обновления раньше, чем откроют экран (автозапуск, плитка).
+            3 -> tunnelSitesCidrs.ifBlank { migrateManualRoutes(); tunnelSitesCidrs }.ifBlank { "0.0.0.0/0, ::/0" }
             else -> "0.0.0.0/0, ::/0"
         }
         if (enableIpv6) return raw
@@ -572,6 +688,9 @@ class Prefs(private val context: Context) {
             speedAuto = featSpeedAuto,
             freezeReconnect = featFreezeReconnect,
             dnsInTunnel = featDnsInTunnel,
+            secondViaWarp = secondViaWarp,
+            // Proton Free: серверы по порядку перебора; пусто — один сервер из конфига.
+            secondPeers = runCatching { SecondProton.candidates(context, this) }.getOrDefault(emptyList()),
         )
     }
 

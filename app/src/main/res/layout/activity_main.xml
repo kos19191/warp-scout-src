@@ -731,104 +731,7 @@
                     android:layout_height="wrap_content"
                     android:text="@string/switch_ipv6" />
 
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:text="@string/label_routes"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <Spinner
-                    android:id="@+id/spinnerRoutes"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="@string/routes_dropdown_hint"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <com.google.android.material.textfield.TextInputLayout
-                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:hint="@string/hint_allowedips">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editAllowedIps"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:gravity="top"
-                        android:inputType="textMultiLine"
-                        android:minLines="2" />
-                </com.google.android.material.textfield.TextInputLayout>
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnRefreshLists"
-                        style="@style/Widget.Material3.Button.TonalButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/btn_refresh_lists" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnBuildRoutes"
-                        style="@style/Widget.Material3.Button.TonalButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:text="@string/btn_build_routes" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:text="@string/label_lists_block"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <LinearLayout
-                    android:id="@+id/listsBlockBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:text="@string/label_lists_direct"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <LinearLayout
-                    android:id="@+id/listsDirectBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical" />
-
-                <com.google.android.material.checkbox.MaterialCheckBox
-                    android:id="@+id/checkListChecks"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/check_list_checks" />
-
-                <TextView
-                    android:id="@+id/textRoutesState"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
+                <!-- «Что туннелировать» переехало на вкладку «Туннелирование» (с 1.10.31). -->
 
                 <TextView
                     android:id="@+id/textEndpointNow"
@@ -837,20 +740,8 @@
                     android:layout_marginTop="12dp"
                     android:textAppearance="?attr/textAppearanceBodyMedium" />
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnNextEndpoint"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="@string/btn_next_endpoint" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:text="@string/endpoint_switch_hint"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
+                <!-- Кнопки «Другая точка входа» больше нет (с 1.10.31): точку меняют «Лучшие точки»
+                     и автоматика сервиса. -->
 
 
 
@@ -891,6 +782,51 @@
                         android:minLines="3" />
                 </com.google.android.material.textfield.TextInputLayout>
 
+                <!-- Proton VPN Free (с 1.10.31): конфиг узнаётся сам, сервер выбирает приложение —
+                     здесь только страна. Видно, только когда вставлен конфиг Proton. -->
+                <LinearLayout
+                    android:id="@+id/panelSecondProton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:id="@+id/textSecondProton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:textColor="?attr/colorOnSurfaceVariant" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text="@string/second_country_label"
+                        android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+                    <Spinner
+                        android:id="@+id/spinnerSecondCountry"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:minHeight="48dp" />
+                </LinearLayout>
+
+                <!-- Сайты второго выхода — сами, по спискам (с 1.10.31): галочки строит код. -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/second_sources_label"
+                    android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+                <LinearLayout
+                    android:id="@+id/secondSourcesBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+
                 <com.google.android.material.textfield.TextInputLayout
                     style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                     android:layout_width="match_parent"
@@ -903,9 +839,16 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:gravity="top"
-                        android:inputType="textMultiLine"
+                        android:inputType="textMultiLine|textNoSuggestions"
                         android:minLines="2" />
                 </com.google.android.material.textfield.TextInputLayout>
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchSecondViaWarp"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/second_via_warp" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnSecondResolve"
@@ -1112,7 +1055,12 @@
             </LinearLayout>
         </ScrollView>
 
-        <!-- ══════ вкладка «Приложения» ══════ -->
+        <!--
+          ══════ вкладка «Туннелирование» (с 1.10.31; была «Приложения») ══════
+          Что идёт через туннель: приложения, свои сайты или списки сайтов. Приложения и сайты
+          действуют вместе: через туннель идут выбранные приложения и только к выбранным сайтам.
+          «Что туннелировать» из «Настроек» переехало сюда — ids прежние, логика сохранения та же.
+        -->
         <ScrollView
             android:id="@+id/pageApps"
             android:layout_width="match_parent"
@@ -1130,105 +1078,299 @@
 
                 <TextView
                     style="@style/SectionHeader"
-                    android:text="@string/section_apps" />
+                    android:text="@string/section_tunneling" />
 
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="@string/apps_note"
+                    android:text="@string/tunnel_note"
                     android:textAppearance="?attr/textAppearanceBodySmall" />
 
-                <!--
-                  Три режима списком, а не тесной группой из трёх кнопок: подписи вроде
-                  «Только выбранные» в треть ширины не влезали и обрезались. Здесь каждая
-                  строка во всю ширину и нажимается целиком.
-                -->
-                <RadioGroup
-                    android:id="@+id/appsGroup"
+                <com.google.android.material.button.MaterialButtonToggleGroup
+                    android:id="@+id/tunnelKindGroup"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:orientation="vertical">
+                    app:selectionRequired="true"
+                    app:singleSelection="true">
 
-                    <com.google.android.material.radiobutton.MaterialRadioButton
-                        android:id="@+id/btnAppsAll"
-                        android:layout_width="match_parent"
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnKindApps"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:minHeight="48dp"
-                        android:text="@string/apps_all"
-                        android:textSize="15sp" />
+                        android:layout_weight="1"
+                        android:text="@string/tunnel_kind_apps" />
 
-                    <com.google.android.material.radiobutton.MaterialRadioButton
-                        android:id="@+id/btnAppsOnly"
-                        android:layout_width="match_parent"
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnKindSites"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:minHeight="48dp"
-                        android:text="@string/apps_only"
-                        android:textSize="15sp" />
+                        android:layout_weight="1"
+                        android:text="@string/tunnel_kind_sites" />
 
-                    <com.google.android.material.radiobutton.MaterialRadioButton
-                        android:id="@+id/btnAppsExcept"
-                        android:layout_width="match_parent"
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnKindLists"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:minHeight="48dp"
-                        android:text="@string/apps_except"
-                        android:textSize="15sp" />
-                </RadioGroup>
+                        android:layout_weight="1"
+                        android:text="@string/tunnel_kind_lists" />
+                </com.google.android.material.button.MaterialButtonToggleGroup>
 
+                <!-- Что сейчас идёт через туннель — и предупреждение, если выбор пустой. -->
                 <TextView
-                    android:id="@+id/textAppsState"
+                    android:id="@+id/textTunnelSummary"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <com.google.android.material.textfield.TextInputLayout
-                    android:id="@+id/tilAppSearch"
-                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:hint="@string/apps_search">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editAppSearch"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:inputType="text" />
-                </com.google.android.material.textfield.TextInputLayout>
-
-                <com.google.android.material.checkbox.MaterialCheckBox
-                    android:id="@+id/checkAppsSystem"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/apps_show_system" />
+                    android:textAppearance="?attr/textAppearanceBodyMedium" />
 
                 <LinearLayout
-                    android:id="@+id/appsBox"
+                    android:id="@+id/panelApps"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="vertical" />
+                    android:orientation="vertical">
 
-                <TextView
-                    android:id="@+id/textAppsTraffic"
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:text="@string/section_apps"
+                        android:textAppearance="?attr/textAppearanceTitleSmall" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/apps_note"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <!--
+                      Три режима списком, а не тесной группой из трёх кнопок: подписи вроде
+                      «Только выбранные» в треть ширины не влезали и обрезались. Здесь каждая
+                      строка во всю ширину и нажимается целиком.
+                    -->
+                    <RadioGroup
+                        android:id="@+id/appsGroup"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:orientation="vertical">
+
+                        <com.google.android.material.radiobutton.MaterialRadioButton
+                            android:id="@+id/btnAppsAll"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:minHeight="48dp"
+                            android:text="@string/apps_all"
+                            android:textSize="15sp" />
+
+                        <com.google.android.material.radiobutton.MaterialRadioButton
+                            android:id="@+id/btnAppsOnly"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:minHeight="48dp"
+                            android:text="@string/apps_only"
+                            android:textSize="15sp" />
+
+                        <com.google.android.material.radiobutton.MaterialRadioButton
+                            android:id="@+id/btnAppsExcept"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:minHeight="48dp"
+                            android:text="@string/apps_except"
+                            android:textSize="15sp" />
+                    </RadioGroup>
+
+                    <TextView
+                        android:id="@+id/textAppsState"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/tilAppSearch"
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:hint="@string/apps_search">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/editAppSearch"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="text" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <com.google.android.material.checkbox.MaterialCheckBox
+                        android:id="@+id/checkAppsSystem"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/apps_show_system" />
+
+                    <LinearLayout
+                        android:id="@+id/appsBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical" />
+
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/panelRoutes"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
+                    android:orientation="vertical"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:text="@string/label_routes"
+                        android:textAppearance="?attr/textAppearanceTitleSmall" />
+
+                    <Spinner
+                        android:id="@+id/spinnerRoutes"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="@string/routes_dropdown_hint"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <!-- «Сайты»: свои домены, адреса и подсети. -->
+                    <LinearLayout
+                        android:id="@+id/panelSites"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="10dp"
+                            android:text="@string/sites_hint"
+                            android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                        <com.google.android.material.textfield.TextInputLayout
+                            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:hint="@string/hint_tunnel_sites">
+
+                            <com.google.android.material.textfield.TextInputEditText
+                                android:id="@+id/editTunnelSites"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:gravity="top"
+                                android:inputType="textMultiLine|textNoSuggestions"
+                                android:minLines="4" />
+                        </com.google.android.material.textfield.TextInputLayout>
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnBuildSites"
+                            style="@style/Widget.Material3.Button.TonalButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="@string/btn_build_sites" />
+
+                        <TextView
+                            android:id="@+id/textSitesState"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:textAppearance="?attr/textAppearanceBodySmall" />
+                    </LinearLayout>
+
+                    <!-- «Списки»: категории allow-domains галочками. -->
+                    <LinearLayout
+                        android:id="@+id/panelLists"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:visibility="gone">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text="@string/label_lists_block"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <LinearLayout
+                        android:id="@+id/listsBlockBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text="@string/label_lists_direct"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <LinearLayout
+                        android:id="@+id/listsDirectBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical" />
+
+                    <com.google.android.material.checkbox.MaterialCheckBox
+                        android:id="@+id/checkListChecks"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/check_list_checks" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnRefreshLists"
+                            style="@style/Widget.Material3.Button.TonalButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/btn_refresh_lists" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnBuildRoutes"
+                            style="@style/Widget.Material3.Button.TonalButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:layout_weight="1"
+                            android:text="@string/btn_build_routes" />
+                    </LinearLayout>
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/textRoutesState"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+                </LinearLayout>
 
                 <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnAppTraffic"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="@string/apps_traffic_button" />
-<com.google.android.material.button.MaterialButton
                     android:id="@+id/btnSaveApps"
                     style="@style/Widget.Material3.Button"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
+                    android:layout_marginTop="12dp"
                     android:text="@string/btn_save_apply" />
             </LinearLayout>
         </ScrollView>
@@ -1469,6 +1611,15 @@
                     style="@style/Text.Caption"
                     android:layout_marginTop="@dimen/space_xl"
                     android:gravity="center" />
+
+                <!-- Обновление (с 1.10.31): только по нажатию — проверить релиз, скачать, поставить поверх. -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnCheckUpdate"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_horizontal"
+                    android:text="@string/btn_check_update" />
             </LinearLayout>
         </androidx.core.widget.NestedScrollView>
     </FrameLayout>
