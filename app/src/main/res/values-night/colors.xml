@@ -38,4 +38,12 @@
     <color name="state_off">#B0B4BA</color>
     <color name="check_ok">#7BD88F</color>
     <color name="check_fail">#FFB4AB</color>
+
+    <!-- Главная кнопка упрощённого экрана в тёмной теме: тот же смысл, светлее и теплее. -->
+    <color name="orb_accent">#FB923C</color>
+    <color name="orb_warn">#FBBF24</color>
+    <color name="orb_error">#F87171</color>
+    <color name="orb_ring_off">#4E453D</color>
+    <color name="orb_disc_top">#2E2A26</color>
+    <color name="orb_disc_bottom">#1C1916</color>
 </resources>

@@ -86,6 +86,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             stallDetection()
             deadPortFailsFast()
         }
+        section("проверка связи и выбор точки") {
+            linkCheckState()
+        }
         section("быстрый старт подбора") {
             cachedPoint()
         }
@@ -750,6 +753,88 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         val took = System.currentTimeMillis() - t0
         expect("отмена: скан после «Остановить» не возвращает проб", res.size, 0)
         check("отмена: скан возвращается сразу, а не через весь пул", took < 1500, "заняло $took мс")
+    }
+
+    /**
+     * «Подключено» должно значить «данные ходят». Здесь — всё, на чём это держится и что можно
+     * проверить без Android: мягкий порог подозрения, разбор ответа Cloudflare, перенос итогов
+     * проверки, пробы точки и меток дозора через снимок, резервная точка в настройках сервиса.
+     */
+    private fun linkCheckState() {
+        val t0 = 1_700_000_000_000L
+        // Мягкий порог: Telegram, потерявший связь, шлёт мало — 50 пакетов за 45 с не набирается.
+        check(
+            "подозрение: 8 пакетов и 15 с без ответа — пора проверить связь",
+            StallDetector.isSuspect(t0 + StallDetector.SUSPECT_MS, 0L, t0, StallDetector.SUSPECT_PACKETS)
+        )
+        check(
+            "подозрение: 7 пакетов — ещё рано",
+            !StallDetector.isSuspect(t0 + 60_000, 0L, t0, StallDetector.SUSPECT_PACKETS - 1)
+        )
+        check(
+            "подозрение: ответ был 5 с назад — всё в порядке",
+            !StallDetector.isSuspect(t0 + 20_000, t0 + 15_000, t0, 40)
+        )
+        check(
+            "подозрение: за секунду до окна — ещё нет",
+            !StallDetector.isSuspect(t0 + StallDetector.SUSPECT_MS - 1_000, 0L, t0, 40)
+        )
+        check(
+            "подозрение раньше приговора: на мягком пороге сессия ещё не «мертва»",
+            !StallDetector.isStalled(t0 + StallDetector.SUSPECT_MS, 0L, t0, StallDetector.SUSPECT_PACKETS)
+        )
+
+        // Ответ Cloudflare: через WARP / мимо / не trace вовсе.
+        val warpOn = dev.warpscout.core.net.CfTrace.parse(
+            "fl=12f3\nh=1.1.1.1\nip=2a09:bac1:6181:6888::1d6:18d\nts=1732278600.1\n" +
+                "visit_scheme=https\ncolo=FRA\nhttp=http/1.1\nloc=RU\ntls=TLSv1.3\nwarp=on\ngateway=off\n"
+        )
+        check("trace: разобран", warpOn != null)
+        expect("trace: площадка", warpOn?.colo, "FRA")
+        expect("trace: адрес выхода", warpOn?.ip, "2a09:bac1:6181:6888::1d6:18d")
+        expect("trace: через WARP", warpOn?.viaWarp, true)
+        expect("trace: коротко", warpOn?.summary(), "FRA · RU · 2a09:bac1:6181:6888::1d6:18d")
+        val warpOff = dev.warpscout.core.net.CfTrace.parse("ip=185.126.130.6\ncolo=HEL\nloc=RU\nwarp=off\n")
+        expect("trace: мимо WARP так и называется", warpOff?.viaWarp, false)
+        expect("trace: plus — тоже WARP", dev.warpscout.core.net.CfTrace.parse("colo=AMS\nwarp=plus")?.viaWarp, true)
+        expect("trace: страница портала — не trace", dev.warpscout.core.net.CfTrace.parse("<html><body>login=1</body></html>"), null)
+        expect("trace: пусто — не trace", dev.warpscout.core.net.CfTrace.parse(""), null)
+
+        // Итоги проверки, проба точки и метки дозора переживают снимок между процессами.
+        val st = TunnelStatus(
+            up = true,
+            probe = "17|162.159.192.8:859|${TunnelStatus.PROBE_SILENT}|-1",
+            marks = "162.159.192.8:859|0|3|1758000000000;188.114.97.1:500|1758000001000|0|0",
+            linkAt = 1_758_000_002_000L,
+            linkWeb = TunnelStatus.LINK_OK,
+            linkMs = 183,
+            linkTg = TunnelStatus.LINK_FAIL,
+            linkTgMs = -1,
+            linkExit = "FRA · RU · 2a09:bac1::1",
+        )
+        val back = TunnelStatus.fromJson(st.toJson())
+        expect("снимок: проба точки", back?.probe, st.probe)
+        expect("снимок: метки дозора", back?.marks, st.marks)
+        expect("снимок: время проверки связи", back?.linkAt, 1_758_000_002_000L)
+        expect("снимок: интернет через туннель", back?.linkWeb, TunnelStatus.LINK_OK)
+        expect("снимок: задержка проверки", back?.linkMs, 183)
+        expect("снимок: Telegram через туннель", back?.linkTg, TunnelStatus.LINK_FAIL)
+        expect("снимок: выход", back?.linkExit, "FRA · RU · 2a09:bac1::1")
+        val old = TunnelStatus.fromJson("{\"up\": true}")
+        expect("снимок: старый формат — связь не проверяли", old?.linkWeb, TunnelStatus.LINK_UNKNOWN)
+        expect("снимок: старый формат — задержки нет (-1, а не 0 мс)", old?.linkMs, -1)
+
+        // Резервная точка, выбранная человеком, доходит до сервиса.
+        expect(
+            "настройки сервиса: резервная точка",
+            ServiceSettings.fromJson(ServiceSettings(backup = "162.159.192.2:864").toJson())?.backup,
+            "162.159.192.2:864"
+        )
+        expect(
+            "настройки сервиса: без резервной точки — пусто",
+            ServiceSettings.fromJson("""{"ver":1}""")?.backup,
+            ""
+        )
     }
 
     private fun serviceState() {

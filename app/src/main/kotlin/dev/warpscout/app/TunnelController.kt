@@ -66,6 +66,19 @@ interface TunnelController {
      * асинхронный, и старый подъём ещё жив.
      */
     fun waitStopped(timeoutMs: Int): Boolean = true
+
+    /**
+     * Проверить точку, не трогая работающий туннель: одна-две инициации handshake с отдельного
+     * сокета в процессе сервиса. Возвращает `TunnelStatus.PROBE_*` или -1 — ответа не дождались
+     * (сервис занят или туннеля нет), тогда переключаемся как обычно.
+     */
+    fun probe(endpoint: String, timeoutMs: Int): Int = -1
+
+    /**
+     * Попросить сервис проверить связь через туннель (запрос к Cloudflare и к Telegram). Итог
+     * приходит в снимке состояния: `linkWeb`, `linkTg`, `linkMs`.
+     */
+    fun requestLinkCheck() {}
 }
 
 class UnsupportedTunnelController : TunnelController {

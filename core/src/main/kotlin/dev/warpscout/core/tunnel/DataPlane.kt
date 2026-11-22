@@ -116,6 +116,22 @@ class DataPlane(
      * цифр — ровно то, чем мы занимались до сих пор.
      */
     private val vitals: (() -> String)? = null,
+    /**
+     * «Похоже, сессия молчит» — мягкий сигнал (см. [StallDetector.isSuspect]): ушло несколько
+     * пакетов, а в ответ за 15 с ничего. Сам туннель не рвём: сверху по нему проверяют связь
+     * настоящим запросом и переподключаются, только если и он не прошёл.
+     */
+    private val onSuspect: ((String) -> Unit)? = null,
+    /**
+     * Ждать, пока в tun появятся данные (до N мс): true — есть что читать. null — прежняя пауза
+     * 20 мс между пустыми чтениями.
+     *
+     * Зачем. Дескриптор tun неблокирующий, и пустое чтение раньше означало «поспать 20 мс и
+     * попробовать снова» — 50 пробуждений в секунду даже в полной тишине: ночью это 110 с
+     * процессора (Диагностика-8). Сервис передаёт сюда `poll()` по дескриптору tun: поток спит,
+     * пока не придёт пакет, и просыпается сразу, когда он пришёл.
+     */
+    private val tunReady: ((Long) -> Boolean)? = null,
     private val log: (String) -> Unit = {},
     /**
      * Зовётся, когда сокет перестал отправлять пакеты (ENETUNREACH/EPERM после смены сети или
@@ -203,6 +219,10 @@ class DataPlane(
     /** О мёртвой сессии сообщаем один раз, иначе каждая следующая отправка дёргала бы сервис. */
     @Volatile
     private var stallReported: Boolean = false
+
+    /** О подозрении — тоже один раз на поток пакетов без ответа (сбрасывается любым ответом). */
+    @Volatile
+    private var suspectReported: Boolean = false
 
     /** Сколько раз подряд не удалось пересогласовать сессию (rekey). */
     private var rekeyFailures = 0
@@ -348,6 +368,7 @@ class DataPlane(
             burstPackets = 0
             burstStartAt = 0L
             stallReported = false
+            suspectReported = false
             val type = if (pkt.size >= 4) Crypto.readLe32(pkt, 0) else -1
             when (type) {
                 // Ответ на инициацию (в том числе на rekey) или cookie reply — отдаём ожидающему.
@@ -761,9 +782,17 @@ class DataPlane(
             }
             if (n < 0) break
             if (n == 0) {
-                // Пустое чтение на неблокирующем дескрипторе — не повод крутить цикл: 20 мс паузы
-                // стоят дешевле, чем поток, который жжёт процессор вхолостую.
-                runCatching { Thread.sleep(20) }
+                // Пустое чтение на неблокирующем дескрипторе — не повод крутить цикл. Если сервис
+                // дал способ дождаться данных (poll по tun), спим до пакета; иначе — прежние 20 мс.
+                // Ожидание ограничено секундами: остановка закрывает tun, и поток должен выйти сам,
+                // даже если система не разбудила его закрытием.
+                val waitTun = tunReady
+                if (waitTun == null) {
+                    runCatching { Thread.sleep(20) }
+                } else if (!runCatching { waitTun(TUN_WAIT_MS) }.getOrDefault(false)) {
+                    // poll не сработал (дескриптор закрыт или прерван) — не крутимся впустую.
+                    if (!stopped) runCatching { Thread.sleep(20) }
+                }
                 continue
             }
             // Первый пакет после долгой тишины: сессия, скорее всего, уже выброшена сервером
@@ -815,6 +844,13 @@ class DataPlane(
         val sent = burstPackets + 1
         burstPackets = sent
         if (sent == 1) burstStartAt = now
+        // Мягкий порог раньше жёсткого: мало пакетов без ответа — повод проверить связь, а не рвать.
+        if (!suspectReported && onSuspect != null && StallDetector.isSuspect(now, lastRxAt, burstStartAt, sent)) {
+            suspectReported = true
+            val anchor = maxOf(lastRxAt, burstStartAt)
+            val quiet = if (anchor > 0L) (now - anchor) / 1000 else 0L
+            runCatching { onSuspect?.invoke("ушло $sent пакетов, ответа нет $quiet с") }
+        }
         if (!StallDetector.isStalled(now, lastRxAt, burstStartAt, sent)) return
         stallReported = true
         val reason = StallDetector.explain(now, lastRxAt, burstStartAt, sent)
@@ -838,5 +874,11 @@ class DataPlane(
          * видно, что именно жгло процессор и модем.
          */
         private const val STATS_EVERY_MS = 5 * 60_000L
+
+        /**
+         * Сколько ждать данных в tun за один заход. Пакет будит поток сразу; это лишь верхняя
+         * граница сна, чтобы остановленный plane гарантированно вышел из цикла.
+         */
+        private const val TUN_WAIT_MS = 5_000L
     }
 }

@@ -131,6 +131,66 @@ object TunnelState {
         }
 
     /**
+     * Ответ на проверку точки рядом с работающим туннелем: «номер|адрес:порт|итог|мс»
+     * (см. `TunnelStatus.probe`). Срочно: интерфейс ждёт его, держа палец над переключением.
+     */
+    @Volatile
+    var probe: String = ""
+        set(v) {
+            if (field == v) return
+            field = v
+            publishNow(urgent = true)
+        }
+
+    /** Метки дозора для текущей сети (см. `TunnelStatus.marks`). */
+    @Volatile
+    var marks: String = ""
+        set(v) {
+            if (field == v) return
+            field = v
+            publishNow(urgent = false)
+        }
+
+    /**
+     * Итог проверки связи через туннель (см. `TunnelStatus.linkWeb` и соседние поля). Пишется
+     * одним вызовом [setLink], чтобы снимок не ушёл с половиной полей от прошлой проверки.
+     */
+    @Volatile
+    var linkAt: Long = 0L
+        private set
+    @Volatile
+    var linkWeb: Int = TunnelStatus.LINK_UNKNOWN
+        private set
+    @Volatile
+    var linkMs: Int = -1
+        private set
+    @Volatile
+    var linkTg: Int = TunnelStatus.LINK_UNKNOWN
+        private set
+    @Volatile
+    var linkTgMs: Int = -1
+        private set
+    @Volatile
+    var linkExit: String = ""
+        private set
+
+    fun setLink(at: Long, web: Int, webMs: Int, tg: Int, tgMs: Int, exit: String) {
+        linkAt = at
+        linkWeb = web
+        linkMs = webMs
+        linkTg = tg
+        linkTgMs = tgMs
+        linkExit = exit
+        publishNow(urgent = true)
+    }
+
+    /** Новая сессия — прежний итог проверки связи к ней не относится. */
+    fun clearLink() {
+        if (linkAt == 0L && linkWeb == TunnelStatus.LINK_UNKNOWN && linkTg == TunnelStatus.LINK_UNKNOWN) return
+        setLink(0L, TunnelStatus.LINK_UNKNOWN, -1, TunnelStatus.LINK_UNKNOWN, -1, "")
+    }
+
+    /**
      * true — сервис чем-то занят (поднимается, работает или ждёт повтора): по нему публикуется
      * «сердцебиение». Ожидание повтора — тоже жизнь: без сердцебиения снимок за пару минут
      * «протухал», и интерфейс шёл проверять, не умер ли сервис.
@@ -153,6 +213,14 @@ object TunnelState {
         wanted = wanted,
         stoppedByUser = stoppedByUser,
         stoppedByUserAt = stoppedByUserAt,
+        probe = probe,
+        marks = marks,
+        linkAt = linkAt,
+        linkWeb = linkWeb,
+        linkMs = linkMs,
+        linkTg = linkTg,
+        linkTgMs = linkTgMs,
+        linkExit = linkExit,
         bytesUp = TunnelDebug.bytesUp,
         bytesDown = TunnelDebug.bytesDown,
         handshakeAttempts = TunnelDebug.handshakeAttempts,
@@ -176,6 +244,9 @@ object TunnelState {
             wanted = snapshot.wanted
             stoppedByUser = snapshot.stoppedByUser
             stoppedByUserAt = snapshot.stoppedByUserAt
+            probe = snapshot.probe
+            marks = snapshot.marks
+            setLink(snapshot.linkAt, snapshot.linkWeb, snapshot.linkMs, snapshot.linkTg, snapshot.linkTgMs, snapshot.linkExit)
         } finally {
             mirroring = false
         }

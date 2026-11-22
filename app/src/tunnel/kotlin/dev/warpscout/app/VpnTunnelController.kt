@@ -140,6 +140,26 @@ class VpnTunnelController(private val context: Context) : TunnelController {
 
     override fun waitStopped(timeoutMs: Int): Boolean = WarpVpnService.waitDown(timeoutMs)
 
+    /**
+     * Проверка точки рядом с работающим туннелем. Ответ сервис кладёт в снимок состояния с тем же
+     * номером запроса — по номеру и узнаём свой ответ, а не оставшийся от прошлой проверки.
+     */
+    override fun probe(endpoint: String, timeoutMs: Int): Int {
+        if (!TunnelState.up) return -1
+        val id = System.currentTimeMillis()
+        if (!WarpVpnService.probe(context, endpoint, id)) return -1
+        val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(1000)
+        while (System.currentTimeMillis() < deadline) {
+            val parts = runCatching { dev.warpscout.app.status.TunnelStatusBus.read(context)?.probe }
+                .getOrNull().orEmpty().split('|')
+            if (parts.size >= 3 && parts[0] == id.toString()) return parts[2].toIntOrNull() ?: -1
+            runCatching { Thread.sleep(150) }
+        }
+        return -1
+    }
+
+    override fun requestLinkCheck() = WarpVpnService.requestLinkCheck(context)
+
     // Причину отказа называет сервис, а живёт она в снимке его состояния: в процессе интерфейса
     // TunnelDebug.lastError почти всегда пуст, и вместо причины показывалось «нет ответа».
     override fun lastError(): String? = TunnelState.error ?: TunnelDebug.lastError

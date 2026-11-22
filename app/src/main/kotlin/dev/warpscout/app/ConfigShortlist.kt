@@ -45,9 +45,16 @@ object ConfigShortlist {
         val network: String
     )
 
-    /** Разбор сохранённого текста в конфиг. null — файл повреждён или это не WARP-конфиг. */
+    /**
+     * Разбор сохранённого текста в конфиг. null — файл повреждён или это не WARP-конфиг.
+     *
+     * Имя профиля шума возвращаем из записи: в тексте конфига его нет, и после разбора профиль
+     * назывался «imported». В журнале 14:29 это читалось как «выбрал tls-fixed, а поднимает
+     * imported» — хотя параметры шума те же, байт в байт.
+     */
     fun config(entry: Entry): WarpConfig? = runCatching {
-        WgConf.toWarpConfig("топ-3", entry.configText)
+        val cfg = WgConf.toWarpConfig("топ-3", entry.configText) ?: return@runCatching null
+        if (entry.junk.isNotBlank() && cfg.junk.name != entry.junk) cfg.copy(junk = cfg.junk.copy(name = entry.junk)) else cfg
     }.getOrNull()
 
     /** Ключ «точка + профиль шума»: им и помечается активная строка списка. */

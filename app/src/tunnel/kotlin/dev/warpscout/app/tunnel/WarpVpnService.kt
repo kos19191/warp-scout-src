@@ -23,6 +23,7 @@ import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.net.NetSettings
 import dev.warpscout.core.net.UdpSocketFactory
 import dev.warpscout.core.net.WgProber
+import dev.warpscout.core.state.TunnelStatus
 import dev.warpscout.core.tunnel.DataPlane
 import dev.warpscout.core.tunnel.ExitRouter
 import dev.warpscout.core.tunnel.PacketQueueIn
@@ -44,7 +45,7 @@ import java.util.concurrent.TimeUnit
  * keepalive, счётчики). Чужой бэкенд не нужен: AWG отличается от WireGuard только мусором перед
  * инициацией, а его отправляет тот же [DataPlane].
  *
- * Существует только во flavor'е `tunnel` (см. app/src/tunnel/AndroidManifest.xml).
+ * С 1.10.27 есть в обеих сборках: код и манифест туннеля общие (см. app/build.gradle.kts).
  */
 class WarpVpnService : VpnService() {
 
@@ -62,18 +63,23 @@ class WarpVpnService : VpnService() {
         super.onCreate()
         runCatching { dev.warpscout.app.CrashLog.install(this) }
         runCatching { dev.warpscout.app.TunnelDebug.attach(this) }
-        runCatching { TunnelStatusPublisher.start(this) }
         // «Выключил сам» помнит снимок, а не память процесса. Новый процесс сервиса (после
         // остановки, обновления, убийства системой) иначе первым же снимком стёр бы эту отметку —
         // и фоновый подбор решил бы, что туннель можно включать.
+        //
+        // Читаем ДО запуска публикации: публикатор сразу пишет снимок нового процесса (всё по
+        // нулям), и чтение после него могло увидеть уже этот пустой снимок — отметка «выключил
+        // сам» терялась. По этому же снимку автоподъём решает, был ли туннель включён.
         runCatching {
             dev.warpscout.app.status.TunnelStatusBus.read(this)?.let { previous ->
+                bootSnapshot = previous
                 if (previous.stoppedByUser) TunnelState.stoppedByUser = true
                 if (previous.stoppedByUserAt > TunnelState.stoppedByUserAt) {
                     TunnelState.stoppedByUserAt = previous.stoppedByUserAt
                 }
             }
         }
+        runCatching { TunnelStatusPublisher.start(this) }
         // Первая строка журнала: по ней видно, что процесс сервиса вообще запустился.
         runCatching {
             // Сборка — в той же строке: мелкие доправки пересобирают ту же версию поверх, и по
@@ -103,6 +109,13 @@ class WarpVpnService : VpnService() {
             Thread({ runCatching { previous.retire() } }, "warpscout-retire").apply { isDaemon = true }.start()
         }
     }
+
+    /**
+     * Снимок, оставшийся от прошлого процесса сервиса (прочитан в onCreate до первой публикации).
+     * По нему перезапуск системой и «Постоянный VPN» решают, был ли туннель включён.
+     */
+    @Volatile
+    private var bootSnapshot: dev.warpscout.core.state.TunnelStatus? = null
 
     private var plane: DataPlane? = null
     /** Второй выход (другой сервер): свой data plane и сокет, если включён. */
@@ -648,6 +661,18 @@ class WarpVpnService : VpnService() {
     private val sentryMarks = java.util.concurrent.ConcurrentHashMap<String, SentryMark>()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Проверка точки и проверка связи приходят обычным startService от открытого экрана, а не
+        // startForegroundService: требования «покажи уведомление за 5 с» у них нет. Обрабатываем
+        // их раньше всего остального — иначе уведомление на миг сменилось бы на «Поднимаю туннель…»
+        // у работающего туннеля.
+        if (intent?.action == ACTION_PROBE) {
+            handleProbe(intent, startId)
+            return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_CHECK) {
+            handleCheckRequest(startId)
+            return START_NOT_STICKY
+        }
         // ГЛАВНОЕ ПРАВИЛО ANDROID: после startForegroundService() сервис обязан вызвать
         // startForeground() примерно за 5 секунд, иначе процесс убивают с
         // ForegroundServiceDidNotStartInTimeException — без записи в журнал, и туннель умирает
@@ -718,10 +743,38 @@ class WarpVpnService : VpnService() {
             }
             return START_REDELIVER_INTENT
         }
-        val text = intent?.getStringExtra(EXTRA_CONF)
+        // Повторная доставка старта: система убила процесс с работающим туннелем и перезапустила
+        // сервис с той же командой. Точка в ней может быть давно мёртвой (сервис мог сменить её
+        // сам), поэтому поднимаем последнюю рабочую конфигурацию. Выключенный руками — не трогаем.
+        val redelivered = (flags and START_FLAG_REDELIVERY) != 0
+        if (redelivered && TunnelState.stoppedByUser) {
+            TunnelDebug.stage("система перезапустила сервис, но туннель выключен вручную — сам не включаю")
+            TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_IDLE
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        val lastWorking = if (redelivered) TunnelLastConfig.load(this) else null
+        if (lastWorking != null) {
+            TunnelDebug.stage(
+                "система перезапустила сервис — поднимаю последнюю рабочую конфигурацию (${endpointOf(lastWorking) ?: "точка не указана"})"
+            )
+        }
+        val explicit = lastWorking ?: intent?.getStringExtra(EXTRA_CONF)?.takeIf { it.isNotBlank() }
+        // Без конфига приходят перезапуск системой (null), «Постоянный VPN» из настроек Android и
+        // автоподъём после загрузки/обновления. Раньше всё это кончалось «нет конфигурации —
+        // запуск пропущен», и туннель не возвращался. Теперь поднимаем последнюю рабочую
+        // конфигурацию — если туннель был включён и человек его не выключал (см. autoStartText).
+        val text = explicit ?: autoStartText(intent)
         if (text.isNullOrBlank()) {
-            TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_FAILED
-            TunnelState.status = "нет конфигурации — запуск пропущен"
+            if (explicit == null && intent?.action != ACTION_START) {
+                // Автоподъём отказался сам и объяснил почему в журнале: это не сбой, а решение
+                // (выключен вручную, не был включён, нет рабочей конфигурации).
+                TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_IDLE
+                TunnelState.status = "туннель не включён"
+            } else {
+                TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_FAILED
+                TunnelState.status = "нет конфигурации — запуск пропущен"
+            }
             stopSelf(startId)
             return START_NOT_STICKY
         }
@@ -829,6 +882,8 @@ class WarpVpnService : VpnService() {
         TunnelState.gaveUp = false
         TunnelState.phase = dev.warpscout.core.state.TunnelStatus.PHASE_STARTING
         TunnelState.startedAt = System.currentTimeMillis()
+        // Итог проверки связи — про прошлую сессию; у новой его ещё нет.
+        TunnelState.clearLink()
         TunnelDebug.reset()
         createChannel()
         postNotification(getString(R.string.notif_starting))
@@ -932,7 +987,9 @@ class WarpVpnService : VpnService() {
             return
         }
         val routes = SplitRoutes.prefixesOf(cfg.allowedIps)
-        TunnelDebug.stage("tun получен: ${routes.size} маршрутов, blocking=${isFullTunnel(cfg)}")
+        TunnelDebug.stage(
+            "tun получен: ${routes.size} маршрутов (${if (isFullTunnel(cfg)) "весь трафик" else "раздельные"}), чтение по poll"
+        )
 
         val handshake = CountDownLatch(1)
 
@@ -940,12 +997,16 @@ class WarpVpnService : VpnService() {
         // Без второго выхода — ровно прежнее поведение (прямые потоки), регрессии быть не должно.
         val secondSock = if (multiExit && secondCfg != null) openSecondSocket(secondCfg) else null
         val rawIn = FileInputStream(pfd.fileDescriptor)
+        // Ожидание данных в tun — poll() по его дескриптору вместо паузы 20 мс между пустыми
+        // чтениями (см. DataPlane.tunReady и waitTunReadable).
+        val tunFd = pfd.fileDescriptor
+        val tunWait: (Long) -> Boolean = { ms -> waitTunReadable(tunFd, ms) }
         val rawOut = FileOutputStream(pfd.fileDescriptor)
         val lanes = if (secondSock != null) listOf(PacketQueueIn("основной"), PacketQueueIn("второй")) else emptyList()
         val tunOut: OutputStream = if (lanes.isEmpty()) rawOut else SharedPacketOut(rawOut)
         val tunIn: InputStream = if (lanes.isEmpty()) rawIn else lanes[0]
         val splitter = if (lanes.isNotEmpty()) {
-            TunDispatcher(rawIn, router, lanes) { line -> TunnelDebug.stage(line) }
+            TunDispatcher(rawIn, router, lanes, tunReady = tunWait) { line -> TunnelDebug.stage(line) }
         } else {
             null
         }
@@ -976,6 +1037,19 @@ class WarpVpnService : VpnService() {
             },
             // Цифры расхода — в строку статистики журнала.
             vitals = { vitalsLine() },
+            // Мало пакетов без ответа — не повод рвать, но повод проверить связь по-настоящему:
+            // так ловится «подключено, а Telegram не работает», когда приложение шлёт редко.
+            onSuspect = { reason ->
+                if (myEpoch == epoch.get() && !destroyed) {
+                    val sinceCheck = System.currentTimeMillis() - lastLinkCheckAt
+                    if (sinceCheck >= LINK_SUSPECT_GAP_MS) {
+                        startLinkCheck(myEpoch, "подозрение: $reason", 0L, reconnectOnFail = true)
+                    }
+                }
+            },
+            // Читает tun сам data plane — ему и ждать данных. Со вторым выходом tun читает
+            // диспетчер (ему передано то же ожидание), а plane читает свою очередь.
+            tunReady = if (lanes.isEmpty()) tunWait else null,
             // Сокет перестал отправлять — сеть ушла без уведомления от системы. Переподнимаем.
             onFatal = fatal@{ reason ->
                 // Отчёт о смерти принимаем только от текущего plane и только один раз. DataPlane шлёт
@@ -1015,6 +1089,9 @@ class WarpVpnService : VpnService() {
                 runCatching {
                     EndpointMemory.remember(this, memoryNetKind(), cfg.endpoint.render())
                 }
+                // Ровно этот текст и поднимется после перезагрузки, обновления или перезапуска
+                // системой: точка в нём та, что работает сейчас (см. TunnelLastConfig).
+                runCatching { TunnelLastConfig.save(this, text) }
                 TunnelDebug.ok("туннель поднят: ${cfg.endpoint.render()}")
                 postNotification(getString(R.string.notif_active, cfg.endpoint.render()))
                 // Тихая проверка соседних точек: сессию не трогает, очередь держит свежей.
@@ -1179,6 +1256,10 @@ class WarpVpnService : VpnService() {
                 fail("таймаут: за 25 с handshake не завершился", startId, myEpoch)
             } else if (waited) {
                 watchTraffic(startId, myEpoch)
+                // «Подключено» — только когда данные ходят. Через полторы секунды после подъёма
+                // (приложения как раз начинают переподключаться) проверяем это запросом через
+                // туннель; два провала подряд — сессия мертва, переподключаемся.
+                startLinkCheck(myEpoch, "после подъёма", 1_500L, reconnectOnFail = true)
             }
         }.apply { isDaemon = true; name = "warpscout-vpn-watch"; start() }
     }
@@ -1209,6 +1290,355 @@ class WarpVpnService : VpnService() {
                 postNotification(getString(R.string.notif_no_traffic))
             }
         }
+    }
+
+    // ------------------------------------------------------------ проверка связи
+    //
+    // «Подключено» раньше значило «handshake прошёл». Этого мало: в журнале 00:58–01:21 handshake
+    // проходил каждый раз, а данные назад не шли («трафик пошёл: вверх 4768, вниз 0 байт»), и
+    // экран всё это время показывал «подключено». Сторож «сессия молчит» ловит такое только при
+    // 50 пакетах за 45 с, а Telegram, потерявший связь, столько не шлёт. Поэтому теперь после
+    // подъёма, по подозрению из data plane и при открытии экрана сервис проверяет связь настоящим
+    // запросом через туннель: Cloudflare по IP (заодно видно, через WARP ли ушёл запрос, и откуда
+    // виден выход) и TCP-соединение с сервером Telegram. Два провала подряд — переподключение.
+
+    /**
+     * Когда последний раз проверяли связь. По подозрению проверяем не чаще раза в
+     * [LINK_SUSPECT_GAP_MS]: приложение может часами слать пакеты в никуда, и будить радио
+     * проверкой на каждый такой поток незачем.
+     */
+    @Volatile
+    private var lastLinkCheckAt = 0L
+    private val LINK_SUSPECT_GAP_MS = 2 * 60_000L
+
+    /** Проверка уже идёт — вторую параллельно не запускаем. */
+    private val linkCheckBusy = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Серверы Telegram (DC2 и DC1, порт 443): для проверки хватает TCP-соединения. */
+    private val TELEGRAM_DCS = listOf("149.154.167.51", "149.154.175.53")
+
+    /** Итог одной проверки связи. */
+    private data class LinkResult(
+        val web: Int,
+        val webMs: Int,
+        val exit: String,
+        val tg: Int,
+        val tgMs: Int,
+        val webNote: String,
+    )
+
+    private fun linkAlive(myEpoch: Int): Boolean =
+        myEpoch == epoch.get() && !stopped.get() && !destroyed && TunnelState.up
+
+    /**
+     * Проверить связь в своём потоке. [reconnectOnFail] — если и повторная проверка не получила
+     * ответа, сессия мертва: переподнимаем туннель тем же путём, что и после обрыва (с его
+     * лимитами — бесконечного цикла переподключений не будет).
+     */
+    private fun startLinkCheck(myEpoch: Int, reason: String, delayMs: Long, reconnectOnFail: Boolean) {
+        if (!linkCheckBusy.compareAndSet(false, true)) return
+        val thread = Thread({
+            try {
+                if (delayMs > 0L) Thread.sleep(delayMs)
+                if (!linkAlive(myEpoch)) return@Thread
+                var result = runLinkCheck()
+                if (result.web == TunnelStatus.LINK_FAIL && linkAlive(myEpoch)) {
+                    // Одна потеря — ещё не диагноз: первый запрос после подъёма иногда ждёт
+                    // маршрута. Повторяем через 4 секунды и только потом решаем.
+                    Thread.sleep(4_000L)
+                    if (!linkAlive(myEpoch)) return@Thread
+                    result = runLinkCheck()
+                }
+                if (!linkAlive(myEpoch)) return@Thread
+                TunnelState.setLink(System.currentTimeMillis(), result.web, result.webMs, result.tg, result.tgMs, result.exit)
+                reportLink(reason, result)
+                if (result.web == TunnelStatus.LINK_FAIL && reconnectOnFail && wanted && linkAlive(myEpoch)) {
+                    restartAfterNetworkChange("проверка связи: через туннель нет ответа", R.string.status_reconnect_silent)
+                }
+            } catch (e: InterruptedException) {
+                // штатная остановка вместе с сервисом
+            } catch (e: Throwable) {
+                runCatching {
+                    TunnelDebug.stage("проверка связи не удалась: ${e.javaClass.simpleName} ${e.message.orEmpty().take(80)}")
+                }
+            } finally {
+                linkCheckBusy.set(false)
+            }
+        }, "warpscout-link")
+        thread.isDaemon = true
+        thread.priority = Thread.MIN_PRIORITY
+        thread.start()
+    }
+
+    /**
+     * Одна проверка. Сокеты обычные (без protect), то есть идут через сам туннель. Если адрес не
+     * входит в маршруты туннеля (раздельные маршруты, «только выбранные приложения»), проверка про
+     * туннель ничего не скажет — так и помечаем, а не объявляем туннель мёртвым.
+     */
+    private fun runLinkCheck(): LinkResult {
+        lastLinkCheckAt = System.currentTimeMillis()
+        val routes = lastConfigText
+            ?.let { text -> runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull() }
+            ?.let { cfg -> runCatching { ExitRouter.of(SplitRoutes.prefixesOf(cfg.allowedIps)) }.getOrNull() }
+        val settings = serviceSettings()
+        // В режиме «только выбранные» сам WarpScout в туннель не входит — его запросы идут мимо.
+        val selfOutside = settings.appsMode == dev.warpscout.core.state.ServiceSettings.APPS_ONLY &&
+            settings.appsSelected.any { it != packageName }
+        fun ipBytes(ip: String): ByteArray = ip.split('.').map { it.toInt().toByte() }.toByteArray()
+        fun routed(ip: String): Boolean = !selfOutside && (routes == null || routes.route(ipBytes(ip)) == 1)
+
+        var web = TunnelStatus.LINK_FAIL
+        var webMs = -1
+        var exit = ""
+        var webNote = ""
+        if (!routed("1.1.1.1")) {
+            web = TunnelStatus.LINK_BYPASS
+            webNote = if (selfOutside) "WarpScout вне туннеля — режим «только выбранные»" else "адрес проверки не в маршрутах туннеля"
+        } else {
+            val t0 = android.os.SystemClock.elapsedRealtime()
+            val body = runCatching { httpGetSmall(dev.warpscout.core.net.CfTrace.URL_BY_IP, 5_000) }
+            val trace = dev.warpscout.core.net.CfTrace.parse(body.getOrNull())
+            if (trace != null) {
+                webMs = (android.os.SystemClock.elapsedRealtime() - t0).toInt()
+                exit = trace.summary()
+                web = if (trace.viaWarp) TunnelStatus.LINK_OK else TunnelStatus.LINK_BYPASS
+                if (!trace.viaWarp) webNote = "ответ пришёл мимо WARP"
+            } else {
+                webNote = body.exceptionOrNull()
+                    ?.let { "${it.javaClass.simpleName}: ${it.message.orEmpty().take(60)}" }
+                    ?: "ответ не похож на Cloudflare"
+            }
+        }
+
+        var tg = TunnelStatus.LINK_FAIL
+        var tgMs = -1
+        val tgRouted = TELEGRAM_DCS.filter { routed(it) }
+        if (tgRouted.isEmpty()) {
+            tg = TunnelStatus.LINK_BYPASS
+        } else {
+            for (host in tgRouted) {
+                val t0 = android.os.SystemClock.elapsedRealtime()
+                val ok = runCatching {
+                    java.net.Socket().use { sock -> sock.connect(InetSocketAddress(host, 443), 3_000) }
+                }.isSuccess
+                if (ok) {
+                    tg = TunnelStatus.LINK_OK
+                    tgMs = (android.os.SystemClock.elapsedRealtime() - t0).toInt()
+                    break
+                }
+            }
+        }
+        return LinkResult(web, webMs, exit, tg, tgMs, webNote)
+    }
+
+    /** GET с коротким телом (trace — пара сотен байт). Без кешей и перенаправлений. */
+    private fun httpGetSmall(url: String, timeoutMs: Int): String {
+        val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        try {
+            conn.connectTimeout = timeoutMs
+            conn.readTimeout = timeoutMs
+            conn.useCaches = false
+            conn.instanceFollowRedirects = false
+            conn.setRequestProperty("Cache-Control", "no-cache")
+            conn.setRequestProperty("Connection", "close")
+            val code = conn.responseCode
+            if (code !in 200..299) throw java.io.IOException("HTTP $code")
+            return conn.inputStream.use { input ->
+                val buf = ByteArray(4096)
+                var total = 0
+                while (total < buf.size) {
+                    val n = input.read(buf, total, buf.size - total)
+                    if (n <= 0) break
+                    total += n
+                }
+                String(buf, 0, total, Charsets.UTF_8)
+            }
+        } finally {
+            runCatching { conn.disconnect() }
+        }
+    }
+
+    /** Строка в журнал: что проверили и что из этого следует. */
+    private fun reportLink(reason: String, r: LinkResult) {
+        val web = when (r.web) {
+            TunnelStatus.LINK_OK -> "интернет ✓ ${r.webMs} мс" + (if (r.exit.isNotBlank()) ", выход ${r.exit}" else "")
+            TunnelStatus.LINK_BYPASS -> "интернет — мимо туннеля" + (if (r.webNote.isNotBlank()) " (${r.webNote})" else "")
+            else -> "интернет ✗ нет ответа" + (if (r.webNote.isNotBlank()) " (${r.webNote})" else "")
+        }
+        val tg = when (r.tg) {
+            TunnelStatus.LINK_OK -> "Telegram ✓ ${r.tgMs} мс"
+            TunnelStatus.LINK_BYPASS -> "Telegram — мимо туннеля"
+            else -> "Telegram ✗ сервер не отвечает"
+        }
+        val line = "проверка связи ($reason): $web; $tg"
+        when {
+            r.web == TunnelStatus.LINK_FAIL ->
+                TunnelDebug.error(line, "туннель поднят, но данные через него не ходят — переподключаю")
+            // Интернет через туннель есть, а Telegram молчит: туннель тут ни при чём, рвать его незачем.
+            r.tg == TunnelStatus.LINK_FAIL && r.web == TunnelStatus.LINK_OK ->
+                TunnelDebug.stage("$line — интернет через туннель есть, не отвечает именно Telegram")
+            else -> TunnelDebug.ok(line)
+        }
+    }
+
+    /** Экран попросил проверить связь (открыли приложение). */
+    private fun handleCheckRequest(startId: Int) {
+        val running = plane != null && worker?.isAlive == true && TunnelState.up
+        if (!running) {
+            idleStop(startId)
+            return
+        }
+        // Экран открывают часто — радио проверкой будим не чаще раза в 30 секунд.
+        if (System.currentTimeMillis() - lastLinkCheckAt < 30_000L) return
+        startLinkCheck(epoch.get(), "открыт экран", 0L, reconnectOnFail = true)
+    }
+
+    /**
+     * Остановиться после служебной команды (проба, проверка), только если сервису и правда нечего
+     * делать. Просто stopSelf(startId) здесь нельзя: сервис мог ждать медленного повтора или сети
+     * (туннель нужен, но сейчас лежит) — служебная команда не должна это ожидание обрывать.
+     */
+    private fun idleStop(startId: Int) {
+        if (!wanted && plane == null && !starting) runCatching { stopSelf(startId) }
+    }
+
+    // ------------------------------------------------------------ проба точки по просьбе экрана
+
+    /**
+     * Проверить точку, не трогая работающий туннель: та же проба, что у дозора (своим ключом, с
+     * отдельного защищённого сокета, с внеочередным keepalive после). Ответ — в снимок состояния
+     * (`TunnelStatus.probe`) с номером запроса.
+     */
+    private fun handleProbe(intent: Intent, startId: Int) {
+        val id = intent.getLongExtra(EXTRA_PROBE_ID, 0L)
+        val line = intent.getStringExtra(EXTRA_ENDPOINT).orEmpty().trim()
+        val target = parseEndpoint(line)
+        val cfg = lastConfigText?.let { text -> runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull() }
+        val peer = cfg?.let { c -> runCatching { Crypto.unBase64(c.account.peerPublicB64) }.getOrNull() }
+            ?.takeIf { it.size == 32 }
+        val running = plane != null && worker?.isAlive == true && TunnelState.up
+        if (target == null || cfg == null || peer == null || !running) {
+            TunnelState.probe = "$id|$line|${TunnelStatus.PROBE_NONE}|-1"
+            idleStop(startId)
+            return
+        }
+        val myEpoch = epoch.get()
+        val thread = Thread({
+            val prober = WgProber(
+                NetSettings(
+                    attempts = 1,
+                    timeoutMs = 1500,
+                    betweenAttemptsMs = 0,
+                    junkPacketsBeforeHandshake = 1,
+                    udpFactory = protectedUdp()
+                )
+            )
+            val (verdict, rtt) = runCatching { sentryProbe(prober, target, cfg, peer) }
+                .getOrDefault(Verdict.ERROR to null)
+            val code = when (verdict) {
+                Verdict.HANDSHAKE_OK, Verdict.COOKIE_REPLY -> TunnelStatus.PROBE_OK
+                Verdict.UDP_CLOSED -> TunnelStatus.PROBE_CLOSED
+                Verdict.UDP_SILENT -> TunnelStatus.PROBE_SILENT
+                else -> TunnelStatus.PROBE_NONE
+            }
+            // Итог — и в метки дозора: точка, проверенная по просьбе, тоже «проверена».
+            if (myEpoch == epoch.get()) noteProbeResult(line, code)
+            TunnelDebug.stage(
+                "проверка точки перед переключением: $line " + when (code) {
+                    TunnelStatus.PROBE_OK -> "✓ отвечает" + (rtt?.let { " за ${it.toLong()} мс" } ?: "")
+                    TunnelStatus.PROBE_CLOSED -> "✗ порт закрыт — текущий туннель не трогаю"
+                    TunnelStatus.PROBE_SILENT -> "✗ молчит — текущий туннель не трогаю"
+                    else -> "? проверить не вышло (${verdict.name.lowercase()})"
+                }
+            )
+            TunnelState.probe = "$id|$line|$code|${rtt?.toLong() ?: -1}"
+        }, "warpscout-probe")
+        thread.isDaemon = true
+        thread.start()
+    }
+
+    /** Итог пробы по просьбе экрана — в метки дозора, как итог его собственного обхода. */
+    private fun noteProbeResult(line: String, code: Int) {
+        val key = "${memoryNetKind()}|$line"
+        val before = sentryMarks[key] ?: SentryMark()
+        val now = System.currentTimeMillis()
+        when (code) {
+            TunnelStatus.PROBE_OK -> sentryMarks[key] = SentryMark(okAt = now)
+            TunnelStatus.PROBE_CLOSED -> sentryMarks[key] = SentryMark(okAt = before.okAt, fails = 2, failAt = now)
+            TunnelStatus.PROBE_SILENT ->
+                sentryMarks[key] = SentryMark(okAt = before.okAt, fails = before.fails + 1, failAt = now)
+            else -> return
+        }
+        publishMarks()
+    }
+
+    /**
+     * Метки дозора текущей сети — в снимок: интерфейс показывает их в списке лучших и в выборе
+     * резервной точки, чтобы человек видел «молчит с 12:53» до нажатия, а не после.
+     */
+    private fun publishMarks() {
+        val prefix = "${memoryNetKind()}|"
+        TunnelState.marks = sentryMarks.entries
+            .filter { it.key.startsWith(prefix) }
+            .sortedBy { it.key }
+            .joinToString(";") { (key, m) -> "${key.removePrefix(prefix)}|${m.okAt}|${m.fails}|${m.failAt}" }
+    }
+
+    // ------------------------------------------------------------ автоподъём
+
+    /**
+     * Текст для запуска без конфига: перезапуск системой (null), «Постоянный VPN» из настроек
+     * Android, автоподъём после загрузки или обновления. null — поднимать не надо (или нечего).
+     *
+     * Правило то же, что везде: выключенный руками туннель сам не включается. Для «Постоянного
+     * VPN» отдельной проверки «был ли включён» нет — его включил сам человек в настройках системы.
+     */
+    private fun autoStartText(intent: Intent?): String? {
+        val action = intent?.action
+        val why = when {
+            intent == null -> "система перезапустила сервис"
+            action == VpnService.SERVICE_INTERFACE -> "постоянный VPN (настройки Android)"
+            action == ACTION_AUTOSTART -> intent?.getStringExtra(EXTRA_REASON) ?: "автоподъём"
+            else -> return null
+        }
+        if (TunnelState.stoppedByUser) {
+            TunnelDebug.stage("$why: туннель выключен вручную — сам не включаю, пока не нажмёшь «Включить»")
+            return null
+        }
+        val previous = bootSnapshot
+        val wasOn = previous == null || previous.wanted || previous.up
+        if (action != VpnService.SERVICE_INTERFACE && !wasOn) {
+            TunnelDebug.stage("$why: туннель перед этим не был включён — не поднимаю")
+            return null
+        }
+        // Файл пишет только удачный подъём; до первого такого (сразу после обновления) берём то,
+        // чем туннель поднимался по кнопке. Процесс сервиса здесь свежий — настройки он читает с диска.
+        val saved = TunnelLastConfig.load(this)
+            ?: runCatching { dev.warpscout.app.Prefs(this).lastConfigText }.getOrNull()?.takeIf { it.contains("PrivateKey") }
+        if (saved.isNullOrBlank()) {
+            TunnelDebug.stage("$why: рабочей конфигурации ещё нет — открой приложение и нажми «Включить»")
+            return null
+        }
+        TunnelDebug.stage("$why — поднимаю последнюю рабочую конфигурацию (${endpointOf(saved) ?: "точка не указана"})")
+        return saved
+    }
+
+    // ------------------------------------------------------------ ожидание данных в tun
+
+    /**
+     * Ждать, пока в tun появятся данные: poll() по дескриптору, без пробуждений по таймеру.
+     * true — можно читать. Закрытие tun будит ожидание, а предел [ms] страхует, если не разбудит.
+     */
+    private fun waitTunReadable(tunFd: java.io.FileDescriptor, ms: Long): Boolean = try {
+        val pollFd = android.system.StructPollfd()
+        pollFd.fd = tunFd
+        pollFd.events = android.system.OsConstants.POLLIN.toShort()
+        android.system.Os.poll(arrayOf(pollFd), ms.coerceIn(1L, 60_000L).toInt()) > 0 &&
+            (pollFd.revents.toInt() and android.system.OsConstants.POLLIN) != 0
+    } catch (e: android.system.ErrnoException) {
+        false
+    } catch (e: Exception) {
+        false
     }
 
     /**
@@ -1313,10 +1743,12 @@ class WarpVpnService : VpnService() {
         val builder = Builder()
             .setSession("WarpScout")
             .setMtu(cfg.mtu.coerceIn(576, 1420))
-            // setBlocking(true) = «всё, что не попало в маршруты, ЗАПРЕТИТЬ». При split-tunnel это
-            // убило бы весь российский трафик (его в AllowedIPs нет намеренно), поэтому блокируем
-            // только когда туннель и правда полный.
-            .setBlocking(isFullTunnel(cfg))
+            // setBlocking — это НЕ «запретить трафик мимо маршрутов» (так ошибочно было написано
+            // здесь раньше), а режим дескриптора tun: блокирующее чтение или нет. Дескриптор
+            // всегда неблокирующий, а ждать пакетов помогает poll() (см. waitTunReadable): поток
+            // спит до пакета и гарантированно выходит при остановке. Раньше пустое чтение в
+            // раздельном режиме значило «поспать 20 мс и снова» — 50 пробуждений в секунду.
+            .setBlocking(false)
         runCatching { builder.setMetered(false) }   // иначе часть телефонов режет фоновый трафик в туннеле
         runCatching { builder.addAddress(cfg.account.ipv4.substringBefore('/'), 32) }
         val v6 = cfg.account.ipv6?.takeIf { cfg.enableIpv6Address && it.isNotBlank() }
@@ -2140,9 +2572,14 @@ class WarpVpnService : VpnService() {
         failoverOrder = orderedCandidates()
         failoverNet = kind
         failoverPos = current?.let { failoverOrder.indexOf(it) } ?: -1
-        if (remembered != null && remembered != current && !sentryDead(kind, remembered)) {
+        val backup = runCatching { serviceSettings().backup }.getOrDefault("").trim()
+        if (backup.isNotEmpty() && backup != current && !sentryDead(kind, backup)) {
+            TunnelDebug.stage("резервная точка, выбранная вручную: $backup — она в переборе вторая")
+        } else if (remembered != null && remembered != current && !sentryDead(kind, remembered)) {
             TunnelDebug.stage("на сети «$kind» работала $remembered — она в переборе вторая")
         }
+        // Сеть могла смениться — метки в снимке должны быть про неё.
+        publishMarks()
         // Если порядок поправил дозор — показываем его в журнале: иначе не понять, почему сервис
         // пошёл не на следующую точку очереди, а через одну.
         if (failoverOrder.size > 1 && failoverOrder.any { it != current && sentryMarks.containsKey("$kind|$it") }) {
@@ -2166,6 +2603,8 @@ class WarpVpnService : VpnService() {
             .filter { it.isNotEmpty() }
         val current = currentEndpointLine()
         val remembered = runCatching { EndpointMemory.goodFor(this, kind) }.getOrNull()
+        // Резервная точка, выбранная человеком: на неё — первой после текущей.
+        val backup = runCatching { serviceSettings().backup }.getOrDefault("").trim().takeIf { it.isNotEmpty() }
         val prefix = "$kind|"
         val fresh = sentryMarks.entries
             .filter { (key, mark) ->
@@ -2175,6 +2614,7 @@ class WarpVpnService : VpnService() {
             .map { it.key.removePrefix(prefix) }
         val all = buildList {
             if (current != null) add(current)
+            if (backup != null) add(backup)
             if (remembered != null) add(remembered)
             addAll(fresh)
             addAll(queue)
@@ -2188,6 +2628,7 @@ class WarpVpnService : VpnService() {
         val key = "${memoryNetKind()}|$endpoint"
         val before = sentryMarks[key] ?: SentryMark()
         sentryMarks[key] = SentryMark(okAt = before.okAt, fails = 2, failAt = System.currentTimeMillis())
+        publishMarks()
     }
 
     /** Дозор дважды подряд не достучался до точки на этой сети, и было это недавно. */
@@ -2337,6 +2778,7 @@ class WarpVpnService : VpnService() {
         }
         controlNote?.let { notes += it }
         if (notes.isNotEmpty()) TunnelDebug.stage("дозор: " + notes.joinToString("; "))
+        if (learned) publishMarks()
         return if (learned) SENTRY_INFO else if (notes.isEmpty()) SENTRY_IDLE else SENTRY_ERRORS
     }
 
@@ -2553,7 +2995,19 @@ class WarpVpnService : VpnService() {
 
         const val ACTION_START = "dev.warpscout.app.tunnel.START"
         const val ACTION_STOP = "dev.warpscout.app.tunnel.STOP"
+
+        /** Проверить точку рядом с работающим туннелем (см. handleProbe). */
+        const val ACTION_PROBE = "dev.warpscout.app.tunnel.PROBE"
+
+        /** Проверить связь через туннель (см. handleCheckRequest). */
+        const val ACTION_CHECK = "dev.warpscout.app.tunnel.CHECK"
+
+        /** Поднять последнюю рабочую конфигурацию: после загрузки и обновления (см. TunnelAutoStart). */
+        const val ACTION_AUTOSTART = "dev.warpscout.app.tunnel.AUTOSTART"
         const val EXTRA_CONF = "conf"
+        const val EXTRA_ENDPOINT = "endpoint"
+        const val EXTRA_PROBE_ID = "probeId"
+        const val EXTRA_REASON = "reason"
 
         /** STOP по просьбе человека: после него автоматика туннель не включает. */
         const val EXTRA_BY_USER = "byUser"
@@ -2599,6 +3053,44 @@ class WarpVpnService : VpnService() {
                 )
                 runCatching { context.startService(intent) }
                     .onFailure { TunnelState.status = "сервис не запустился: ${it.message}" }
+            }
+        }
+
+        /**
+         * Попросить проверить точку рядом с работающим туннелем. Обычный startService: зовёт его
+         * открытый экран, и требования «уведомление за 5 с» у такой команды нет.
+         */
+        fun probe(context: Context, endpoint: String, id: Long): Boolean = runCatching {
+            context.startService(
+                Intent(context, WarpVpnService::class.java).apply {
+                    action = ACTION_PROBE
+                    putExtra(EXTRA_ENDPOINT, endpoint)
+                    putExtra(EXTRA_PROBE_ID, id)
+                }
+            )
+            true
+        }.getOrDefault(false)
+
+        /** Попросить проверить связь через туннель (итог придёт в снимке состояния). */
+        fun requestLinkCheck(context: Context) {
+            runCatching {
+                context.startService(Intent(context, WarpVpnService::class.java).apply { action = ACTION_CHECK })
+            }
+        }
+
+        /**
+         * Автоподъём (загрузка телефона, обновление приложения). Решение «поднимать ли» сервис
+         * перепроверяет сам: выключенный вручную туннель не включится и отсюда.
+         */
+        fun autoStart(context: Context, reason: String) {
+            val intent = Intent(context, WarpVpnService::class.java).apply {
+                action = ACTION_AUTOSTART
+                putExtra(EXTRA_REASON, reason)
+            }
+            val first = runCatching { context.startForegroundService(intent) }
+            if (first.isFailure) {
+                val why = first.exceptionOrNull()
+                TunnelDebug.error("автоподъём: сервис не запустился: ${why?.javaClass?.simpleName} ${why?.message}")
             }
         }
 

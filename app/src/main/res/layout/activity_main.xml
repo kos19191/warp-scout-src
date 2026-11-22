@@ -26,6 +26,7 @@
     </com.google.android.material.card.MaterialCardView>
 
     <FrameLayout
+        android:id="@+id/pagesFrame"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1">
@@ -296,7 +297,35 @@
                     </LinearLayout>
                 </com.google.android.material.card.MaterialCardView>
 
+                <!--
+                  Тот же еле заметный тумблер, что внизу упрощённого экрана: здесь он возвращает
+                  упрощённый вид. Выбор запоминается.
+                -->
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_horizontal"
+                    android:layout_marginTop="@dimen/space_l"
+                    android:alpha="0.6"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
 
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/mode_simple"
+                        android:textAppearance="?attr/textAppearanceLabelMedium"
+                        android:textColor="?attr/colorOnSurfaceVariant" />
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchSimpleMode"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="4dp"
+                        android:contentDescription="@string/mode_simple"
+                        android:scaleX="0.75"
+                        android:scaleY="0.75" />
+                </LinearLayout>
             </LinearLayout>
         </ScrollView>
 
@@ -504,6 +533,43 @@
                 android:paddingStart="16dp"
                 android:paddingEnd="16dp"
                 android:paddingBottom="24dp">
+
+                <!-- ── оформление: тема для обоих видов экрана ── -->
+                <TextView
+                    style="@style/SectionHeader"
+                    android:text="@string/theme_title" />
+
+                <com.google.android.material.button.MaterialButtonToggleGroup
+                    android:id="@+id/themeGroup"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    app:selectionRequired="true"
+                    app:singleSelection="true">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnThemeSystem"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/theme_system" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnThemeLight"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/theme_light" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnThemeDark"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/theme_dark" />
+                </com.google.android.material.button.MaterialButtonToggleGroup>
 
                 <!-- ── что туннелируем и как (переехало из вкладки «Туннель») ── -->
 
@@ -1264,6 +1330,19 @@
             </LinearLayout>
         </androidx.core.widget.NestedScrollView>
     </FrameLayout>
+
+    <!--
+      Упрощённый экран. Отдельная разметка (layout_simple), но та же активность: кнопка, статус и
+      переключение точек работают через тот же код, что и в расширенном виде, — двух разных логик
+      подключения нет. В упрощённом виде скрыты вкладки, их панель и строка статуса сверху.
+    -->
+    <include
+        android:id="@+id/simple"
+        layout="@layout/layout_simple"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:visibility="gone" />
 
     <!--
       Навигация внизу: до неё дотягивается большой палец, и она не уезжает, когда содержимое

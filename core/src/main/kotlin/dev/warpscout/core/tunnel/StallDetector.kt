@@ -42,6 +42,25 @@ object StallDetector {
         return now - anchor >= windowMs
     }
 
+    /**
+     * Сколько ждём, прежде чем заподозрить неладное и проверить связь по-настоящему.
+     *
+     * Зачем второй, «мягкий» порог. [isStalled] требует 50 пакетов без ответа: так он не путает
+     * мёртвую сессию с одиночными UDP-датаграммами, но и не видит приложение, которое шлёт мало.
+     * Telegram, потерявший соединение, пытается заново редкими пакетами — пятьдесят штук за 45 с
+     * не набирается, и туннель часами числился «подключённым», хотя Telegram не работал.
+     * Подозрение само туннель не рвёт: сервис по нему делает проверку связи (запрос через туннель),
+     * и только её провал ведёт к переподключению.
+     */
+    const val SUSPECT_MS = 15_000L
+
+    /** Сколько пакетов должно уйти без ответа, чтобы заподозрить. Живой сервер отвечает раньше. */
+    const val SUSPECT_PACKETS = 8
+
+    /** Пора проверить связь: ушло [SUSPECT_PACKETS] пакетов и [SUSPECT_MS] нет ни одного ответа. */
+    fun isSuspect(now: Long, lastRxAt: Long, burstStartAt: Long, sentPackets: Int): Boolean =
+        isStalled(now, lastRxAt, burstStartAt, sentPackets, SUSPECT_MS, SUSPECT_PACKETS)
+
     /** Человеческое объяснение для журнала: по нему видно, что именно решило дело. */
     fun explain(now: Long, lastRxAt: Long, burstStartAt: Long, sentPackets: Int): String {
         val anchor = maxOf(lastRxAt, burstStartAt)

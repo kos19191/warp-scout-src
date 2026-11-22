@@ -11,8 +11,8 @@ android {
         applicationId = "dev.warpscout.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 53
-        versionName = "1.10.26"
+        versionCode = 54
+        versionName = "1.10.27"
         // Номер сборки (короткий хеш коммита из CI). Мелкие доправки пересобирают ту же версию
         // поверх, и только по этой метке в журнале видно, какая именно сборка стоит на телефоне.
         // Локально — «local».
@@ -25,16 +25,22 @@ android {
 
     flavorDimensions += "mode"
     productFlavors {
-        // Только сканер + генератор конфигов + передача в Amnezia.
+        // С 1.10.27 «только конфиги» больше нет: обе сборки — полное приложение со своим
+        // туннелем. Разница одна — каким экраном оно открывается, пока человек сам не выбрал
+        // (тумблер внизу экрана, выбор запоминается). Идентификаторы и подписи прежние, поэтому
+        // обе обновляются поверх старых версий без потери настроек.
         create("scout") {
             dimension = "mode"
-            buildConfigField("boolean", "TUNNEL_SUPPORTED", "false")
+            buildConfigField("boolean", "TUNNEL_SUPPORTED", "true")
+            // scout открывается расширенным экраном — всеми вкладками, как раньше.
+            buildConfigField("boolean", "DEFAULT_SIMPLE", "false")
             resValue("string", "app_name", "WarpScout")
         }
-        // То же + собственный туннель (VpnService), проверка ресурсов из-под туннеля.
         create("tunnel") {
             dimension = "mode"
             buildConfigField("boolean", "TUNNEL_SUPPORTED", "true")
+            // tunnel открывается упрощённым: кнопка подключения, резервная точка, проверка связи.
+            buildConfigField("boolean", "DEFAULT_SIMPLE", "true")
             resValue("string", "app_name", "WarpScout (tunnel)")
             // чтобы обе сборки можно было держать на телефоне одновременно и сравнивать
             applicationIdSuffix = ".tunnel"
@@ -118,7 +124,12 @@ android {
 
     sourceSets {
         getByName("main") { java.srcDirs("src/main/kotlin") }
-        getByName("scout") { java.srcDirs("src/scout/kotlin") }
+        // Туннель (сервис, плитка, автоподъём) — общий для обеих сборок: код и манифест берутся
+        // из src/tunnel. Отдельной заглушки «туннеля нет» у scout больше нет.
+        getByName("scout") {
+            java.srcDirs("src/tunnel/kotlin")
+            manifest.srcFile("src/tunnel/AndroidManifest.xml")
+        }
         getByName("tunnel") { java.srcDirs("src/tunnel/kotlin") }
     }
 }

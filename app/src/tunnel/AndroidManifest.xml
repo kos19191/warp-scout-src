@@ -6,6 +6,10 @@
          FOREGROUND_SERVICE_TYPE_VPN), поэтому используется specialUse + подтип vpn. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
+    <!-- Автоподъём после перезагрузки: туннель, который был включён и не выключен вручную,
+         поднимается сам (см. tunnel/TunnelAutoStart.kt). -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <application>
         <!-- Туннель живёт в СВОЁМ процессе. Причина: интерфейс и VPN были в одном процессе,
              и любое падение экрана (а он тяжёлый: списки приложений, подбор, экспорт) гасило
@@ -31,8 +35,8 @@
         </service>
 
         <!-- Плитка в быстрых настройках: нажатие — подключить последний конфиг, удержание —
-             открыть приложение (через QS_TILE_PREFERENCES ниже). Только во flavor'е tunnel:
-             в scout своего туннеля нет, и плитка была бы обманом. -->
+             открыть приложение (через QS_TILE_PREFERENCES ниже). С 1.10.27 туннель есть в обеих
+             сборках, поэтому и плитка — в обеих. -->
         <service
             android:name=".tunnel.TunnelTileService"
             android:exported="true"
@@ -43,6 +47,18 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
+
+        <!-- Перезагрузка и обновление приложения убивают процесс туннеля. Если перед этим туннель
+             работал и его не выключали вручную, приёмник поднимает его снова. Оба события —
+             защищённые системные рассылки: подделать их стороннее приложение не может. -->
+        <receiver
+            android:name=".tunnel.TunnelAutoStart"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Долгое нажатие по плитке: Android открывает активность с этим фильтром. -->
         <activity-alias

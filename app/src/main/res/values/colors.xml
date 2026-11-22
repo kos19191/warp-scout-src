@@ -41,4 +41,15 @@
     <color name="state_off">#5F6368</color>
     <color name="check_ok">#2E7D32</color>
     <color name="check_fail">#C62828</color>
+
+    <!--
+      Главная кнопка упрощённого экрана. Оранжевый насыщеннее основного: на свечении бледный тон
+      превращается в грязное пятно. Диск — тёплая нейтраль из той же палитры.
+    -->
+    <color name="orb_accent">#EA580C</color>
+    <color name="orb_warn">#D97706</color>
+    <color name="orb_error">#DC2626</color>
+    <color name="orb_ring_off">#D3C8BE</color>
+    <color name="orb_disc_top">#FFFFFF</color>
+    <color name="orb_disc_bottom">#F1E9E2</color>
 </resources>

@@ -261,6 +261,38 @@ class Prefs(private val context: Context) {
         get() = sp.getString("lastEndpoint", "").orEmpty()
         set(v) = sp.edit().putString("lastEndpoint", v).apply()
 
+    /**
+     * Резервная точка, выбранная человеком в «Резервном» (host:port; пусто — не выбрана). Её же
+     * получает сервис: если текущая точка замолчит, он перейдёт на неё первой.
+     */
+    var backupEndpoint: String
+        get() = sp.getString("backupEndpoint", "").orEmpty()
+        set(v) {
+            sp.edit().putString("backupEndpoint", v.trim()).apply()
+            pushToService()
+        }
+
+    /**
+     * Вид главного экрана: [UI_SIMPLE] — одна кнопка, запасная точка и проверка связи;
+     * [UI_ADVANCED] — все вкладки, как раньше; [UI_DEFAULT] — ещё не выбирали, решает сборка
+     * (tunnel открывается упрощённым, scout — расширенным).
+     */
+    var uiMode: Int
+        get() = sp.getInt("uiMode", UI_DEFAULT)
+        set(v) = sp.edit().putInt("uiMode", v).apply()
+
+    /** Упрощённый ли экран сейчас: выбор человека, а без него — то, что задано сборкой. */
+    fun simpleUi(): Boolean = when (uiMode) {
+        UI_SIMPLE -> true
+        UI_ADVANCED -> false
+        else -> BuildConfig.DEFAULT_SIMPLE
+    }
+
+    /** Тема: [THEME_SYSTEM] — как в системе, [THEME_LIGHT] — светлая, [THEME_DARK] — тёмная. */
+    var themeMode: Int
+        get() = sp.getInt("themeMode", THEME_SYSTEM).coerceIn(THEME_SYSTEM, THEME_DARK)
+        set(v) = sp.edit().putInt("themeMode", v.coerceIn(THEME_SYSTEM, THEME_DARK)).apply()
+
     /** Регион выхода, определённый последним подключением (colo · страна · адрес). */
     var lastExitRegion: String
         get() = sp.getString("lastExitRegion", "").orEmpty()
@@ -409,6 +441,7 @@ class Prefs(private val context: Context) {
                 appsMode = appsMode,
                 appsSelected = appsSelected.toList().sorted(),
                 failover = failoverQueue,
+                backup = backupEndpoint,
             )
         )
     }
@@ -450,6 +483,15 @@ class Prefs(private val context: Context) {
         const val APPS_EXCEPT = ServiceSettings.APPS_EXCEPT
         const val POOL_MASQUE = 1
         const val POOL_FULL = 2
+
+        /** Вид экрана ещё не выбирали — решает сборка (BuildConfig.DEFAULT_SIMPLE). */
+        const val UI_DEFAULT = 0
+        const val UI_SIMPLE = 1
+        const val UI_ADVANCED = 2
+
+        const val THEME_SYSTEM = 0
+        const val THEME_LIGHT = 1
+        const val THEME_DARK = 2
 
         const val MIRROR_NOTE = "Ключи берутся из публичного генератора (warp-api.cfd); вводить PrivateKey не нужно."
     }

@@ -289,8 +289,8 @@
     <string name="conn_waiting">● Переподключусь сам: %1$s</string>
     <string name="journal_empty">Журнал пуст: туннель ещё не запускался. Подключитесь на вкладке «Главная» — здесь появится каждый шаг с временем.</string>
     <string name="version_footer">WarpScout %1$s · %2$s</string>
-    <string name="variant_tunnel">полная сборка с туннелем</string>
-    <string name="variant_scout">сборка-сканер (без туннеля)</string>
+    <string name="variant_tunnel">tunnel · открывается упрощённым экраном</string>
+    <string name="variant_scout">scout · открывается расширенным экраном</string>
     <string name="section_report">Отчёт</string>
 
     <!-- Советы в диагностике: подбираются по журналу, текст — из ресурсов -->
@@ -369,4 +369,67 @@
     <string name="scan_notif_title">Идёт подбор</string>
     <string name="scan_notif_text">проверяю точки, можно свернуть приложение</string>
     <string name="scan_notif_channel">Подбор конфигурации</string>
+
+    <!-- ── упрощённый экран ── -->
+    <string name="simple_brand">WarpScout</string>
+    <string name="simple_orb_desc">Включить или выключить туннель</string>
+    <string name="simple_state_off">Выключено</string>
+    <string name="simple_state_connecting">Подключаю…</string>
+    <string name="simple_state_cancelling">Отменяю…</string>
+    <string name="simple_state_on">Подключено</string>
+    <string name="simple_state_no_link">Нет связи</string>
+    <string name="simple_state_waiting">Переподключаюсь…</string>
+    <string name="simple_state_no_network">Нет сети</string>
+    <string name="simple_state_scanning">Подбор точек…</string>
+    <string name="simple_tap_to_connect">нажмите, чтобы включить</string>
+    <string name="simple_tap_to_cancel">нажмите, чтобы отменить</string>
+    <string name="simple_tap_to_stop_scan">нажмите, чтобы остановить</string>
+    <string name="simple_tap_to_stop">нажмите, чтобы выключить</string>
+    <string name="simple_link_need_tunnel">Сначала включи туннель: связь проверяется через него</string>
+    <string name="simple_scan_progress">проверено %1$d из %2$d</string>
+    <string name="simple_where">%1$s · %2$s</string>
+    <string name="simple_where_region">%1$s · %2$s · выход %3$s</string>
+    <string name="simple_dash">—</string>
+    <string name="simple_link_title">Связь</string>
+    <string name="simple_link_ms">%1$d мс</string>
+    <string name="simple_link_checking">проверяю…</string>
+    <string name="simple_link_web">Интернет</string>
+    <string name="simple_link_tg">Telegram</string>
+    <string name="simple_link_fail">нет ответа</string>
+    <string name="simple_link_bypass">мимо туннеля</string>
+    <string name="simple_backup_title">Резервная</string>
+    <string name="simple_backup_none">не выбрана</string>
+    <string name="simple_backup_change">Сменить ›</string>
+    <string name="simple_backup_hint_none">выбери точку на случай, если текущая замолчит</string>
+    <string name="mark_ok">отвечает, проверено в %1$s</string>
+    <string name="mark_silent">не ответила в %1$s</string>
+    <string name="mark_unknown">ещё не проверялась</string>
+    <string name="mark_current">сейчас подключена</string>
+    <string name="mode_advanced">Расширенный режим</string>
+    <string name="mode_simple">Упрощённый режим</string>
+    <string name="sheet_backup_title">Резервная точка</string>
+    <string name="sheet_backup_hint">Если текущая точка замолчит, туннель сам перейдёт на резервную. «Подключить» — перейти сейчас: рабочий туннель не трогается, пока точка не ответит.</string>
+    <string name="sheet_connect">Подключить</string>
+    <string name="sheet_rescan">Подобрать новые точки</string>
+    <string name="sheet_clear">Не выбирать резервную</string>
+    <string name="sheet_empty">Точек пока нет: они появятся после подбора.</string>
+    <string name="sheet_row_junk">шум %1$s</string>
+    <string name="backup_set">Резервная точка: %1$s</string>
+    <string name="backup_cleared">Резервная точка не выбрана</string>
+    <string name="theme_title">Тема оформления</string>
+    <string name="theme_system">Как в системе</string>
+    <string name="theme_light">Светлая</string>
+    <string name="theme_dark">Тёмная</string>
+
+    <!-- ── честное переключение точки ── -->
+    <string name="probe_checking">Проверяю %1$s, туннель пока не трогаю…</string>
+    <string name="probe_silent">%1$s не отвечает — оставил текущую %2$s</string>
+    <string name="probe_closed">%1$s: порт закрыт — оставил текущую %2$s</string>
+    <string name="switch_fell_back">%1$s не поднялась (%2$s) — работает прежняя %3$s</string>
+    <string name="switch_fell_back_other">%1$s не поднялась (%2$s) — подключил %3$s</string>
+
+    <!-- ── проверка связи в строке статуса ── -->
+    <string name="conn_link_ok"> · связь ✓ %1$d мс</string>
+    <string name="conn_link_fail"> · связи нет — переподключаю</string>
+    <string name="conn_link_tg"> · Telegram не отвечает</string>
 </resources>

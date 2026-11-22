@@ -185,6 +185,12 @@ class TunDispatcher(
     private val tun: InputStream,
     private val router: ExitRouter,
     private val lanes: List<PacketQueueIn>,
+    /**
+     * Ждать данных в tun (см. `DataPlane.tunReady`). Дескриптор tun неблокирующий: пустое чтение
+     * возвращает 0, и раньше диспетчер принимал его за конец потока и останавливался сразу после
+     * запуска — второй выход в раздельном режиме молча не работал.
+     */
+    private val tunReady: ((Long) -> Boolean)? = null,
     private val log: (String) -> Unit = {}
 ) : Runnable {
 
@@ -211,7 +217,15 @@ class TunDispatcher(
             } catch (e: Exception) {
                 -1
             }
-            if (n <= 0) break
+            if (n < 0) break
+            if (n == 0) {
+                // Пусто — ждём пакет, а не выходим: 0 у неблокирующего tun значит «пока нечего».
+                val waitTun = tunReady
+                if (waitTun == null || !runCatching { waitTun(5_000L) }.getOrDefault(false)) {
+                    if (!stopped) runCatching { Thread.sleep(20) }
+                }
+                continue
+            }
             val packet = buf.copyOf(n)
             val dst = IpPacket.dst(packet)
             if (dst == null) {

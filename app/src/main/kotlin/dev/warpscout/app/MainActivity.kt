@@ -11,6 +11,7 @@ import android.widget.ArrayAdapter
 import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
 import androidx.core.widget.NestedScrollView
 import androidx.core.widget.doAfterTextChanged
@@ -133,6 +134,9 @@ class MainActivity : AppCompatActivity() {
     private var suppressSettingsReconnect = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Тема — до super.onCreate: экран сразу создаётся светлым или тёмным, без пересоздания и
+        // мигания. Ошибка чтения настроек темы не должна мешать запуску — тогда просто как в системе.
+        runCatching { applyThemeMode(Prefs(this).themeMode) }
         super.onCreate(savedInstanceState)
         // Первым делом: если приложение падало, это должно попасть в журнал, а не исчезнуть.
         CrashLog.install(this)
@@ -187,12 +191,20 @@ class MainActivity : AppCompatActivity() {
             }
             binding.textStatus.setText(R.string.status_idle)
             // Номер сборки рядом с версией: мелкие доправки пересобирают ту же версию поверх, и
-            // только так видно, какая именно сборка стоит.
+            // только так видно, какая именно сборка стоит. С 1.10.27 туннель есть в обеих сборках —
+            // они различаются тем, каким экраном открываются.
             binding.textVersion.text = getString(
                 R.string.version_footer,
                 BuildConfig.VERSION_NAME + " · " + BuildConfig.BUILD_REV,
-                getString(if (BuildConfig.TUNNEL_SUPPORTED) R.string.variant_tunnel else R.string.variant_scout)
+                getString(if (BuildConfig.FLAVOR == "tunnel") R.string.variant_tunnel else R.string.variant_scout)
             )
+            // Упрощённый экран и выбор вида — после всего остального: им нужны готовые настройки,
+            // список лучших точек и подпись версии. Сбой здесь не должен снимать весь экран.
+            runCatching { setupSimple() }.onFailure { t ->
+                TunnelDebug.error("упрощённый экран не настроился: " + SafeMode.describe(t))
+            }
+            runCatching { setupThemeToggle() }
+            applyUiMode()
             shown = this
             // Подбор мог идти, пока экран создавался заново: показываем его и даём остановить.
             syncScanUi(fresh = true)
@@ -220,6 +232,7 @@ class MainActivity : AppCompatActivity() {
         screenResumed = false
         stopTunnelPolling()
         tunnelHandler.removeCallbacks(bannerHide)
+        tunnelHandler.removeCallbacks(simpleTick)
         super.onPause()
     }
 
@@ -257,6 +270,10 @@ class MainActivity : AppCompatActivity() {
             renderShortlist()
             showKeys()
             syncScanUi(fresh = false)
+            // «Подключено» на экране должно быть проверенным: открыли приложение — сервис ещё раз
+            // проверяет связь через туннель (сам он делает это не чаще раза в 30 секунд).
+            if (tunnel.supported && tunnel.isUp) tunnel.requestLinkCheck()
+            startSimpleTick()
         }.onFailure { t ->
             TunnelDebug.error("обновление экрана: " + SafeMode.describe(t))
             runCatching { banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true) }
@@ -460,8 +477,9 @@ class MainActivity : AppCompatActivity() {
      * экран, поэтому обработка в `runCatching`.
      */
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
-        // До построения экрана (или на аварийном) переключать нечего — жест просто не наш.
-        if (::pages.isInitialized) runCatching {
+        // До построения экрана (или на аварийном) переключать нечего — жест просто не наш. В
+        // упрощённом виде вкладок на экране нет — и листать нечего.
+        if (::pages.isInitialized && !simpleShown()) runCatching {
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     swipeFromX = ev.x
@@ -851,6 +869,8 @@ class MainActivity : AppCompatActivity() {
             binding.btnTunnel.isEnabled = false
             binding.btnTunnel.setText(R.string.btn_tunnel_searching)
         }
+        scanProgressText = ""
+        updateSimple()
         engine.start(prefs.tuningSpec(), manualConfig(), sink()) { result, error ->
             autoConnectAfterScan = false
             // Итог — на тот экран, что сейчас на виду: подбор переживает поворот и возврат в
@@ -863,7 +883,11 @@ class MainActivity : AppCompatActivity() {
     /** Подбор закончился (или его остановили): показать итог и сделать то, что было обещано. */
     private fun onScanDone(result: TuningResult?, error: String?, connect: Boolean, tunnelWasUp: Boolean) {
         scanAutoConnect = false
+        scanProgressText = ""
         if (!::binding.isInitialized) return
+        // Список лучших точек обновился — его видно и в «Резервной» упрощённого экрана.
+        runCatching { renderShortlist() }
+        updateSimple()
         binding.progress.visibility = View.GONE
         binding.btnStop.visibility = View.GONE
         when {
@@ -1245,7 +1269,7 @@ class MainActivity : AppCompatActivity() {
             val text = buildString {
                 appendLine(
                     "WarpScout ${BuildConfig.VERSION_NAME} · сборка ${BuildConfig.BUILD_REV} · " +
-                        app.getString(if (BuildConfig.TUNNEL_SUPPORTED) R.string.variant_tunnel else R.string.variant_scout)
+                        app.getString(if (BuildConfig.FLAVOR == "tunnel") R.string.variant_tunnel else R.string.variant_scout)
                 )
                 appendLine(
                     "выгружено: " +
@@ -1264,7 +1288,27 @@ class MainActivity : AppCompatActivity() {
                             snapshot.endpoint.takeIf { it.isNotBlank() }?.let { ", точка $it" }.orEmpty() +
                             snapshot.status.takeIf { it.isNotBlank() }?.let { ", «$it»" }.orEmpty()
                     )
+                    // Итог последней проверки связи: «подключено» и «данные ходят» — разные вещи.
+                    if (snapshot.linkAt > 0L) {
+                        fun code(c: Int, ms: Int): String = when (c) {
+                            TunnelStatus.LINK_OK -> "✓" + (if (ms >= 0) " $ms мс" else "")
+                            TunnelStatus.LINK_FAIL -> "✗ нет ответа"
+                            TunnelStatus.LINK_BYPASS -> "мимо туннеля"
+                            else -> "?"
+                        }
+                        appendLine(
+                            "связь: интернет ${code(snapshot.linkWeb, snapshot.linkMs)}, " +
+                                "Telegram ${code(snapshot.linkTg, snapshot.linkTgMs)}" +
+                                snapshot.linkExit.takeIf { it.isNotBlank() }?.let { ", выход $it" }.orEmpty() +
+                                ", проверено " + java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                                .format(java.util.Date(snapshot.linkAt))
+                        )
+                    }
                 }
+                appendLine(
+                    "вид экрана: " + (if (prefs.simpleUi()) "упрощённый" else "расширенный") +
+                        prefs.backupEndpoint.takeIf { it.isNotBlank() }?.let { ", резервная точка $it" }.orEmpty()
+                )
                 appendLine()
                 appendLine("── журнал туннеля ──")
                 appendLine(TunnelDebug.fullDump())
@@ -1415,6 +1459,8 @@ class MainActivity : AppCompatActivity() {
         }
         // После «Остановить» ещё приходят строки доделываемых проб: статус «останавливаю» не перетираем.
         if (!cancelled.get()) binding.textStatus.text = "[$done/$total] $current"
+        scanProgressText = if (total > 0) getString(R.string.simple_scan_progress, done, total) else ""
+        updateSimple()
     }
 
     /**
@@ -1714,6 +1760,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderShortlistUnsafe() {
+        // Что дозор знает о точках этой сети: «отвечает» / «не ответила в 12:53» — до нажатия.
+        // Запоминаем в самом начале: опрос сравнивает с этим и не перерисовывает список зря.
+        val marksText = runCatching { TunnelStatusBus.snapshot(this).marks }.getOrDefault("")
+        lastMarksRendered = marksText
         val entries = runCatching { ConfigShortlist.load(this) }.getOrDefault(emptyList())
         shortlistEntries = entries
         val liveEndpointEarly = runCatching { TunnelDebug.endpoint }.getOrDefault("").trim()
@@ -1726,6 +1776,7 @@ class MainActivity : AppCompatActivity() {
         binding.groupTop3.removeAllViews()
         val network = runCatching { TuningCache.transportOf(this) }.getOrDefault("")
         val up = runCatching { tunnel.isUp }.getOrDefault(false)
+        val marks = parseMarks(marksText)
         // Отмечаем ту точку, через которую реально идёт (или шёл последний) трафик. Раньше метка
         // появлялась только при поднятом туннеле и только если переключились из этого списка —
         // то есть после обычного «Включить туннель» не было видно ничего. Теперь сверяемся с
@@ -1768,7 +1819,7 @@ class MainActivity : AppCompatActivity() {
             }
             val row = MaterialRadioButton(this)
             row.id = View.generateViewId()
-            row.text = shortlistRowText(i, entry, network, active, up)
+            row.text = shortlistRowText(i, entry, network, active, up, marks)
             row.textSize = 14f
             row.setPadding(0, 8, 0, 8)
             row.isChecked = active
@@ -1776,6 +1827,12 @@ class MainActivity : AppCompatActivity() {
             // Нажатие на уже выбранную строку тоже обрабатываем: «переподключиться к ней» — законное
             // желание, если туннель отвалился, а RadioGroup сам по себе повторный выбор не заметит.
             row.setOnClickListener { switchToShortlist(entry) }
+            // Долгое нажатие — сделать точку резервной (или снять отметку): то же, что «Резервная»
+            // в упрощённом экране. На неё сервис перейдёт первой, если текущая замолчит.
+            row.setOnLongClickListener {
+                toggleBackup(entry.endpoint)
+                true
+            }
             binding.groupTop3.addView(row, lp)
         }
     }
@@ -1786,7 +1843,8 @@ class MainActivity : AppCompatActivity() {
         entry: ConfigShortlist.Entry,
         network: String,
         active: Boolean,
-        up: Boolean
+        up: Boolean,
+        marks: Map<String, PointMark> = emptyMap()
     ): String {
         val header = getString(R.string.top3_row, index + 1, entry.endpoint, entry.junk)
         val result = if (entry.resourcesOk >= 0 && entry.resourcesTotal > 0) {
@@ -1804,6 +1862,13 @@ class MainActivity : AppCompatActivity() {
         if (entry.network.isNotBlank() && network.isNotBlank() && entry.network != network) {
             detail.append(" · ").append(getString(R.string.top3_row_other_network))
         }
+        // Проверка дозора: молчащую точку видно до нажатия, а не после трёх секунд без туннеля.
+        if (!(active && up)) {
+            markText(entry.endpoint, marks)?.let { detail.append(" · ").append(it) }
+        }
+        if (entry.endpoint.trim() == prefs.backupEndpoint) {
+            detail.append(" · ").append(getString(R.string.simple_backup_title).lowercase())
+        }
         return header + "\n" + detail
     }
 
@@ -1814,6 +1879,11 @@ class MainActivity : AppCompatActivity() {
     private fun switchToShortlist(entry: ConfigShortlist.Entry) {
         if (!tunnel.supported) {
             banner(getString(R.string.tunnel_unavailable), error = true)
+            return
+        }
+        // Проверка выбранной точки уже идёт — второе нажатие ждёт её итога.
+        if (probing) {
+            banner(getString(R.string.tunnel_connecting_busy))
             return
         }
         val cfg = ConfigShortlist.config(entry)
@@ -1831,6 +1901,41 @@ class MainActivity : AppCompatActivity() {
         }
         if (!tunnel.ensurePermission(this)) return
         TunnelDebug.stage("переключение из топа: ${entry.endpoint} · шум ${entry.junk}")
+        // Туннель работает — сначала спрашиваем выбранную точку пробой рядом с ним, рабочий туннель
+        // не трогая. В журнале 14:29 человек трижды выбирал точки, которые дозор уже полтора часа
+        // видел молчащими: каждый раз туннель гас, три секунды ждал мёртвую точку и возвращался на
+        // прежнюю, а на экране это выглядело как «переподключил ту же». Теперь молчащая точка
+        // называется прямо, и рабочий туннель остаётся как был.
+        if (tunnel.isUp && !connecting && !engine.running) {
+            val current = TunnelDebug.endpoint.trim().ifBlank { prefs.lastEndpoint }
+            probing = true
+            banner(getString(R.string.probe_checking, entry.endpoint))
+            Thread {
+                val code = runCatching { tunnel.probe(entry.endpoint, 6_000) }.getOrDefault(-1)
+                runOnUiThread {
+                    probing = false
+                    if (!::binding.isInitialized) return@runOnUiThread
+                    if (code == TunnelStatus.PROBE_SILENT || code == TunnelStatus.PROBE_CLOSED) {
+                        failedPoints[pointKey(cfg)] = System.currentTimeMillis()
+                        val msg = getString(
+                            if (code == TunnelStatus.PROBE_CLOSED) R.string.probe_closed else R.string.probe_silent,
+                            entry.endpoint,
+                            current.ifBlank { "—" }
+                        )
+                        TunnelDebug.stage("переключение не начато: $msg")
+                        banner(msg, error = true)
+                        renderShortlist()
+                        updateSimple()
+                    } else {
+                        // Ответила — или проверить не вышло (туннель как раз переподнимался): тогда
+                        // переключаемся как раньше, но итог всё равно назовём честно.
+                        banner(getString(R.string.top3_switching, entry.endpoint))
+                        connectWithFallback(cfg, cfg)
+                    }
+                }
+            }.apply { isDaemon = true; name = "warpscout-probe-ui" }.start()
+            return
+        }
         banner(getString(R.string.top3_switching, entry.endpoint))
         // Нажатая строка пробуется первой: раньше перебор начинался с «последнего сохранённого»
         // конфига, и нажатие на второй-третий вариант фактически игнорировалось.
@@ -2063,6 +2168,9 @@ class MainActivity : AppCompatActivity() {
         animateShield()
         val candidates = tunnelCandidates(base, preferred)
         if (candidates.isEmpty()) return noConfig()
+        // На какой точке туннель работал до переключения: если выбранная не поднимется, итог
+        // называем честно — «работает прежняя», а не просто «туннель поднят».
+        val liveBefore = if (tunnel.isUp) TunnelDebug.endpoint.trim() else ""
         // Очередь целиком — в журнал. Вопрос «куда он вообще лезет» должен иметь ответ в тексте, а
         // не в чтении исходников: первая строка всегда человеку (выбранная или проверенная точка).
         TunnelDebug.stage(
@@ -2107,6 +2215,7 @@ class MainActivity : AppCompatActivity() {
             }
             var winner: WarpConfig? = null
             val failures = StringBuilder()
+            var preferredWhy = ""
             // Внимание: здесь НЕЛЬЗЯ проверять cancelled — это флаг отмены скана. Он остаётся true
             // после любого нажатия «Стоп» и раньше тихо обрывал подключение на первой же итерации.
             for ((i, cfg) in candidates.withIndex()) {
@@ -2132,6 +2241,7 @@ class MainActivity : AppCompatActivity() {
                     break
                 }
                 val why = tunnel.lastError() ?: getString(R.string.no_answer)
+                if (i == 0 && preferred != null) preferredWhy = why
                 failedPoints[pointKey(cfg)] = System.currentTimeMillis()
                 if (failures.isNotEmpty()) failures.append("; ")
                 failures.append("${cfg.endpoint.render()} — $why")
@@ -2181,7 +2291,20 @@ class MainActivity : AppCompatActivity() {
                     exitRegion = ""
                     renderShortlist()
                     updateEndpointNote()
-                    banner(getString(R.string.banner_connect_ok, used.endpoint.render()))
+                    val chosen = preferred?.endpoint?.render()
+                    if (chosen != null && chosen != used.endpoint.render()) {
+                        // Выбранная точка не поднялась, поднялась другая: так и говорим. Раньше здесь
+                        // было «Туннель поднят: <прежняя>», и выбор выглядел проигнорированным.
+                        val why = preferredWhy.ifBlank { getString(R.string.no_answer) }.take(90)
+                        val msg = getString(
+                            if (used.endpoint.render() == liveBefore) R.string.switch_fell_back else R.string.switch_fell_back_other,
+                            chosen, why, used.endpoint.render()
+                        )
+                        TunnelDebug.stage("выбранная точка $chosen не поднялась — работает ${used.endpoint.render()}")
+                        banner(msg, error = true)
+                    } else {
+                        banner(getString(R.string.banner_connect_ok, used.endpoint.render()))
+                    }
                     // Бекап «на всякий случай»: после каждого удачного подключения, молча.
                     runCatching { Backup.save(this, getString(R.string.backup_note_connected, used.endpoint.render())) }
                     // Ручное подключение тоже наполняет кеш: следующая «Подбор» начнётся с этой точки.
@@ -2293,6 +2416,16 @@ class MainActivity : AppCompatActivity() {
             androidx.core.content.ContextCompat.getColor(this, if (error) R.color.state_error else R.color.state_ok)
         )
         binding.cardBanner.visibility = View.VISIBLE
+        // То же сообщение — строкой над плитками упрощённого экрана: панель вкладки «Главная» там
+        // не видна, а «точка не отвечает — оставил текущую» человек должен прочитать.
+        runCatching {
+            val m = binding.simple.simpleMessage
+            m.text = text
+            m.setTextColor(
+                androidx.core.content.ContextCompat.getColor(this, if (error) R.color.state_error else R.color.state_ok)
+            )
+            m.visibility = View.VISIBLE
+        }
         bannerShownAt = System.currentTimeMillis()
         bannerIsError = error
         tunnelHandler.removeCallbacks(bannerHide)
@@ -2300,12 +2433,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val bannerHide = Runnable {
-        if (::binding.isInitialized) binding.cardBanner.visibility = View.GONE
+        if (::binding.isInitialized) {
+            binding.cardBanner.visibility = View.GONE
+            runCatching { binding.simple.simpleMessage.visibility = View.GONE }
+        }
     }
 
     private fun hideBanner() {
         tunnelHandler.removeCallbacks(bannerHide)
-        if (::binding.isInitialized) binding.cardBanner.visibility = View.GONE
+        if (::binding.isInitialized) {
+            binding.cardBanner.visibility = View.GONE
+            runCatching { binding.simple.simpleMessage.visibility = View.GONE }
+        }
     }
 
     /** Wi-Fi / мобильная / Ethernet по активной сети — ключ для памяти рабочих точек. */
@@ -2460,7 +2599,11 @@ class MainActivity : AppCompatActivity() {
      */
     private fun updateEndpointNote() {
         val now = prefs.lastEndpoint.ifBlank { runCatching { currentConfig()?.endpoint?.render() }.getOrNull().orEmpty() }
-        val region = exitRegion.ifBlank { prefs.lastExitRegion }.ifBlank { getString(R.string.region_unknown) }
+        // Выход по проверке связи сервиса — самый свежий: он проверен запросом через туннель.
+        val serviceExit = runCatching {
+            TunnelStatusBus.snapshot(this).takeIf { it.up && it.linkWeb == TunnelStatus.LINK_OK }?.linkExit
+        }.getOrNull().orEmpty()
+        val region = serviceExit.ifBlank { exitRegion }.ifBlank { prefs.lastExitRegion }.ifBlank { getString(R.string.region_unknown) }
         binding.textEndpointNow.text = getString(
             R.string.endpoint_now,
             now.ifBlank { "—" },
@@ -2470,21 +2613,32 @@ class MainActivity : AppCompatActivity() {
 
     private fun probeExitRegion() {
         Thread {
-            val found = runCatching {
+            val trace = runCatching {
                 val conn = java.net.URL("https://www.cloudflare.com/cdn-cgi/trace").openConnection() as java.net.HttpURLConnection
                 conn.connectTimeout = 5000
                 conn.readTimeout = 5000
                 val text = conn.inputStream.bufferedReader().use { it.readText() }
-                val map = text.lineSequence()
-                    .mapNotNull { line -> line.split('=', limit = 2).takeIf { it.size == 2 } }
-                    .associate { it[0].trim() to it[1].trim() }
-                val colo = map["colo"] ?: return@runCatching null
-                listOfNotNull(colo, map["loc"], map["ip"]).joinToString(" · ")
+                dev.warpscout.core.net.CfTrace.parse(text)
             }.getOrNull()
             runOnUiThread {
-                exitRegion = found ?: getString(R.string.region_unknown)
-                prefs.lastExitRegion = exitRegion
-                TunnelDebug.stage("регион выхода через WARP: $exitRegion")
+                when {
+                    trace == null -> {
+                        exitRegion = getString(R.string.region_unknown)
+                        TunnelDebug.stage("регион выхода не определён: Cloudflare не ответил")
+                    }
+                    trace.viaWarp -> {
+                        exitRegion = trace.summary()
+                        prefs.lastExitRegion = exitRegion
+                        TunnelDebug.stage("регион выхода через WARP: $exitRegion")
+                    }
+                    else -> {
+                        // Запрос ушёл мимо WARP: туннель ещё поднимался или уже переключался. Раньше
+                        // это записывалось как «регион выхода через WARP: HEL · RU · <адрес провайдера>»
+                        // (журнал 13:35:37 и 14:29:55) — свой адрес выдавался за выход WARP.
+                        exitRegion = ""
+                        TunnelDebug.stage("регион выхода не определён: запрос ушёл мимо WARP (${trace.summary()})")
+                    }
+                }
                 updateEndpointNote()
             }
         }.apply { isDaemon = true; name = "warpscout-region" }.start()
@@ -2514,10 +2668,14 @@ class MainActivity : AppCompatActivity() {
             // Кнопка свободна (не идёт подключение и подбор) — держим её подпись в согласии с сервисом.
             if (!connecting && !engine.running) runCatching { refreshTunnelButtonLabel() }
             val upNow = runCatching { tunnel.isUp }.getOrDefault(false)
+            val marksNow = runCatching { TunnelStatusBus.snapshot(this@MainActivity).marks }.getOrDefault("")
             if (upNow != lastShortlistUp) {
                 lastShortlistUp = upNow
                 renderShortlist()
                 if (upNow) learnLiveEndpoint()
+            } else if (marksNow != lastMarksRendered) {
+                // Дозор узнал новое о точках — отметки в списке должны это показать сразу.
+                renderShortlist()
             }
             // Пока туннель не поднят — часто (видно этапы подъёма), когда работает — редко.
             tunnelHandler.postDelayed(this, if (tunnel.isUp) 3000L else 700L)
@@ -2589,8 +2747,22 @@ class MainActivity : AppCompatActivity() {
                     getString(R.string.duration_sec, 0)
                 }
                 val endpoint = TunnelDebug.endpoint.ifBlank { prefs.lastEndpoint.ifBlank { "endpoint?" } }
-                text = getString(R.string.conn_on, uptime, endpoint)
-                color = androidx.core.content.ContextCompat.getColor(this, R.color.state_ok)
+                // Итог проверки связи — прямо в строке: «работает» без него значило лишь «handshake
+                // прошёл», а данные могли и не ходить (Telegram молчал при «подключено»).
+                val link = snapshot?.takeIf { it.linkAt > 0L && it.linkAt >= it.startedAt }
+                val linkText = when {
+                    link == null -> ""
+                    link.linkWeb == TunnelStatus.LINK_FAIL -> getString(R.string.conn_link_fail)
+                    link.linkWeb == TunnelStatus.LINK_OK && link.linkTg == TunnelStatus.LINK_FAIL ->
+                        getString(R.string.conn_link_ok, link.linkMs.coerceAtLeast(0)) + getString(R.string.conn_link_tg)
+                    link.linkWeb == TunnelStatus.LINK_OK -> getString(R.string.conn_link_ok, link.linkMs.coerceAtLeast(0))
+                    else -> ""
+                }
+                text = getString(R.string.conn_on, uptime, endpoint) + linkText
+                color = androidx.core.content.ContextCompat.getColor(
+                    this,
+                    if (link?.linkWeb == TunnelStatus.LINK_FAIL) R.color.state_warn else R.color.state_ok
+                )
             }
             noNet -> {
                 text = getString(R.string.conn_no_network)
@@ -2634,6 +2806,7 @@ class MainActivity : AppCompatActivity() {
         }
         binding.textConnStatus.text = text
         binding.textConnStatus.setTextColor(color)
+        updateSimple()
     }
 
     private fun updateTunnelDiagnostics() {
@@ -2701,6 +2874,460 @@ class MainActivity : AppCompatActivity() {
                 .setDuration(420)
                 .setInterpolator(android.view.animation.OvershootInterpolator(0.9f))
                 .start()
+        }
+    }
+
+    // ------------------------------------------------ упрощённый экран
+
+    /** Идёт проверка выбранной точки перед переключением — второе нажатие ждёт её итога. */
+    @Volatile
+    private var probing = false
+
+    /** «проверено 40 из 120» — ход подбора для упрощённого экрана (там нет журнала и полосы). */
+    private var scanProgressText = ""
+
+    /** Метки дозора, с которыми последний раз рисовался список лучших. */
+    private var lastMarksRendered = ""
+
+    /** Пока true — тумблеры вида выставляются кодом, и их слушатели молчат. */
+    private var suppressModeListener = false
+
+    /** Когда человек нажал «Связь» (для «проверяю…», пока сервис не ответил). */
+    private var linkCheckRequestedAt = 0L
+
+    /** Какое состояние сейчас нарисовано на кнопке: по нему таймер решает, что показывать. */
+    private var lastOrbState = PowerOrbView.STATE_OFF
+
+    /** Что дозор знает о точке на текущей сети. */
+    private data class PointMark(val okAt: Long, val fails: Int, val failAt: Long)
+
+    /** «адрес|отвечала|молчала подряд|когда;…» из снимка → по адресу. Битые куски пропускаем. */
+    private fun parseMarks(text: String?): Map<String, PointMark> {
+        if (text.isNullOrBlank()) return emptyMap()
+        val out = HashMap<String, PointMark>()
+        for (chunk in text.split(';')) {
+            val parts = chunk.split('|')
+            if (parts.size < 4) continue
+            val ep = parts[0].trim()
+            if (ep.isEmpty()) continue
+            out[ep] = PointMark(
+                okAt = parts[1].trim().toLongOrNull() ?: 0L,
+                fails = parts[2].trim().toIntOrNull() ?: 0,
+                failAt = parts[3].trim().toLongOrNull() ?: 0L
+            )
+        }
+        return out
+    }
+
+    private fun clock(ms: Long): String =
+        java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(ms))
+
+    /** Отметка дозора словами, без точки-маркера: «отвечает, проверено в 14:24». null — не знаем. */
+    private fun markText(endpoint: String, marks: Map<String, PointMark>): String? {
+        val m = marks[endpoint.trim()] ?: return null
+        return when {
+            m.fails > 0 && m.failAt >= m.okAt -> getString(R.string.mark_silent, clock(m.failAt))
+            m.okAt > 0L -> getString(R.string.mark_ok, clock(m.okAt))
+            else -> null
+        }
+    }
+
+    /** Цвет отметки: зелёный — отвечает, красный — молчит, серый — не знаем. */
+    private fun markColor(endpoint: String, marks: Map<String, PointMark>): Int {
+        val m = marks[endpoint.trim()]
+        val res = when {
+            m == null -> R.color.state_off
+            m.fails > 0 && m.failAt >= m.okAt -> R.color.check_fail
+            m.okAt > 0L -> R.color.check_ok
+            else -> R.color.state_off
+        }
+        return ContextCompat.getColor(this, res)
+    }
+
+    /** «● текст» с цветной точкой: состояние видно издалека, а текст остаётся обычным. */
+    private fun dotLine(text: String, color: Int): CharSequence {
+        val line = android.text.SpannableString("●  $text")
+        line.setSpan(
+            android.text.style.ForegroundColorSpan(color), 0, 1,
+            android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        return line
+    }
+
+    private fun linkColor(code: Int): Int = ContextCompat.getColor(
+        this,
+        when (code) {
+            TunnelStatus.LINK_OK -> R.color.check_ok
+            TunnelStatus.LINK_FAIL -> R.color.check_fail
+            else -> R.color.state_off
+        }
+    )
+
+    /** Сейчас на экране упрощённый вид. */
+    private fun simpleShown(): Boolean =
+        ::binding.isInitialized && runCatching { binding.simple.root.visibility == View.VISIBLE }.getOrDefault(false)
+
+    /** Обработчики упрощённого экрана — один раз при построении. */
+    private fun setupSimple() {
+        val s = binding.simple
+        s.simpleOrb.setOnClickListener { onSimpleOrbClick() }
+        s.simpleCardLink.setOnClickListener { onSimpleLinkClick() }
+        s.simpleCardBackup.setOnClickListener { showBackupSheet() }
+        s.simpleVersion.text = binding.textVersion.text
+        // Тумблеры вида: в упрощённом — «Расширенный режим», в расширенном — «Упрощённый режим».
+        // Выбор запоминается и переживает перезапуск; экран при этом не пересоздаётся.
+        s.simpleModeSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressModeListener || !isChecked) return@setOnCheckedChangeListener
+            prefs.uiMode = Prefs.UI_ADVANCED
+            applyUiMode()
+        }
+        binding.switchSimpleMode.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressModeListener || !isChecked) return@setOnCheckedChangeListener
+            prefs.uiMode = Prefs.UI_SIMPLE
+            applyUiMode()
+        }
+    }
+
+    /**
+     * Показать упрощённый или расширенный вид. Это не два разных экрана с двумя логиками: та же
+     * активность, тот же код подключения и статуса — меняется только то, что видно.
+     */
+    private fun applyUiMode() {
+        runCatching {
+            val simple = prefs.simpleUi()
+            binding.simple.root.visibility = if (simple) View.VISIBLE else View.GONE
+            binding.pagesFrame.visibility = if (simple) View.GONE else View.VISIBLE
+            binding.navBar.visibility = if (simple) View.GONE else View.VISIBLE
+            binding.cardConnStatus.visibility = if (simple) View.GONE else View.VISIBLE
+            suppressModeListener = true
+            binding.simple.simpleModeSwitch.isChecked = false
+            binding.switchSimpleMode.isChecked = false
+            suppressModeListener = false
+            if (simple) {
+                updateSimple()
+                startSimpleTick()
+            } else {
+                tunnelHandler.removeCallbacks(simpleTick)
+                runCatching { renderShortlist() }
+            }
+        }.onFailure { t ->
+            suppressModeListener = false
+            TunnelDebug.error("переключение вида экрана: " + SafeMode.describe(t))
+        }
+    }
+
+    private fun onSimpleOrbClick() {
+        runCatching {
+            if (engine.running) {
+                // Идёт подбор — кнопка его останавливает, как «Остановить подбор» в расширенном виде.
+                binding.btnStop.performClick()
+            } else {
+                toggleTunnel()
+            }
+            updateSimple()
+        }.onFailure { t ->
+            TunnelDebug.error("кнопка упрощённого экрана: " + SafeMode.describe(t))
+            banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+        }
+    }
+
+    private fun onSimpleLinkClick() {
+        if (!tunnel.supported || !tunnel.isUp) {
+            banner(getString(R.string.simple_link_need_tunnel))
+            return
+        }
+        linkCheckRequestedAt = System.currentTimeMillis()
+        tunnel.requestLinkCheck()
+        updateSimple()
+    }
+
+    /** Обновить упрощённый экран по состоянию сервиса. Сбой — строка в журнале, не падение. */
+    private fun updateSimple() {
+        if (!simpleShown() || !::prefs.isInitialized) return
+        runCatching { updateSimpleUnsafe() }.onFailure { t ->
+            TunnelDebug.error("упрощённый экран: " + SafeMode.describe(t))
+        }
+    }
+
+    private fun updateSimpleUnsafe() {
+        val s = binding.simple
+        val snap = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
+        val up = tunnel.supported && tunnel.isUp
+        val phase = snap?.phase ?: TunnelStatus.PHASE_IDLE
+        val held = !up && snap?.wanted == true
+        val linkFresh = up && snap != null && snap.linkAt > 0L && snap.linkAt >= snap.startedAt
+        val linkBad = linkFresh && snap?.linkWeb == TunnelStatus.LINK_FAIL
+        val state: Int
+        val title: String
+        val sub: String
+        when {
+            engine.running -> {
+                state = PowerOrbView.STATE_CONNECTING
+                title = getString(R.string.simple_state_scanning)
+                sub = scanProgressText.ifBlank { getString(R.string.simple_tap_to_stop_scan) }
+            }
+            connecting -> {
+                state = PowerOrbView.STATE_CONNECTING
+                title = getString(if (connectCancel) R.string.simple_state_cancelling else R.string.simple_state_connecting)
+                sub = getString(R.string.simple_tap_to_cancel)
+            }
+            up && linkBad -> {
+                state = PowerOrbView.STATE_ERROR
+                title = getString(R.string.simple_state_no_link)
+                sub = uptimeClock(snap)
+            }
+            up -> {
+                state = PowerOrbView.STATE_ON
+                title = getString(R.string.simple_state_on)
+                sub = uptimeClock(snap)
+            }
+            phase == TunnelStatus.PHASE_NO_NETWORK -> {
+                state = PowerOrbView.STATE_CONNECTING
+                title = getString(R.string.simple_state_no_network)
+                sub = getString(R.string.simple_tap_to_stop)
+            }
+            held || phase == TunnelStatus.PHASE_STARTING || phase == TunnelStatus.PHASE_RECONNECTING -> {
+                state = PowerOrbView.STATE_CONNECTING
+                title = getString(R.string.simple_state_waiting)
+                sub = getString(R.string.simple_tap_to_stop)
+            }
+            else -> {
+                state = PowerOrbView.STATE_OFF
+                title = getString(R.string.simple_state_off)
+                sub = getString(R.string.simple_tap_to_connect)
+            }
+        }
+        lastOrbState = state
+        s.simpleOrbView.setState(state)
+        if (s.simpleState.text.toString() != title) s.simpleState.text = title
+        if (s.simpleTimer.text.toString() != sub) s.simpleTimer.text = sub
+        s.simplePowerIcon.imageTintList = android.content.res.ColorStateList.valueOf(
+            ContextCompat.getColor(
+                this,
+                when (state) {
+                    PowerOrbView.STATE_ON -> R.color.orb_accent
+                    PowerOrbView.STATE_ERROR -> R.color.orb_error
+                    PowerOrbView.STATE_CONNECTING -> R.color.orb_warn
+                    else -> R.color.colorOnSurfaceVariant
+                }
+            )
+        )
+
+        // Где мы: вид сети, точка входа и (если проверка связи прошла) площадка выхода.
+        val endpoint = if (up) TunnelDebug.endpoint.trim().ifBlank { snap?.endpoint.orEmpty() } else ""
+        val net = netKindNow().ifBlank { "сеть" }
+        val colo = snap?.takeIf { linkFresh && it.linkWeb == TunnelStatus.LINK_OK }?.linkExit
+            ?.substringBefore(" · ")?.trim().orEmpty()
+        val where = when {
+            endpoint.isBlank() -> ""
+            colo.isNotBlank() -> getString(R.string.simple_where_region, net, endpoint, colo)
+            else -> getString(R.string.simple_where, net, endpoint)
+        }
+        s.simpleWhere.text = where
+        s.simpleWhere.visibility = if (where.isBlank()) View.INVISIBLE else View.VISIBLE
+
+        // Связь: итог проверки через туннель (Cloudflare и Telegram).
+        val now = System.currentTimeMillis()
+        val waitingCheck = up && linkCheckRequestedAt > 0L && (snap?.linkAt ?: 0L) < linkCheckRequestedAt &&
+            now - linkCheckRequestedAt < 20_000L
+        val firstCheckPending = up && !linkFresh && (snap?.startedAt ?: 0L) > 0L && now - (snap?.startedAt ?: 0L) < 30_000L
+        val linkValue = when {
+            !up -> getString(R.string.simple_dash)
+            waitingCheck || firstCheckPending -> getString(R.string.simple_link_checking)
+            !linkFresh -> getString(R.string.simple_dash)
+            snap?.linkWeb == TunnelStatus.LINK_OK -> getString(R.string.simple_link_ms, (snap?.linkMs ?: 0).coerceAtLeast(0))
+            snap?.linkWeb == TunnelStatus.LINK_FAIL -> getString(R.string.simple_link_fail)
+            snap?.linkWeb == TunnelStatus.LINK_BYPASS -> getString(R.string.simple_link_bypass)
+            else -> getString(R.string.simple_dash)
+        }
+        s.simpleLinkValue.text = linkValue
+        val web = if (linkFresh) snap?.linkWeb ?: TunnelStatus.LINK_UNKNOWN else TunnelStatus.LINK_UNKNOWN
+        val tg = if (linkFresh) snap?.linkTg ?: TunnelStatus.LINK_UNKNOWN else TunnelStatus.LINK_UNKNOWN
+        val tgText = getString(R.string.simple_link_tg) + when {
+            tg == TunnelStatus.LINK_OK && (snap?.linkTgMs ?: -1) >= 0 -> " · " + getString(R.string.simple_link_ms, snap?.linkTgMs ?: 0)
+            tg == TunnelStatus.LINK_FAIL -> " · " + getString(R.string.simple_link_fail)
+            tg == TunnelStatus.LINK_BYPASS -> " · " + getString(R.string.simple_link_bypass)
+            else -> ""
+        }
+        s.simpleLinkWeb.text = dotLine(getString(R.string.simple_link_web), linkColor(web))
+        s.simpleLinkTg.text = dotLine(tgText, linkColor(tg))
+
+        // Резервная точка и что о ней знает дозор.
+        val marks = parseMarks(snap?.marks)
+        val backup = prefs.backupEndpoint
+        if (backup.isBlank()) {
+            s.simpleBackupValue.text = getString(R.string.simple_backup_none)
+            s.simpleBackupState.text = getString(R.string.simple_backup_hint_none)
+            s.simpleBackupState.setTextColor(ContextCompat.getColor(this, R.color.colorOnSurfaceVariant))
+        } else {
+            s.simpleBackupValue.text = backup
+            val text = if (up && backup == endpoint) getString(R.string.mark_current)
+            else markText(backup, marks) ?: getString(R.string.mark_unknown)
+            val color = if (up && backup == endpoint) ContextCompat.getColor(this, R.color.check_ok)
+            else markColor(backup, marks)
+            s.simpleBackupState.text = dotLine(text, color)
+            s.simpleBackupState.setTextColor(ContextCompat.getColor(this, R.color.colorOnSurfaceVariant))
+        }
+    }
+
+    /** «00:12:34» от начала текущей сессии (время помнит сервис — переживает перезапуск экрана). */
+    private fun uptimeClock(snap: TunnelStatus?): String {
+        val since = snap?.startedAt?.takeIf { it > 0L } ?: tunnelStartedAtLocal
+        if (since <= 0L) return "00:00:00"
+        val sec = ((System.currentTimeMillis() - since) / 1000L).coerceAtLeast(0L)
+        return String.format(java.util.Locale.US, "%02d:%02d:%02d", sec / 3600, (sec % 3600) / 60, sec % 60)
+    }
+
+    /**
+     * Таймер работы на кнопке — раз в секунду, только пока упрощённый экран на виду и туннель
+     * работает. Перерисовывается одна строка текста; в фоне таймер стоит (см. onPause).
+     */
+    private val simpleTick = object : Runnable {
+        override fun run() {
+            if (!screenResumed || !simpleShown()) return
+            if (lastOrbState == PowerOrbView.STATE_ON || lastOrbState == PowerOrbView.STATE_ERROR) {
+                runCatching {
+                    val snap = TunnelStatusBus.snapshot(this@MainActivity)
+                    binding.simple.simpleTimer.text = uptimeClock(snap)
+                }
+            }
+            tunnelHandler.postDelayed(this, 1000L)
+        }
+    }
+
+    private fun startSimpleTick() {
+        tunnelHandler.removeCallbacks(simpleTick)
+        if (screenResumed && simpleShown()) tunnelHandler.postDelayed(simpleTick, 1000L)
+    }
+
+    /** Сделать точку резервной или снять отметку, если она уже резервная. */
+    private fun toggleBackup(endpoint: String) {
+        val ep = endpoint.trim()
+        if (ep.isEmpty()) return
+        if (prefs.backupEndpoint == ep) {
+            prefs.backupEndpoint = ""
+            TunnelDebug.stage("резервная точка снята")
+            banner(getString(R.string.backup_cleared))
+        } else {
+            prefs.backupEndpoint = ep
+            TunnelDebug.stage("резервная точка выбрана: $ep")
+            banner(getString(R.string.backup_set, ep))
+        }
+        runCatching { renderShortlist() }
+        updateSimple()
+    }
+
+    private fun showBackupSheet() {
+        runCatching { showBackupSheetUnsafe() }.onFailure { t ->
+            TunnelDebug.error("выбор резервной точки: " + SafeMode.describe(t))
+            banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+        }
+    }
+
+    /**
+     * Выбор резервной точки: лучшие точки последнего подбора, у каждой — что о ней знает дозор.
+     * Отметка — «резервная» (на неё сервис перейдёт сам, если текущая замолчит), кнопка
+     * «Подключить» — перейти сейчас (сначала проба рядом с работающим туннелем).
+     */
+    private fun showBackupSheetUnsafe() {
+        val dialog = com.google.android.material.bottomsheet.BottomSheetDialog(this)
+        val sheet = dev.warpscout.app.databinding.SheetBackupBinding.inflate(layoutInflater)
+        val entries = runCatching { ConfigShortlist.load(this) }.getOrDefault(emptyList())
+        val snap = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
+        val marks = parseMarks(snap?.marks)
+        val live = if (tunnel.isUp) TunnelDebug.endpoint.trim() else ""
+        val backup = prefs.backupEndpoint
+        sheet.sheetEmpty.visibility = if (entries.isEmpty()) View.VISIBLE else View.GONE
+        val radios = ArrayList<MaterialRadioButton>()
+        for (entry in entries) {
+            val ep = entry.endpoint.trim()
+            val row = dev.warpscout.app.databinding.ItemBackupRowBinding.inflate(layoutInflater, sheet.sheetRows, false)
+            val isLive = ep == live && live.isNotEmpty()
+            val state = if (isLive) getString(R.string.mark_current) else markText(ep, marks) ?: getString(R.string.mark_unknown)
+            val color = if (isLive) ContextCompat.getColor(this, R.color.check_ok) else markColor(ep, marks)
+            row.rowRadio.text = android.text.SpannableStringBuilder()
+                .append(ep)
+                .append("\n")
+                .append(dotLine(state, color))
+                .append(" · ")
+                .append(getString(R.string.sheet_row_junk, entry.junk))
+            row.rowRadio.isChecked = ep == backup
+            row.rowRadio.setOnClickListener { clicked ->
+                radios.forEach { other -> other.isChecked = other === clicked }
+                if (prefs.backupEndpoint != ep) {
+                    prefs.backupEndpoint = ep
+                    TunnelDebug.stage("резервная точка выбрана: $ep")
+                    banner(getString(R.string.backup_set, ep))
+                }
+            }
+            radios += row.rowRadio
+            // Текущую точку подключать незачем — она и так работает.
+            row.rowConnect.visibility = if (isLive) View.GONE else View.VISIBLE
+            row.rowConnect.setOnClickListener {
+                dialog.dismiss()
+                switchToShortlist(entry)
+            }
+            sheet.sheetRows.addView(row.root)
+        }
+        sheet.sheetClear.visibility = if (backup.isNotBlank()) View.VISIBLE else View.GONE
+        sheet.sheetClear.setOnClickListener {
+            dialog.dismiss()
+            if (prefs.backupEndpoint.isNotBlank()) toggleBackup(prefs.backupEndpoint)
+        }
+        sheet.sheetRescan.setOnClickListener {
+            dialog.dismiss()
+            // Подбор гасит туннель на время замеров и возвращает его сам (на новой точке, если
+            // найдёт), — см. restoreTunnelAfterScan.
+            startScan(autoConnect = false)
+        }
+        dialog.setContentView(sheet.root)
+        dialog.setOnDismissListener { updateSimple() }
+        dialog.show()
+    }
+
+    // ------------------------------------------------ тема оформления
+
+    /** Светлая / тёмная / как в системе — для всего приложения, обоих видов экрана. */
+    private fun applyThemeMode(mode: Int) {
+        val night = when (mode) {
+            Prefs.THEME_LIGHT -> AppCompatDelegate.MODE_NIGHT_NO
+            Prefs.THEME_DARK -> AppCompatDelegate.MODE_NIGHT_YES
+            else -> AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
+        }
+        if (AppCompatDelegate.getDefaultNightMode() != night) AppCompatDelegate.setDefaultNightMode(night)
+    }
+
+    private fun themeButtonId(mode: Int): Int = when (mode) {
+        Prefs.THEME_LIGHT -> R.id.btnThemeLight
+        Prefs.THEME_DARK -> R.id.btnThemeDark
+        else -> R.id.btnThemeSystem
+    }
+
+    private fun themeModeOf(buttonId: Int): Int = when (buttonId) {
+        R.id.btnThemeLight -> Prefs.THEME_LIGHT
+        R.id.btnThemeDark -> Prefs.THEME_DARK
+        else -> Prefs.THEME_SYSTEM
+    }
+
+    /**
+     * Переключатель темы в «Настройках». Смена темы пересоздаёт экран (так устроен Android) —
+     * выбранная вкладка и подбор это переживают.
+     */
+    private fun setupThemeToggle() {
+        binding.themeGroup.check(themeButtonId(prefs.themeMode))
+        binding.themeGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            val mode = themeModeOf(checkedId)
+            if (mode == prefs.themeMode) return@addOnButtonCheckedListener
+            prefs.themeMode = mode
+            TunnelDebug.stage("тема оформления: " + getString(
+                when (mode) {
+                    Prefs.THEME_LIGHT -> R.string.theme_light
+                    Prefs.THEME_DARK -> R.string.theme_dark
+                    else -> R.string.theme_system
+                }
+            ).lowercase())
+            applyThemeMode(mode)
         }
     }
 

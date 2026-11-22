@@ -67,6 +67,37 @@ data class TunnelStatus(
      * сам признак [stoppedByUser] для этого не годится: каждый новый старт его снимает.
      */
     val stoppedByUserAt: Long = 0L,
+    /**
+     * Ответ на «проверь точку, не трогая туннель» (см. `WarpVpnService.ACTION_PROBE`):
+     * «номер запроса|адрес:порт|итог|мс». Итог — [PROBE_OK], [PROBE_SILENT], [PROBE_CLOSED] или
+     * [PROBE_NONE] (туннеля нет, проверять нечем).
+     *
+     * Зачем: в журнале 14:29 человек выбрал в «лучших» точку, которую дозор уже полтора часа
+     * видел молчащей. Интерфейс погасил рабочий туннель, три секунды ждал ответа от мёртвой точки
+     * и вернулся на прежнюю — со стороны это выглядело как «переподключил ту же». Теперь точка
+     * сначала проверяется пробой рядом с работающим туннелем, и рабочий туннель не трогается зря.
+     */
+    val probe: String = "",
+    /**
+     * Что дозор знает о точках на текущей сети: «адрес:порт|когда отвечала|сколько раз подряд
+     * молчала|когда последний раз молчала» через «;». По этому интерфейс помечает строки списка
+     * лучших и выбора резервной точки: «отвечает» / «молчит с 12:53».
+     */
+    val marks: String = "",
+    /**
+     * Проверка связи через туннель — «подключено» значит «данные ходят», а не только «handshake
+     * прошёл». Время последней проверки (0 — не проверяли).
+     */
+    val linkAt: Long = 0L,
+    /** Интернет через туннель: [LINK_UNKNOWN], [LINK_OK], [LINK_FAIL], [LINK_BYPASS]. */
+    val linkWeb: Int = LINK_UNKNOWN,
+    /** Сколько шёл ответ на проверку, мс (-1 — не было ответа). */
+    val linkMs: Int = -1,
+    /** Telegram через туннель: TCP-соединение с его сервером. Те же коды, что у [linkWeb]. */
+    val linkTg: Int = LINK_UNKNOWN,
+    val linkTgMs: Int = -1,
+    /** Откуда виден выход по ответу Cloudflare: «FRA · 2a09:…». */
+    val linkExit: String = "",
 ) {
 
     val isStarting: Boolean get() = phase == PHASE_STARTING || phase == PHASE_RECONNECTING
@@ -92,10 +123,45 @@ data class TunnelStatus(
         "wanted" to JsonVal.bool(wanted),
         "stoppedByUser" to JsonVal.bool(stoppedByUser),
         "stoppedByUserAt" to JsonVal.num(stoppedByUserAt),
+        "probe" to JsonVal.str(probe),
+        "marks" to JsonVal.str(marks),
+        "linkAt" to JsonVal.num(linkAt),
+        "linkWeb" to JsonVal.num(linkWeb),
+        "linkMs" to JsonVal.num(linkMs),
+        "linkTg" to JsonVal.num(linkTg),
+        "linkTgMs" to JsonVal.num(linkTgMs),
+        "linkExit" to JsonVal.str(linkExit),
     ).render()
 
     companion object {
         const val VERSION = 1
+
+        /** Проверки связи ещё не было (или туннель только что поднялся). */
+        const val LINK_UNKNOWN = 0
+
+        /** Ответ пришёл через туннель. */
+        const val LINK_OK = 1
+
+        /** Ответа нет: запрос ушёл в туннель и пропал. */
+        const val LINK_FAIL = 2
+
+        /**
+         * Запрос ушёл мимо туннеля: адрес не входит в маршруты (раздельные маршруты, «только
+         * выбранные приложения»). Про сам туннель такая проверка ничего не говорит.
+         */
+        const val LINK_BYPASS = 3
+
+        /** Проверка точки: туннеля нет — проверять нечем, подключаемся как обычно. */
+        const val PROBE_NONE = 0
+
+        /** Точка ответила на handshake. */
+        const val PROBE_OK = 1
+
+        /** Точка промолчала (две инициации без ответа). */
+        const val PROBE_SILENT = 2
+
+        /** Сеть ответила «порт закрыт» (ICMP). */
+        const val PROBE_CLOSED = 3
 
         /** Туннель не поднимался или остановлен. */
         const val PHASE_IDLE = 0
@@ -137,6 +203,14 @@ data class TunnelStatus(
                 wanted = obj.bool("wanted") ?: false,
                 stoppedByUser = obj.bool("stoppedByUser") ?: false,
                 stoppedByUserAt = obj.lng("stoppedByUserAt"),
+                probe = obj.str("probe").orEmpty(),
+                marks = obj.str("marks").orEmpty(),
+                linkAt = obj.lng("linkAt"),
+                linkWeb = obj.lng("linkWeb").toInt(),
+                linkMs = if (obj.fields.containsKey("linkMs")) obj.lng("linkMs").toInt() else -1,
+                linkTg = obj.lng("linkTg").toInt(),
+                linkTgMs = if (obj.fields.containsKey("linkTgMs")) obj.lng("linkTgMs").toInt() else -1,
+                linkExit = obj.str("linkExit").orEmpty(),
             )
         }
     }
@@ -170,6 +244,11 @@ data class ServiceSettings(
      * нажатия.
      */
     val failover: List<String> = emptyList(),
+    /**
+     * Резервная точка, выбранная человеком (host:port; пусто — не выбрана). Если текущая точка
+     * замолчит, сервис перейдёт на неё первой — раньше любой точки из памяти или очереди.
+     */
+    val backup: String = "",
 ) {
 
     fun toJson(): String = JsonVal.obj(
@@ -180,6 +259,7 @@ data class ServiceSettings(
         "appsMode" to JsonVal.num(appsMode),
         "appsSelected" to JsonVal.arr(appsSelected.map { JsonVal.str(it) }),
         "failover" to JsonVal.arr(failover.map { JsonVal.str(it) }),
+        "backup" to JsonVal.str(backup),
     ).render()
 
     companion object {
@@ -204,6 +284,7 @@ data class ServiceSettings(
                 failover = (obj.fields["failover"] as? JsonVal.Arr)?.items.orEmpty()
                     .mapNotNull { (it as? JsonVal.Str)?.v }
                     .filter { it.isNotBlank() },
+                backup = obj.str("backup").orEmpty().trim(),
             )
         }
     }

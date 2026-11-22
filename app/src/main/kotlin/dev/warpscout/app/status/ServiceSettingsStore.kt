@@ -60,6 +60,7 @@ object ServiceSettingsStore {
                 appsMode = prefs.appsMode,
                 appsSelected = prefs.appsSelected.toList().sorted(),
                 failover = prefs.failoverQueue,
+                backup = prefs.backupEndpoint,
             )
         )
     }
