@@ -224,6 +224,10 @@
     <string name="banner_connect_ok">Туннель поднят: %1$s</string>
     <string name="banner_connect_failed">Не удалось подключиться (%1$d попыток): %2$s</string>
     <string name="banner_stopped">Туннель отключён</string>
+    <!-- Перебор точек при подключении можно отменить: кнопка подключения на это время становится «Отменить». -->
+    <string name="btn_connect_cancel">Отменить подключение</string>
+    <string name="btn_connect_cancelling">Отменяю подключение…</string>
+    <string name="banner_connect_cancelled">Подключение отменено — туннель выключен</string>
 
     <!-- топ-3 подобранных конфигов -->
     <string name="top3_title">Лучшие конфиги</string>
@@ -236,6 +240,8 @@
     <string name="top3_row_active">сейчас подключён</string>
     <string name="top3_now">Сейчас подключён: %1$s</string>
     <string name="top3_row_chosen">последний подключённый</string>
+    <string name="top3_last">Последний подключённый: %1$s</string>
+    <string name="top3_row_off">туннель сейчас выключен</string>
     <string name="top3_row_other_network">другая сеть</string>
     <string name="top3_switching">Переключаюсь на %1$s</string>
     <string name="top3_res">открылось %1$d из %2$d</string>
@@ -267,6 +273,10 @@
     <string name="state_working">Работаю…</string>
     <string name="banner_last_crash">Прошлый запуск завершился падением — подробности в «Журнал» → «Скопировать журнал»</string>
     <string name="conn_off">● Туннель выключен</string>
+    <!-- Сервис туннеля закрыт не человеком: говорим, почему, и что нажать. -->
+    <string name="conn_off_updated">● Туннель выключен: приложение обновилось — нажми «Включить туннель»</string>
+    <string name="conn_off_rebooted">● Туннель выключен: телефон перезагружался — нажми «Включить туннель»</string>
+    <string name="conn_off_killed">● Туннель выключен: система закрыла сервис туннеля — нажми «Включить туннель»</string>
     <string name="conn_on">● Туннель работает · %1$s · %2$s</string>
     <string name="conn_starting">● Подключаюсь… точка %1$s</string>
     <string name="conn_starting_plain">● Подключаюсь…</string>

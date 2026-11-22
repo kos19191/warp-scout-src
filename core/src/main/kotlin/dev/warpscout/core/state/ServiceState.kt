@@ -61,6 +61,12 @@ data class TunnelStatus(
      * этого ничто не поднимает туннель само — ни переподключение, ни фоновый подбор.
      */
     val stoppedByUser: Boolean = false,
+    /**
+     * Когда человек последний раз выключил туннель (мс, 0 — не выключал). По ней перебор точек в
+     * интерфейсе видит выключение плиткой или из уведомления, случившееся во время перебора, —
+     * сам признак [stoppedByUser] для этого не годится: каждый новый старт его снимает.
+     */
+    val stoppedByUserAt: Long = 0L,
 ) {
 
     val isStarting: Boolean get() = phase == PHASE_STARTING || phase == PHASE_RECONNECTING
@@ -85,6 +91,7 @@ data class TunnelStatus(
         "phase" to JsonVal.num(phase),
         "wanted" to JsonVal.bool(wanted),
         "stoppedByUser" to JsonVal.bool(stoppedByUser),
+        "stoppedByUserAt" to JsonVal.num(stoppedByUserAt),
     ).render()
 
     companion object {
@@ -129,6 +136,7 @@ data class TunnelStatus(
                 phase = obj.lng("phase").toInt(),
                 wanted = obj.bool("wanted") ?: false,
                 stoppedByUser = obj.bool("stoppedByUser") ?: false,
+                stoppedByUserAt = obj.lng("stoppedByUserAt"),
             )
         }
     }

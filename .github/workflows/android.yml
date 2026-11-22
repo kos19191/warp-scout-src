@@ -88,6 +88,9 @@ jobs:
           need /tmp/selftest.log "сеть: повтор ушёл раньше общего окна (быстро)"
           need /tmp/selftest.log "сеть: данные идут после потери инициации"
           need /tmp/integration.log "integration: сессия пересогласована автоматически"
+          # Метка времени в инициации (TAI64N): свой сервер отвергает инициацию с меткой не новее прошлой.
+          need /tmp/selftest.log "метка времени: инициации подряд (в одну миллисекунду) строго растут"
+          need /tmp/selftest.log "rekey: метка времени каждой инициации новее прошлой"
 
           say "галочек в selftest: $(grep -c '✓' /tmp/selftest.log || true)"
           say "галочек в интеграции: $(grep -c '✓' /tmp/integration.log || true)"

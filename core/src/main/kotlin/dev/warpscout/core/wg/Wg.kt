@@ -53,22 +53,54 @@ object Wg {
         val mac1Key: ByteArray
     )
 
-    /** TAI64N (12 байт): 8 байт = секунды (младшие 62 бита) + старшие биты наносекунд, 4 байта = остаток. */
-    fun tai64n(millis: Long = System.currentTimeMillis()): ByteArray {
-        val nsTotal = millis * 1_000_000L
-        val sec = nsTotal / 1_000_000_000L
-        val nsec = nsTotal % 1_000_000_000L
-        val packed = ((nsec shl 2) and 0x3f00000000000000L) or (sec and 0x3fffffffffffffffL)
+    /**
+     * TAI64N (12 байт) — метка времени в инициации, ровно как её пишет WireGuard: 8 байт секунд
+     * TAI64 (2^62 + 10 + секунды Unix) и 4 байта наносекунд, оба числа старшим байтом вперёд.
+     *
+     * Раньше здесь были секунды младшим байтом вперёд и нулевые наносекунды. Сервер WireGuard
+     * (ядро Linux, wireguard-go, amneziawg-go, boringtun) принимает инициацию, только если её метка
+     * больше прошлой принятой от этого ключа, и сравнивает байты по порядку. У метки «младшим байтом
+     * вперёд» первым стоит младший байт секунд, а он прокручивается каждые 256 с: новая метка
+     * то и дело оказывалась «меньше» старой, и rekey отвергался как повтор. Пять повторов
+     * инициации в пределах одной секунды к тому же несли одну и ту же метку. WARP метку не
+     * проверяет — поэтому на нём этого не было видно (Диагностика-8: 174 rekey подряд), а свой
+     * сервер второго выхода через несколько минут переставал пересогласовываться.
+     */
+    fun tai64n(millis: Long = System.currentTimeMillis()): ByteArray =
+        tai64nAt(Math.floorDiv(millis, 1000L), (Math.floorMod(millis, 1000L) * 1_000_000L).toInt())
+
+    /** Начало шкалы TAI64 (2^62) плюс 10 с разницы TAI−UTC — так считает WireGuard. */
+    private const val TAI64_BASE = 0x400000000000000aL
+
+    private fun tai64nAt(unixSeconds: Long, nanos: Int): ByteArray {
         val out = ByteArray(12)
-        var v = packed
-        for (i in 0 until 8) {
-            out[i] = (v and 0xff).toByte()
-            v = v ushr 8
+        var sec = TAI64_BASE + unixSeconds
+        for (i in 7 downTo 0) {
+            out[i] = (sec and 0xff).toByte()
+            sec = sec ushr 8
         }
-        val hi = (nsec ushr 62).toInt()
-        out[8] = hi.toByte(); out[9] = (hi ushr 8).toByte()
-        out[10] = (hi ushr 16).toByte(); out[11] = (hi ushr 24).toByte()
+        var ns = nanos
+        for (i in 11 downTo 8) {
+            out[i] = (ns and 0xff).toByte()
+            ns = ns ushr 8
+        }
         return out
+    }
+
+    /** Последняя выданная метка, наносекунды Unix: следующая обязана быть строго больше. */
+    private val lastStampNanos = java.util.concurrent.atomic.AtomicLong(0L)
+
+    /**
+     * Метка для новой инициации: строго больше любой, выданной в этом процессе раньше.
+     *
+     * Часы дают миллисекунды, а две инициации на одном ключе (повтор у туннеля, проба дозора рядом
+     * с rekey) могут попасть в одну миллисекунду — тогда сервер отверг бы вторую как повтор. Если
+     * часы не сдвинулись (или ушли назад), берём прошлую метку плюс наносекунду.
+     */
+    fun freshTai64n(): ByteArray {
+        val now = System.currentTimeMillis() * 1_000_000L
+        val stamp = lastStampNanos.updateAndGet { prev -> if (now > prev) now else prev + 1 }
+        return tai64nAt(Math.floorDiv(stamp, 1_000_000_000L), Math.floorMod(stamp, 1_000_000_000L).toInt())
     }
 
     private fun aeadKey(counter: Long = 0): ByteArray = ByteArray(12) // nonce = 0 (4 байта нуля + le64(0))
@@ -126,7 +158,8 @@ object Wg {
         ck = Blake2s.hmac(temp, byteArrayOf(0x01))
         key = Blake2s.hmac(temp, ck + byteArrayOf(0x02))
 
-        val ts = timestamp ?: tai64n()
+        // Метка — монотонная на процесс: см. [freshTai64n] и [tai64n].
+        val ts = timestamp ?: freshTai64n()
         require(ts.size == 12) { "TAI64N = 12 байт" }
         val encryptedTimestamp = Crypto.chacha20Poly1305Seal(key, aeadKey(), ts, h)
         encryptedTimestamp.copyInto(buf, 88)                        // 28 байт: 12 + 16(tag)

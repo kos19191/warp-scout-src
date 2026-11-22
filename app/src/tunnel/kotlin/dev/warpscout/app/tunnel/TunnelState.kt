@@ -118,6 +118,19 @@ object TunnelState {
         }
 
     /**
+     * Когда человек последний раз выключил туннель (0 — не выключал). Новый старт её не сбрасывает:
+     * по ней перебор точек в интерфейсе замечает выключение плиткой или из уведомления, даже если
+     * следом успел уйти старт следующей точки.
+     */
+    @Volatile
+    var stoppedByUserAt: Long = 0L
+        set(v) {
+            if (field == v) return
+            field = v
+            publishNow(urgent = true)
+        }
+
+    /**
      * true — сервис чем-то занят (поднимается, работает или ждёт повтора): по нему публикуется
      * «сердцебиение». Ожидание повтора — тоже жизнь: без сердцебиения снимок за пару минут
      * «протухал», и интерфейс шёл проверять, не умер ли сервис.
@@ -139,6 +152,7 @@ object TunnelState {
         phase = phase,
         wanted = wanted,
         stoppedByUser = stoppedByUser,
+        stoppedByUserAt = stoppedByUserAt,
         bytesUp = TunnelDebug.bytesUp,
         bytesDown = TunnelDebug.bytesDown,
         handshakeAttempts = TunnelDebug.handshakeAttempts,
@@ -161,6 +175,7 @@ object TunnelState {
             phase = snapshot.phase
             wanted = snapshot.wanted
             stoppedByUser = snapshot.stoppedByUser
+            stoppedByUserAt = snapshot.stoppedByUserAt
         } finally {
             mirroring = false
         }

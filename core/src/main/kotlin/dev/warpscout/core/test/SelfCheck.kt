@@ -68,6 +68,7 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         }
         section("wireguard handshake") {
             wgInitiationShape()
+            wgTimestamps()
             wgHandshakeLoopback()
             dataPlaneLoopback()
             dataPlaneRekey()
@@ -287,6 +288,38 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
     }
 
     // --------------------------------------------------------------- wireguard
+
+    /**
+     * Метка времени в инициации — ровно TAI64N из WireGuard. Сервер (ядро Linux, wireguard-go,
+     * amneziawg-go) принимает инициацию, только если её метка больше прошлой принятой от этого
+     * ключа, и сравнивает байты по порядку. До 1.10.26 метка шла младшим байтом вперёд: WARP её
+     * не проверяет, а свой сервер второго выхода отвергал rekey как повтор.
+     */
+    private fun wgTimestamps() {
+        expect("метка времени: эпоха Unix в TAI64N", Crypto.hex(Wg.tai64n(0)), "400000000000000a00000000")
+        expect(
+            "метка времени: секунды и наносекунды старшим байтом вперёд",
+            Crypto.hex(Wg.tai64n(1_500)),
+            "400000000000000b1dcd6500"
+        )
+        // Шаг 37 с прокручивает младший байт секунд десятки раз — на нём и ломалась прежняя метка.
+        var earlier = Wg.tai64n(1_763_771_571_000)
+        var notNewer = 0
+        for (step in 1..2000) {
+            val later = Wg.tai64n(1_763_771_571_000 + step * 37_000L)
+            if (stampCompare(later, earlier) <= 0) notNewer++
+            earlier = later
+        }
+        expect("метка времени: каждая следующая больше прежней по байтам (как сравнивает сервер)", notNewer, 0)
+        var previousFresh = Wg.freshTai64n()
+        var freshNotNewer = 0
+        repeat(5000) {
+            val fresh = Wg.freshTai64n()
+            if (stampCompare(fresh, previousFresh) <= 0) freshNotNewer++
+            previousFresh = fresh
+        }
+        expect("метка времени: инициации подряд (в одну миллисекунду) строго растут", freshNotNewer, 0)
+    }
 
     private fun wgInitiationShape() {
         val priv = ByteArray(32) { (it + 2).toByte() }.also { it[31] = 0 }
@@ -758,6 +791,12 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         val heldBack = TunnelStatus.fromJson(TunnelStatus(wanted = true, stoppedByUser = true).toJson())
         expect("снимок: туннель нужен", heldBack?.wanted, true)
         expect("снимок: выключен вручную", heldBack?.stoppedByUser, true)
+        // По времени ручного выключения перебор точек видит выключение плиткой во время перебора.
+        expect(
+            "снимок: время ручного выключения без потерь",
+            TunnelStatus.fromJson(TunnelStatus(stoppedByUserAt = 1_758_000_009_999L).toJson())?.stoppedByUserAt,
+            1_758_000_009_999L
+        )
         val beforeFields = TunnelStatus.fromJson("{\"up\": false, \"phase\": 5}")
         expect("снимок: старый формат — туннель не нужен", beforeFields?.wanted, false)
         expect("снимок: старый формат — не выключался вручную", beforeFields?.stoppedByUser, false)
@@ -1116,6 +1155,13 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
                 server.error ?: "back=${back?.size}; ${h.log}")
             check("rekey: возраст сессии обнулился", h.plane.sessionAgeMs() < 4000,
                 "age=${h.plane.sessionAgeMs()}")
+            // Как настоящий сервер: каждая инициация обязана нести метку новее прошлой, иначе он
+            // молча отбросит её как повтор (WARP этого не проверяет — свой сервер проверяет).
+            check(
+                "rekey: метка времени каждой инициации новее прошлой",
+                server.staleStamps.get() == 0,
+                "инициаций с меткой не новее прошлой: ${server.staleStamps.get()} из ${server.initiations.get()}"
+            )
 
             // Тишина: ждём дольше, чем rekeyAfterMs, и убеждаемся, что рукопожатий не прибавилось.
             // Это и есть «не будить радио зря»: расход батареи в простое давали именно эти
@@ -1573,6 +1619,31 @@ object WgResponder {
     }
 
     /**
+     * Расшифрованная метка времени инициации (12 байт TAI64N) — то, что настоящий сервер сверяет с
+     * прошлой принятой. null — инициация не для этого ключа сервера.
+     */
+    fun timestampOf(initiation: ByteArray, serverPrivate: ByteArray): ByteArray? = runCatching {
+        val serverPublic = Crypto.publicOf(serverPrivate)
+        var ck = Blake2s.hash("Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s".toByteArray())
+        var h = Blake2s.hash(ck + "WireGuard v1 zx2c4 Jason@zx2c4.com".toByteArray())
+        h = Blake2s.hash(h + serverPublic)
+        val clientEph = initiation.copyOfRange(8, 40)
+        h = Blake2s.hash(h + clientEph)
+        var temp = Blake2s.hmac(ck, clientEph)
+        ck = Blake2s.hmac(temp, byteArrayOf(0x01))
+        temp = Blake2s.hmac(ck, Crypto.dh(serverPrivate, clientEph))
+        ck = Blake2s.hmac(temp, byteArrayOf(0x01))
+        var key = Blake2s.hmac(temp, ck + byteArrayOf(0x02))
+        val encStatic = initiation.copyOfRange(40, 88)
+        val clientStatic = Crypto.chacha20Poly1305Open(key, ByteArray(12), encStatic, h) ?: return@runCatching null
+        h = Blake2s.hash(h + encStatic)
+        temp = Blake2s.hmac(ck, Crypto.dh(serverPrivate, clientStatic))
+        ck = Blake2s.hmac(temp, byteArrayOf(0x01))
+        key = Blake2s.hmac(temp, ck + byteArrayOf(0x02))
+        Crypto.chacha20Poly1305Open(key, ByteArray(12), initiation.copyOfRange(88, 116), h)
+    }.getOrNull()
+
+    /**
      * Cookie reply (64 байта) как его шлёт ядро: type=3, receiver_index, nonce(24),
      * encrypted_cookie = XChaCha20Poly1305(BLAKE2s("cookie--" || pub_сервера), nonce, cookie, AAD = mac1 инициации).
      */
@@ -1593,6 +1664,15 @@ object WgResponder {
         val expected = Blake2s.mac(cookie, initiation.copyOfRange(0, 132))
         return expected.contentEquals(initiation.copyOfRange(132, 148))
     }
+}
+
+/** Сравнение меток TAI64N побайтно без знака — ровно как memcmp в ядре Linux. */
+private fun stampCompare(a: ByteArray, b: ByteArray): Int {
+    for (i in 0 until minOf(a.size, b.size)) {
+        val d = (a[i].toInt() and 0xff) - (b[i].toInt() and 0xff)
+        if (d != 0) return d
+    }
+    return a.size - b.size
 }
 
 /**
@@ -1616,6 +1696,14 @@ private class LoopbackServer(
 
     val port: Int get() = socket.localPort
     val initiations = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
+     * Инициации, чья метка времени не новее прошлой принятой: настоящий сервер на них молчит
+     * (защита от повтора). Здесь отвечаем всё равно — чтобы не ломать остальные проверки, — но
+     * считаем: проверка rekey требует ноль.
+     */
+    val staleStamps = java.util.concurrent.atomic.AtomicInteger(0)
+    private var newestStamp: ByteArray? = null
 
     @Volatile
     var lastPayload: ByteArray? = null
@@ -1662,6 +1750,12 @@ private class LoopbackServer(
                         if (pkt.size != dev.warpscout.core.wg.Wg.INITIATION_LEN) continue
                         val n = initiations.incrementAndGet()
                         if (!answerInitiation(n)) continue
+                        val stamp = WgResponder.timestampOf(pkt, serverPrivate)
+                        val newest = newestStamp
+                        if (stamp != null) {
+                            if (newest != null && stampCompare(stamp, newest) <= 0) staleStamps.incrementAndGet()
+                            else newestStamp = stamp
+                        }
                         val idx = serverIndex++
                         val (resp, srv) = WgResponder.respondWithSession(pkt, serverPrivate, senderIndex = idx)
                         sessions[idx] = srv

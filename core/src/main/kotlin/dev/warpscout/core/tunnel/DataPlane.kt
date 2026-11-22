@@ -565,8 +565,14 @@ class DataPlane(
     private fun rekey(force: Boolean = false): Boolean {
         val now = System.currentTimeMillis()
         if (!force && now - lastRekeyAttemptAt < settings.rekeyRetryMs) return false
+        // Какая сессия была, когда решили пересогласовать. Таймер и отправитель могут решить это
+        // одновременно: один делает handshake, второй ждёт замка — и раньше, дождавшись, делал
+        // второй handshake подряд (Диагностика-8: 03:28:27 и 07:18:22, два rekey с разницей
+        // 0,12 с). Если сессию за это время уже сменили, она свежая, и второй handshake не нужен.
+        val sessionAtCall = sessionStartedAt
         return synchronized(rekeyLock) {
             if (stopped) return@synchronized false
+            if (sessionStartedAt != sessionAtCall) return@synchronized true
             val again = System.currentTimeMillis()
             if (!force && again - lastRekeyAttemptAt < settings.rekeyRetryMs) return@synchronized false
             lastRekeyAttemptAt = again
@@ -587,6 +593,10 @@ class DataPlane(
             // ближайшего события (keepalive или rekey), то есть просыпаемся раз в 25–60 секунд.
             // Для батареи это разница между «процесс постоянно на процессоре» и «спит».
             val now = System.currentTimeMillis()
+            // Статистика — в начале каждого пробуждения. Раньше она стояла в конце цикла, куда
+            // ветки rekey и простоя не доходят (`continue`): при живом трафике первая строка
+            // появилась только через 1 ч 43 мин и была подписана «за 5 мин» (Диагностика-8).
+            logStatsIfDue(now)
             val age = if (sessionStartedAt == 0L) 0 else now - sessionStartedAt
             val keepaliveSeconds = config.persistentKeepalive ?: 0
             val nextKeepaliveAt = if (keepaliveSeconds > 0) {
@@ -665,38 +675,46 @@ class DataPlane(
             // ровно те моменты, когда сессия восстанавливается после сбоя.
             val untilRetry = (lastAttemptAt + settings.rekeyRetryMs) - System.currentTimeMillis()
             if (untilRetry > 0) runCatching { Thread.sleep(untilRetry.coerceAtMost(1_000L)) }
-
-            // Раз в пять минут — честные цифры в журнал: сколько было пробуждений радио и рукопожатий.
-            // Без этого «батарея садится» обсуждается догадками, а не фактами.
-            if (now >= nextStatsAt) {
-                nextStatsAt = now + STATS_EVERY_MS
-                // «за 5 мин» было неправдой: в глубоком сне система не даёт потоку проснуться
-                // вовремя, и между строками проходило по 19 минут — а подпись оставалась прежней.
-                // Человек читал «cpu 17 с за 5 мин» и делал вывод в шесть раз строже реального.
-                val spanMin = if (statsMarkAt == 0L) (STATS_EVERY_MS / 60_000).toInt()
-                else ((now - statsMarkAt) / 60_000).toInt().coerceAtLeast(1)
-                statsMarkAt = now
-                val idle = if (lastUserTrafficAt == 0L) now - startedAt else now - lastUserTrafficAt
-                val extra = vitals?.invoke().orEmpty()
-                // Цифры за интервал, а не накопленные: «keepalive 30» за час ничего не говорит о
-                // том, что было в эти пять минут.
-                val ka = keepalivesSent - keepaliveMark
-                val hs = handshakesDone - handshakeMark
-                val upKb = (bytesUp - bytesUpMark) / 1024
-                val downKb = (bytesDown - bytesDownMark) / 1024
-                keepaliveMark = keepalivesSent.toLong()
-                handshakeMark = handshakesDone.toLong()
-                bytesUpMark = bytesUp
-                bytesDownMark = bytesDown
-                log(
-                    "$STATS_PREFIX за $spanMin мин: keepalive $ka, " +
-                        "рукопожатий $hs, вверх $upKb КБ, вниз $downKb КБ, " +
-                        "трафика нет ${idle / 1000} с, " +
-                        Keepalive.describe(keepaliveIntervalMs(now), screenOn(), idle) +
-                        (if (extra.isNotBlank()) ", $extra" else "")
-                )
-            }
         }
+    }
+
+    /**
+     * Раз в пять минут — честные цифры в журнал: сколько было пробуждений радио и рукопожатий.
+     * Без этого «батарея садится» обсуждается догадками, а не фактами.
+     */
+    private fun logStatsIfDue(now: Long) {
+        if (nextStatsAt == 0L) {
+            // Первое пробуждение — точка отсчёта, а не строка с нулями.
+            nextStatsAt = now + STATS_EVERY_MS
+            statsMarkAt = startedAt
+            return
+        }
+        if (now < nextStatsAt) return
+        nextStatsAt = now + STATS_EVERY_MS
+        // «за 5 мин» было неправдой: в глубоком сне система не даёт потоку проснуться вовремя, и
+        // между строками проходило по 19 минут — а подпись оставалась прежней. Длину интервала
+        // считаем от прошлой строки, а для первой — от старта туннеля.
+        val spanMin = ((now - (if (statsMarkAt == 0L) startedAt else statsMarkAt)) / 60_000).toInt().coerceAtLeast(1)
+        statsMarkAt = now
+        val idle = if (lastUserTrafficAt == 0L) now - startedAt else now - lastUserTrafficAt
+        val extra = vitals?.invoke().orEmpty()
+        // Цифры за интервал, а не накопленные: «keepalive 30» за час ничего не говорит о
+        // том, что было в эти пять минут.
+        val ka = keepalivesSent - keepaliveMark
+        val hs = handshakesDone - handshakeMark
+        val upKb = (bytesUp - bytesUpMark) / 1024
+        val downKb = (bytesDown - bytesDownMark) / 1024
+        keepaliveMark = keepalivesSent.toLong()
+        handshakeMark = handshakesDone.toLong()
+        bytesUpMark = bytesUp
+        bytesDownMark = bytesDown
+        log(
+            "$STATS_PREFIX за $spanMin мин: keepalive $ka, " +
+                "рукопожатий $hs, вверх $upKb КБ, вниз $downKb КБ, " +
+                "трафика нет ${idle / 1000} с, " +
+                Keepalive.describe(keepaliveIntervalMs(now), screenOn(), idle) +
+                (if (extra.isNotBlank()) ", $extra" else "")
+        )
     }
 
     /**

@@ -63,10 +63,21 @@ class WarpVpnService : VpnService() {
         runCatching { dev.warpscout.app.CrashLog.install(this) }
         runCatching { dev.warpscout.app.TunnelDebug.attach(this) }
         runCatching { TunnelStatusPublisher.start(this) }
+        // «Выключил сам» помнит снимок, а не память процесса. Новый процесс сервиса (после
+        // остановки, обновления, убийства системой) иначе первым же снимком стёр бы эту отметку —
+        // и фоновый подбор решил бы, что туннель можно включать.
+        runCatching {
+            dev.warpscout.app.status.TunnelStatusBus.read(this)?.let { previous ->
+                if (previous.stoppedByUser) TunnelState.stoppedByUser = true
+                if (previous.stoppedByUserAt > TunnelState.stoppedByUserAt) {
+                    TunnelState.stoppedByUserAt = previous.stoppedByUserAt
+                }
+            }
+        }
         // Первая строка журнала: по ней видно, что процесс сервиса вообще запустился.
         runCatching {
-            // Сборка — в той же строке: версия не меняется от правки к правке (1.10.25 пересобирается
-            // поверх), и по журналу иначе не понять, стоит ли уже свежая сборка.
+            // Сборка — в той же строке: мелкие доправки пересобирают ту же версию поверх, и по
+            // журналу иначе не понять, стоит ли уже свежая сборка.
             dev.warpscout.app.TunnelDebug.stage(
                 "сервис запущен, процесс ${android.os.Process.myPid()}, сборка " +
                     "${dev.warpscout.app.BuildConfig.VERSION_NAME} · ${dev.warpscout.app.BuildConfig.BUILD_REV}"
@@ -660,8 +671,14 @@ class WarpVpnService : VpnService() {
             // после этого ничто не включает туннель само. Остановки перебора точек и подбора
             // приходят без этой отметки: за ними сразу следует новый старт.
             if (intent?.getBooleanExtra(EXTRA_BY_USER, false) == true) {
+                // Повторное «Выключить» по уже выключенному (перебор точек в интерфейсе страхуется
+                // им после отмены) в журнал вторую одинаковую строку не пишет.
+                val already = TunnelState.stoppedByUser && !TunnelState.wanted && !TunnelState.up && !TunnelState.busy
                 TunnelState.stoppedByUser = true
-                TunnelDebug.stage("туннель выключен вручную — сам больше не включаю, пока не нажмёшь «Включить»")
+                TunnelState.stoppedByUserAt = System.currentTimeMillis()
+                if (!already) {
+                    TunnelDebug.stage("туннель выключен вручную — сам больше не включаю, пока не нажмёшь «Включить»")
+                }
             }
             shutdown()
             // Останавливаемся только если после «Отключить» ничего не пришло. Раньше здесь был
@@ -671,6 +688,16 @@ class WarpVpnService : VpnService() {
             // закрытом экземпляре — так рождались «призраки». stopSelf(startId) система игнорирует,
             // если после этой команды уже пришла другая.
             runCatching { stopSelf(startId) }
+            return START_NOT_STICKY
+        }
+
+        // Старт из перебора точек, а туннель уже после начала подключения выключили вручную
+        // (плитка, «Отключить» в уведомлении): старт разминулся с выключением и опоздал. Раньше он
+        // проходил и снимал отметку «выключил сам» — туннель включался вопреки человеку.
+        val requestedAt = intent?.getLongExtra(EXTRA_REQUESTED_AT, 0L) ?: 0L
+        if (intent?.action == ACTION_START && requestedAt > 0L && TunnelState.stoppedByUserAt >= requestedAt) {
+            TunnelDebug.stage("старт пропущен: туннель выключили вручную уже после начала подключения")
+            if (plane == null && !starting) runCatching { stopSelf(startId) }
             return START_NOT_STICKY
         }
 
@@ -1096,7 +1123,14 @@ class WarpVpnService : VpnService() {
                         line.contains("туннель поднят") ->
                             TunnelDebug.ok("второй выход поднят: ${secondCfg.endpoint.render()}")
                         line.contains("не прошёл") || line.contains("невозможен") ->
-                            TunnelDebug.error("второй выход: $line", "проверь второй конфиг и его endpoint")
+                            // С 1.10.26 метка времени в инициации — стандартная TAI64N. Свой сервер
+                            // помнит самую большую метку от прошлых версий (она была записана не тем
+                            // порядком байт) и, пока не перезапущен, новые инициации считает повтором.
+                            TunnelDebug.error(
+                                "второй выход: $line",
+                                "проверь второй конфиг и его endpoint; если сервер перестал отвечать сразу после " +
+                                    "обновления до 1.10.26 — перезапусти на нём WireGuard/AmneziaWG"
+                            )
                         else -> TunnelDebug.stage("второй: $line")
                     }
                 }
@@ -2235,15 +2269,46 @@ class WarpVpnService : VpnService() {
                 udpFactory = protectedUdp()
             )
         )
-        val notes = ArrayList<String>()
-        var learned = false
+        // Сначала пробы, выводы — потом: молчание всех точек ещё надо отличить от молчания сети.
+        val results = ArrayList<Triple<String, Verdict, Double?>>()
         for (line in picks) {
             if (myEpoch != epoch.get() || stopped.get() || !TunnelState.up) return SENTRY_IDLE
             val endpoint = parseEndpoint(line) ?: continue
             val (verdict, rtt) = sentryProbe(prober, endpoint, cfg, peerPublic)
+            results += Triple(line, verdict, rtt)
+        }
+        if (myEpoch != epoch.get() || stopped.get()) return SENTRY_IDLE
+
+        // Все выбранные точки промолчали. Это две разные вещи: точки и правда закрыли — или сеть
+        // сейчас не пропускает НОВЫЕ соединения к WARP, не трогая уже идущее (так ведёт себя DPI).
+        // Диагностика-8: с 05:34 все пробы дозора «молчат», а туннель на 188.114.97.1:500 жив и
+        // делает rekey с первой инициации — и все запасные точки ушли в «мёртвые» зря. Различаем
+        // одной контрольной пробой текущей точки с нового сокета: туннель на ней работает, и если
+        // с нового порта молчит и она, виновата сеть, а не точки. Тогда метки точек не трогаем.
+        var networkBlocks = false
+        var controlNote: String? = null
+        if (results.isNotEmpty() && results.all { it.second == Verdict.UDP_SILENT } && current != null) {
+            val control = parseEndpoint(current)
+            if (control != null && TunnelState.up) {
+                val (cv, crtt) = sentryProbe(prober, control, cfg, peerPublic)
+                if (myEpoch != epoch.get() || stopped.get()) return SENTRY_IDLE
+                if (cv == Verdict.HANDSHAKE_OK || cv == Verdict.COOKIE_REPLY) {
+                    controlNote = "контроль: текущая $current с нового порта ✓" +
+                        (crtt?.let { " ${it.toLong()} мс" } ?: "") + " — молчат именно эти точки"
+                } else {
+                    networkBlocks = true
+                    controlNote = "контроль: текущая $current с нового порта тоже молчит, а туннель на ней жив — " +
+                        "новые соединения к WARP сейчас не проходят, точки мёртвыми не считаю"
+                }
+            }
+        }
+
+        val notes = ArrayList<String>()
+        var learned = networkBlocks
+        val now = System.currentTimeMillis()
+        for ((line, verdict, rtt) in results) {
             val key = "$kind|$line"
             val before = sentryMarks[key] ?: SentryMark()
-            val now = System.currentTimeMillis()
             when (verdict) {
                 Verdict.HANDSHAKE_OK, Verdict.COOKIE_REPLY -> {
                     learned = true
@@ -2257,15 +2322,20 @@ class WarpVpnService : VpnService() {
                     notes += "$line ✗ порт закрыт — в конец перебора"
                 }
                 Verdict.UDP_SILENT -> {
-                    learned = true
-                    val fails = before.fails + 1
-                    sentryMarks[key] = SentryMark(okAt = before.okAt, fails = fails, failAt = now)
-                    notes += "$line ✗ молчит" + if (fails >= 2) " ($fails-й раз — в конец перебора)" else ""
+                    if (networkBlocks) {
+                        // Молчит сеть, а не точка: прежняя отметка точки остаётся как была.
+                        notes += "$line ✗ молчит"
+                    } else {
+                        learned = true
+                        val fails = before.fails + 1
+                        sentryMarks[key] = SentryMark(okAt = before.okAt, fails = fails, failAt = now)
+                        notes += "$line ✗ молчит" + if (fails >= 2) " ($fails-й раз — в конец перебора)" else ""
+                    }
                 }
                 else -> notes += "$line ? не проверена (${verdict.name.lowercase()})"
             }
         }
-        if (myEpoch != epoch.get() || stopped.get()) return SENTRY_IDLE
+        controlNote?.let { notes += it }
         if (notes.isNotEmpty()) TunnelDebug.stage("дозор: " + notes.joinToString("; "))
         return if (learned) SENTRY_INFO else if (notes.isEmpty()) SENTRY_IDLE else SENTRY_ERRORS
     }
@@ -2487,18 +2557,25 @@ class WarpVpnService : VpnService() {
 
         /** STOP по просьбе человека: после него автоматика туннель не включает. */
         const val EXTRA_BY_USER = "byUser"
+
+        /**
+         * Когда человек начал подключение (мс). Если туннель после этого выключили вручную, старт
+         * опоздал и пропускается — см. onStartCommand.
+         */
+        const val EXTRA_REQUESTED_AT = "requestedAt"
         private const val CHANNEL = "warpscout.tunnel.quiet"
         private const val LEGACY_CHANNEL = "warpscout.tunnel"
         private const val NOTIF_ID = 4200
 
-        fun start(context: Context, config: WarpConfig) = startWithText(context, WgConf.render(config))
+        fun start(context: Context, config: WarpConfig, requestedAt: Long = 0L) =
+            startWithText(context, WgConf.render(config), requestedAt)
 
         /**
          * Запуск готовым текстом конфига. Нужен плитке быстрых настроек: она не собирает конфиг
          * заново, а берёт последний использованный ([Prefs.lastConfigText]) — то есть ровно то,
          * что в последний раз реально работало.
          */
-        fun startWithText(context: Context, text: String) {
+        fun startWithText(context: Context, text: String, requestedAt: Long = 0L) {
             // Новая попытка: результат прежней не должен влиять на неё. Без этого интерфейс
             // успевал прочитать старое «туннель работает» или «сдался» из предыдущего снимка и
             // делал вывод по устаревшим данным. Здесь это покрывает все пути запуска: кнопку,
@@ -2507,6 +2584,7 @@ class WarpVpnService : VpnService() {
             val intent = Intent(context, WarpVpnService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_CONF, text)
+                if (requestedAt > 0L) putExtra(EXTRA_REQUESTED_AT, requestedAt)
             }
             // startForegroundService из фона на Android 12+ может быть запрещён
             // (ForegroundServiceStartNotAllowedException). Тогда пробуем обычный startService:

@@ -204,7 +204,10 @@ class FakeWarpServer:
         # состояние по адресу клиента: два теста подряд не отравляют друг друга
         self.cookies: dict = {}
         self.stats = {"junk": 0, "initiations": 0, "responses": 0, "cookies": 0,
-                      "rejected": 0, "transport": 0, "echo": 0}
+                      "rejected": 0, "transport": 0, "echo": 0, "replayed": 0}
+        # Самая новая принятая метка времени (TAI64N) по статическому ключу клиента: как настоящий
+        # сервер (ядро Linux, wireguard-go), инициацию с меткой не новее этой считаем повтором.
+        self.newest_ts: dict = {}
         # ключи сессии после handshake (чтобы уметь эхо-ить транспорт)
         self.sessions: dict = {}
 
@@ -266,6 +269,16 @@ class FakeWarpServer:
                 self.stats["rejected"] += 1
                 self.log(f"  {addr}: нет правильного mac2(cookie) — молчим")
                 return None
+
+        # Защита от повтора — после проверки cookie, как в wireguard-go: метки сравниваются
+        # побайтно (memcmp), и принимается только строго более новая.
+        newest = self.newest_ts.get(client_static)
+        if newest is not None and ts <= newest:
+            self.stats["rejected"] += 1
+            self.stats["replayed"] += 1
+            self.log(f"  {addr}: метка времени не новее прошлой ({ts.hex()} <= {newest.hex()}) — повтор, молчим")
+            return None
+        self.newest_ts[client_static] = ts
 
         return self.make_response(pkt, h, ck, e, client_static, client_sender, addr)
 

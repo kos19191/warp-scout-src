@@ -41,6 +41,16 @@ interface TunnelController {
      */
     fun startAndAwait(config: WarpConfig, waitMs: Int = 20000): Boolean = start(config)
 
+    /**
+     * То же, но с отменой: [isCancelled] спрашивается всё время ожидания, и при `true` ожидание
+     * обрывается сразу, а не по истечении [waitMs]. Туннель гасит тот, кто отменил.
+     *
+     * [requestedAt] — когда человек начал подключение. Если после этого туннель выключили вручную
+     * (плитка, «Отключить» в уведомлении), сервис такой старт пропустит: он опоздал.
+     */
+    fun startAndAwait(config: WarpConfig, waitMs: Int, requestedAt: Long, isCancelled: () -> Boolean): Boolean =
+        startAndAwait(config, waitMs)
+
     /** Верификация доступности ресурсов из-под туннеля; null — если туннеля нет. */
     fun verifier(): TunnelVerifier? = null
 

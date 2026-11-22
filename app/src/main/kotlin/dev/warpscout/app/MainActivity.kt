@@ -102,6 +102,24 @@ class MainActivity : AppCompatActivity() {
     private var tunnelStartedAtLocal = 0L
     private var connecting = false
 
+    /**
+     * «Отменить подключение» нажато: перебор точек не стартует следующую и гасит текущую попытку.
+     * Раньше кнопка все ~45 с перебора была неактивна, а выключение плиткой не останавливало
+     * перебор — следующая точка стартовала и снимала отметку «выключил сам».
+     */
+    @Volatile
+    private var connectCancel = false
+
+    /** Когда показана текущая панель и ошибка ли это: «успех» после возврата не должен висеть вечно. */
+    private var bannerShownAt = 0L
+    private var bannerIsError = false
+
+    /** В строке «Последний подбор» сейчас «… назад» из [showLastRun] — её надо освежать при возврате. */
+    private var lastRunShown = false
+
+    /** Экран на виду (между onResume и onPause): только тогда нужен опрос состояния туннеля. */
+    private var screenResumed = false
+
     /** Подбор запущен кнопкой подключения: когда закончится — сразу поднимаем туннель. */
     private var autoConnectAfterScan = false
     private var endpointIndex = 0
@@ -168,8 +186,8 @@ class MainActivity : AppCompatActivity() {
                 sink().log("   подробности: Journal → «Скопировать журнал» (раздел «Падения»)")
             }
             binding.textStatus.setText(R.string.status_idle)
-            // Номер сборки рядом с версией: 1.10.25 пересобирается поверх, и только так видно,
-            // какая именно сборка стоит.
+            // Номер сборки рядом с версией: мелкие доправки пересобирают ту же версию поверх, и
+            // только так видно, какая именно сборка стоит.
             binding.textVersion.text = getString(
                 R.string.version_footer,
                 BuildConfig.VERSION_NAME + " · " + BuildConfig.BUILD_REV,
@@ -199,6 +217,7 @@ class MainActivity : AppCompatActivity() {
      * подключения» = вечный таймер на процессоре.
      */
     override fun onPause() {
+        screenResumed = false
         stopTunnelPolling()
         tunnelHandler.removeCallbacks(bannerHide)
         super.onPause()
@@ -207,6 +226,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        screenResumed = true
         if (!uiReady()) return
         // Опрос нужен всегда, пока экран открыт: сервис сам переподнимает туннель после смены
         // сети, и кнопка должна это показывать. В фоне опрос выключен (см. onPause).
@@ -219,7 +239,19 @@ class MainActivity : AppCompatActivity() {
             startTunnelPolling()
             refreshInstalledApps()
             updateAppsState()
+            // Внутри — проверка процесса сервиса сразу, а не через 2,5 минуты: после обновления
+            // приложения или убийства системой экран иначе ещё долго показывал «работает».
             updateTunnelButton()
+            // «… назад» считается в момент показа: без этого после возврата висело «11 ч 45 мин
+            // назад», хотя прошло уже 12 ч 14 мин (снимок экрана к Диагностике-8).
+            if (lastRunShown) showLastRun()
+            // Панель «успех» прячется через 8 с, но onPause снимает этот таймер — и если уйти из
+            // приложения раньше, «Туннель поднят: …» висела до следующего пересоздания экрана, даже
+            // когда туннель давно выключен. Возвращаем таймер (или прячем сразу, если 8 с прошли).
+            if (binding.cardBanner.visibility == View.VISIBLE && !bannerIsError) {
+                val left = BANNER_MS - (System.currentTimeMillis() - bannerShownAt)
+                if (left <= 0L) hideBanner() else tunnelHandler.postDelayed(bannerHide, left)
+            }
             updateTunnelDiagnostics()
             refreshLogBox()
             renderShortlist()
@@ -913,9 +945,15 @@ class MainActivity : AppCompatActivity() {
             refreshRoutesState()
         }
 
+        // Спиннер сам сообщает о выборе при первой раскладке, а вкладка «Настройки» раскладывается
+        // при первом показе. Это не правка: раньше каждое первое открытие вкладки писало в журнал
+        // «изменено: DNS / режим маршрутов (не применено)» и показывало плашку о несохранённых
+        // изменениях (Диагностика-8, 12:57:10). Правка — только когда значение действительно другое.
         binding.spinnerRoutes.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
-                prefs.routesMode = position.coerceIn(0, 3)
+                val mode = position.coerceIn(0, 3)
+                if (mode == prefs.routesMode) return
+                prefs.routesMode = mode
                 refreshRoutesState()
                 markSettingsDirty(getString(R.string.dirty_routes_mode))
             }
@@ -925,12 +963,16 @@ class MainActivity : AppCompatActivity() {
 
         // Всё, что попадает в VpnService.Builder, меняется только переустановлением туннеля —
         // поэтому правки настроек при поднятом туннеле ставят переподключение в очередь.
+        // Переключатели и поля восстанавливают своё состояние сами (после пересоздания экрана) и
+        // при этом зовут слушателя — то же значение, что в настройках, правкой не считаем.
         binding.switchIpv6.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked == prefs.enableIpv6) return@setOnCheckedChangeListener
             prefs.enableIpv6 = isChecked
             markSettingsDirty("IPv6")
         }
         binding.dnsSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (position == prefs.dnsIndex) return
                 prefs.dnsIndex = position
                 markSettingsDirty("DNS")
             }
@@ -938,18 +980,19 @@ class MainActivity : AppCompatActivity() {
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
         binding.editMtu.doAfterTextChanged { text ->
-            text?.toString()?.toIntOrNull()?.takeIf { it in 576..1420 }?.let {
+            text?.toString()?.toIntOrNull()?.takeIf { it in 576..1420 && it != prefs.mtu }?.let {
                 prefs.mtu = it
                 markSettingsDirty("MTU")
             }
         }
         binding.editKeepalive.doAfterTextChanged { text ->
-            text?.toString()?.toIntOrNull()?.let {
+            text?.toString()?.toIntOrNull()?.takeIf { it != prefs.keepalive }?.let {
                 prefs.keepalive = it
                 markSettingsDirty("keepalive")
             }
         }
         binding.checkListChecks.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked == prefs.checkByLists) return@setOnCheckedChangeListener
             prefs.checkByLists = isChecked
             refreshRoutesState()
             markSettingsDirty(getString(R.string.dirty_lists))
@@ -957,6 +1000,7 @@ class MainActivity : AppCompatActivity() {
 
         // «Сохранить» на каждой вкладке, где что-то меняется: применяем и только потом переподключаем.
         binding.switchSecondExit.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked == prefs.secondExitOn) return@setOnCheckedChangeListener
             prefs.secondExitOn = isChecked
             updateSecondState()
             markSettingsDirty(getString(R.string.dirty_second_exit))
@@ -1042,6 +1086,10 @@ class MainActivity : AppCompatActivity() {
         binding.spinnerSchedule.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
                 val hours = Schedule.PERIODS.getOrElse(position) { 6 }
+                // Начальный выбор при первой раскладке — не правка. Раньше он заодно включал
+                // фоновый подбор обратно, если его выключили кнопкой: период оставался прежним,
+                // и первое же открытие «Настроек» ставил scheduleOn = true.
+                if (hours == prefs.scheduleHours) return
                 prefs.scheduleHours = hours
                 prefs.scheduleOn = hours > 0
                 if (hours > 0) Schedule.enable(this@MainActivity, hours) else Schedule.disable(this@MainActivity)
@@ -1188,7 +1236,9 @@ class MainActivity : AppCompatActivity() {
     private fun exportJournal() {
         // Журнал подбора и состояние читаем здесь, на главном потоке, — файл собираем в фоне.
         val scanText = log.toString()
-        val snapshot = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
+        // С проверкой процесса сервиса: в шапке журнала, выгруженного через минуту после
+        // обновления, стояло «туннель работает», хотя обновление его уже закрыло (Диагностика-8).
+        val snapshot = runCatching { TunnelStatusBus.snapshot(this, verify = true) }.getOrNull()
         val app = applicationContext
         Thread({
             val now = java.util.Date()
@@ -1429,6 +1479,8 @@ class MainActivity : AppCompatActivity() {
         val hhmm = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
         val time = hhmm.format(java.util.Date(prefs.lastTunedAt))
         val bestNow = result.best?.endpoint?.render()
+        // Итог только что закончившегося подбора — его при возврате не перетираем строкой «… назад».
+        lastRunShown = false
         binding.textDone.text = when {
             // сменой считается только случай, когда endpoint реально другой, чем до этого запуска
             bestNow != null && endpointBeforeRun.isNotBlank() && bestNow != endpointBeforeRun ->
@@ -1556,13 +1608,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateTunnelButton() {
-        // Снимок мог «зависнуть» на «работает», если сервис убила система: проверка дешёвая
-        // (не чаще раза в 2 секунды) и возвращает правду до того, как её покажет кнопка.
-        runCatching { TunnelStatusBus.snapshot(this) }
+        // Снимок мог «зависнуть» на «работает», если сервис убила система или его закрыло
+        // обновление приложения: проверяем процесс сервиса до того, как кнопка покажет состояние.
+        runCatching { TunnelStatusBus.snapshot(this, verify = true) }
         updateConnStatus()
         if (!tunnel.supported) {
             binding.btnTunnel.isEnabled = false
             binding.btnTunnel.setText(R.string.tunnel_unavailable)
+            return
+        }
+        // Идёт перебор точек: кнопка — «Отменить подключение», а не «Выключить туннель».
+        if (connecting) {
+            binding.btnTunnel.isEnabled = !connectCancel
+            binding.btnTunnel.setText(if (connectCancel) R.string.btn_connect_cancelling else R.string.btn_connect_cancel)
             return
         }
         binding.btnTunnel.isEnabled = true
@@ -1618,6 +1676,7 @@ class MainActivity : AppCompatActivity() {
 
     /** «Готово в 14:32» + «это новый конфиг» — чтобы по экрану было видно результат и его свежесть. */
     private fun showLastRun() {
+        lastRunShown = true
         val at = prefs.lastTunedAt
         if (at <= 0L) {
             binding.textDone.setText(R.string.done_never)
@@ -1681,8 +1740,10 @@ class MainActivity : AppCompatActivity() {
             binding.groupTop3.addView(
                 MaterialRadioButton(this).apply {
                     id = View.generateViewId()
-                    text = getString(R.string.top3_now, lastEndpoint) + "\n" +
-                        getString(if (up) R.string.top3_row_active else R.string.top3_row_chosen)
+                    // «Сейчас подключён» — только когда туннель работает: на снимке экрана к
+                    // Диагностике-8 эта строка стояла под «Туннель выключен».
+                    text = getString(if (up) R.string.top3_now else R.string.top3_last, lastEndpoint) + "\n" +
+                        getString(if (up) R.string.top3_row_active else R.string.top3_row_off)
                     textSize = 14f
                     setPadding(0, 8, 0, 8)
                     isChecked = true
@@ -1941,6 +2002,11 @@ class MainActivity : AppCompatActivity() {
             banner(getString(R.string.tunnel_unavailable), error = true)
             return
         }
+        // Идёт перебор точек — кнопка его отменяет. Раньше она была неактивна до конца перебора.
+        if (connecting) {
+            requestConnectCancel()
+            return
+        }
         // «Выключить» — и когда туннель работает, и когда сервис его держит в ожидании повтора:
         // раньше в ожидании кнопка звала «Включить», и выключить переподключения было нечем.
         if (tunnel.isUp || tunnel.active) {
@@ -1968,6 +2034,17 @@ class MainActivity : AppCompatActivity() {
         }
         if (!tunnel.ensurePermission(this)) return
         connectWithFallback(cfg)
+    }
+
+    /**
+     * «Отменить подключение». Сам туннель гасит поток перебора — он единственный, кто шлёт старты,
+     * поэтому после его «Выключить» никакой старт следующей точки уже не придёт.
+     */
+    private fun requestConnectCancel() {
+        if (!connecting || connectCancel) return
+        connectCancel = true
+        binding.btnTunnel.isEnabled = false
+        binding.btnTunnel.setText(R.string.btn_connect_cancelling)
     }
 
     private fun connectWithFallback(base: WarpConfig, preferred: WarpConfig? = null) {
@@ -1998,7 +2075,14 @@ class MainActivity : AppCompatActivity() {
         runCatching { ServiceSettingsStore.syncFromPrefs(this) }
         val savedFirst = savedConfig()?.takeIf { it.endpoint == candidates.first().endpoint }
         connecting = true
-        binding.btnTunnel.isEnabled = false
+        connectCancel = false
+        // С этой минуты любое ручное «Выключить» (плитка, «Отключить» в уведомлении) — сигнал
+        // остановить перебор: сервис ставит отметку времени, и она новее этой.
+        val connectMark = System.currentTimeMillis()
+        // Кнопка во время перебора — «Отменить подключение», а ход перебора — в строке состояния.
+        binding.btnTunnel.isEnabled = true
+        binding.btnTunnel.setText(R.string.btn_connect_cancel)
+        val statusBefore: CharSequence = binding.textStatus.text
         startTunnelPolling()
         Thread {
             // Если туннель уже поднят (переподключение по «Сохранить и применить»), сначала гасим
@@ -2007,22 +2091,42 @@ class MainActivity : AppCompatActivity() {
                 runCatching { tunnel.stop() }
                 runCatching { tunnel.waitStopped(3000) }
             }
+            // Выключили ли туннель руками после начала перебора. Снимок читаем с диска (его пишет
+            // процесс сервиса), но не чаще раза в 400 мс: ожидание подъёма спрашивает каждые 150 мс.
+            var manualStop = false
+            var manualCheckedAt = 0L
+            fun stopRequested(fresh: Boolean = false): Boolean {
+                if (connectCancel || manualStop) return true
+                val now = System.currentTimeMillis()
+                if (fresh || now - manualCheckedAt >= 400L) {
+                    manualCheckedAt = now
+                    val at = runCatching { TunnelStatusBus.read(this@MainActivity)?.stoppedByUserAt }.getOrNull() ?: 0L
+                    manualStop = at >= connectMark
+                }
+                return manualStop
+            }
             var winner: WarpConfig? = null
             val failures = StringBuilder()
             // Внимание: здесь НЕЛЬЗЯ проверять cancelled — это флаг отмены скана. Он остаётся true
             // после любого нажатия «Стоп» и раньше тихо обрывал подключение на первой же итерации.
             for ((i, cfg) in candidates.withIndex()) {
                 if (winner != null) break
+                // Выключили во время перебора — следующую точку не стартуем. Раньше перебор шёл
+                // дальше, а новый старт снимал отметку «выключил сам»: туннель включался вопреки
+                // человеку, выключившему его плиткой или из уведомления.
+                if (stopRequested(fresh = true)) break
                 val n = i + 1
                 runOnUiThread {
-                    binding.btnTunnel.text = if (n == 1 && savedFirst != null && cfg.endpoint == savedFirst.endpoint) {
+                    if (!::binding.isInitialized) return@runOnUiThread
+                    binding.textStatus.text = if (n == 1 && savedFirst != null && cfg.endpoint == savedFirst.endpoint) {
                         getString(R.string.tunnel_connecting_saved, cfg.endpoint.render())
                     } else {
                         getString(R.string.tunnel_trying, n, candidates.size, cfg.endpoint.render())
                     }
                 }
                 TunnelDebug.stage("точка $n/${candidates.size}: ${cfg.endpoint.render()}, шум ${cfg.junk.name}")
-                val ok = runCatching { tunnel.startAndAwait(cfg, 5000) }.getOrDefault(false)
+                val ok = runCatching { tunnel.startAndAwait(cfg, 5000, connectMark) { stopRequested() } }.getOrDefault(false)
+                if (stopRequested(fresh = true)) break
                 if (ok) {
                     winner = cfg
                     break
@@ -2036,14 +2140,38 @@ class MainActivity : AppCompatActivity() {
                 runCatching { tunnel.stop() }
                 runCatching { tunnel.waitStopped(2500) }
             }
-            val used = winner
+            val cancelled = stopRequested(fresh = true)
+            if (cancelled) {
+                if (connectCancel) {
+                    // «Отменить подключение»: текущую попытку гасим как ручное выключение — сервис
+                    // запомнит, что выключил человек, и сам туннель не включит. Шлёт его этот же
+                    // поток, единственный, кто шлёт старты, — так «Выключить» гарантированно последнее.
+                    runCatching { tunnel.stopByUser() }
+                    TunnelDebug.stage("подключение отменено кнопкой — следующие точки не пробую")
+                } else {
+                    // Выключили плиткой или из уведомления: сервис это уже сделал. Старт, который
+                    // мог разминуться с выключением, сервис пропустит сам (он новее отметки начала).
+                    TunnelDebug.stage("туннель выключен вручную во время перебора — следующие точки не пробую")
+                }
+            }
+            val used = if (cancelled) null else winner
             runOnUiThread {
                 connecting = false
+                connectCancel = false
+                if (!::binding.isInitialized) return@runOnUiThread
                 binding.btnTunnel.isEnabled = true
-                stopTunnelPolling()
+                binding.textStatus.text = statusBefore
+                // Опрос оставляем, пока экран на виду (его остановит onPause): раньше он гас здесь, и
+                // кнопка до следующего возврата в приложение не замечала, что сервис сделал сам.
+                if (screenResumed) startTunnelPolling() else stopTunnelPolling()
                 updateTunnelButton()
                 updateTunnelDiagnostics()
-                if (used != null) {
+                if (cancelled) {
+                    // Сервис ещё может не успеть сообщить, что выключился: подпись ставим сразу.
+                    binding.btnTunnel.setText(R.string.btn_tunnel_on)
+                    renderShortlist()
+                    banner(getString(R.string.banner_connect_cancelled))
+                } else if (used != null) {
                     prefs.endpointCursor = 0
                     prefs.lastConfigText = runCatching { WgConf.render(used) }.getOrDefault("")
                     prefs.lastEndpoint = used.endpoint.render()
@@ -2165,8 +2293,10 @@ class MainActivity : AppCompatActivity() {
             androidx.core.content.ContextCompat.getColor(this, if (error) R.color.state_error else R.color.state_ok)
         )
         binding.cardBanner.visibility = View.VISIBLE
+        bannerShownAt = System.currentTimeMillis()
+        bannerIsError = error
         tunnelHandler.removeCallbacks(bannerHide)
-        if (!error) tunnelHandler.postDelayed(bannerHide, 8000L)
+        if (!error) tunnelHandler.postDelayed(bannerHide, BANNER_MS)
     }
 
     private val bannerHide = Runnable {
@@ -2475,6 +2605,18 @@ class MainActivity : AppCompatActivity() {
                 text = getString(R.string.conn_waiting, why.take(90))
                 color = androidx.core.content.ContextCompat.getColor(this, R.color.state_warn)
             }
+            // Сервис закрыло обновление, перезагрузка или система: говорим это словами и что делать.
+            // Раньше после обновления здесь было просто «выключен» (а первые 2,5 минуты — «работает»).
+            TunnelStatusBus.death != TunnelStatusBus.DEATH_NONE -> {
+                text = getString(
+                    when (TunnelStatusBus.death) {
+                        TunnelStatusBus.DEATH_UPDATE -> R.string.conn_off_updated
+                        TunnelStatusBus.DEATH_REBOOT -> R.string.conn_off_rebooted
+                        else -> R.string.conn_off_killed
+                    }
+                )
+                color = androidx.core.content.ContextCompat.getColor(this, R.color.state_off)
+            }
             // Выключил сам человек — это «выключен», а не красное «не удалось» от прошлой ошибки,
             // которая в журнале ещё висит последней.
             snapshot?.stoppedByUser == true -> {
@@ -2598,5 +2740,8 @@ class MainActivity : AppCompatActivity() {
         const val TAB_START = 0
         const val TAB_CONFIG = 2
         const val TAB_LOG = 4
+
+        /** Сколько держится панель «успех». */
+        const val BANNER_MS = 8000L
     }
 }

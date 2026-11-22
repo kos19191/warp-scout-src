@@ -31,7 +31,10 @@ class VpnTunnelController(private val context: Context) : TunnelController {
         return false
     }
 
-    override fun start(config: WarpConfig): Boolean {
+    override fun start(config: WarpConfig): Boolean = startAt(config, 0L)
+
+    /** Старт; [requestedAt] — когда человек начал подключение (0 — не важно), см. [startAndAwait]. */
+    private fun startAt(config: WarpConfig, requestedAt: Long): Boolean {
         // Прошлая сессия могла не успеть закрыться: даём ей до 3 с, иначе старт молча «склеится».
         runCatching { WarpVpnService.waitDown(3000) }
         if (runCatching { VpnService.prepare(context) != null }.getOrDefault(true)) {
@@ -42,7 +45,7 @@ class VpnTunnelController(private val context: Context) : TunnelController {
             return false
         }
         // Сброс прошлого результата делает сам запуск сервиса (WarpVpnService.startWithText).
-        WarpVpnService.start(context, config)
+        WarpVpnService.start(context, config, requestedAt)
         return true
     }
 
@@ -50,13 +53,26 @@ class VpnTunnelController(private val context: Context) : TunnelController {
      * Ждём именно handshake, а не «сервис получил команду». Это и есть ответ на «запускается и
      * ничего не происходит»: теперь либо up, либо конкретная причина с подсказкой.
      */
-    override fun startAndAwait(config: WarpConfig, waitMs: Int): Boolean {
-        if (!start(config)) return false
+    override fun startAndAwait(config: WarpConfig, waitMs: Int): Boolean = startAndAwait(config, waitMs, 0L) { false }
+
+    /**
+     * С отменой: «Отменить подключение» или выключение плиткой во время перебора обрывают ожидание
+     * сразу — раньше перебор досиживал все 5 с на точке, которую уже никто не ждёт.
+     */
+    override fun startAndAwait(
+        config: WarpConfig,
+        waitMs: Int,
+        requestedAt: Long,
+        isCancelled: () -> Boolean
+    ): Boolean {
+        if (isCancelled()) return false
+        if (!startAt(config, requestedAt)) return false
         val startMark = System.currentTimeMillis()
         val deadline = startMark + waitMs.coerceAtLeast(3000)
         var announced = false
         var lastRead = 0L
         while (System.currentTimeMillis() < deadline) {
+            if (isCancelled()) return false
             // Состояние пишет сервис в другом процессе. Читаем снимок сами, не полагаясь только на
             // уведомление: потерянное уведомление не должно выглядеть как «туннель не поднимается».
             val now = System.currentTimeMillis()

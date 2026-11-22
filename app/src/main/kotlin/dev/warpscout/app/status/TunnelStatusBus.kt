@@ -64,6 +64,37 @@ object TunnelStatusBus {
     @Volatile
     private var lastLivenessAt: Long = 0L
 
+    /** Снимок сервиса признан мёртвым по этой причине; [DEATH_NONE] — сервис жив или выключен штатно. */
+    const val DEATH_NONE = 0
+
+    /** Процесса сервиса нет, а снимок говорит «работает» (убит системой или упал). */
+    const val DEATH_KILLED = 1
+
+    /** Снимок записан до установки текущей версии: обновление убивает процесс сервиса. */
+    const val DEATH_UPDATE = 2
+
+    /** Снимок записан до загрузки телефона. */
+    const val DEATH_REBOOT = 3
+
+    /**
+     * Почему туннель, который снимок называет живым, на деле не работает — интерфейс говорит это
+     * словами («приложение обновилось — включи заново»), а не просто «выключен».
+     */
+    @Volatile
+    var death: Int = DEATH_NONE
+        private set
+
+    /**
+     * `updatedAt` снимка, уже признанного мёртвым. Тот же файл, перечитанный ещё раз (каждые
+     * 5 с и при возврате в приложение), не должен «воскрешать» туннель до следующей проверки.
+     */
+    @Volatile
+    private var deadStamp: Long = 0L
+
+    /** Когда установлена текущая версия; -1 — ещё не узнавали. Пока процесс жив, не меняется. */
+    @Volatile
+    private var installedAt: Long = -1L
+
     private val installed = AtomicBoolean(false)
     private val listeners = CopyOnWriteArrayList<(TunnelStatus) -> Unit>()
 
@@ -104,8 +135,13 @@ object TunnelStatusBus {
     /**
      * Текущее состояние для интерфейса. Скрывает «мёртвый» снимок: если сервис молчит дольше
      * [STALE_MS] и его процесса нет, показываем «не запущен», а не «работает».
+     *
+     * [verify] — проверить процесс сервиса сразу, не дожидаясь, пока снимок устареет: так делают
+     * при возврате в приложение и при выгрузке журнала. Раньше после обновления приложения
+     * (оно убивает процесс сервиса) экран ещё две с половиной минуты показывал «работает», и
+     * выгруженный в это время журнал писал в шапке «туннель работает» (Диагностика-8).
      */
-    fun snapshot(context: Context): TunnelStatus {
+    fun snapshot(context: Context, verify: Boolean = false): TunnelStatus {
         // Страховка: если обновлений давно не было, а туннель считается живым, перечитываем
         // файл. Интерфейс опрашивает состояние постоянно, поэтому даже при потерянном
         // уведомлении он не замирает на устаревшей картинке.
@@ -116,29 +152,68 @@ object TunnelStatusBus {
         }
         val status = current
         if (!status.up && !status.busy && !status.wanted) return status
-        val fresh = status.updatedAt > 0 && System.currentTimeMillis() - status.updatedAt < STALE_MS
-        if (fresh) return status
         val now = System.currentTimeMillis()
-        if (now - lastLivenessAt < LIVENESS_THROTTLE_MS) return current
+        // Снимок записан раньше, чем загрузился телефон или установилась текущая версия: его
+        // писатель почти наверняка мёртв — и перезагрузка, и обновление убивают процесс сервиса.
+        // Тогда процесс проверяем сразу, не дожидаясь, пока снимок устареет. Подтверждение всё
+        // равно нужно: настенные часы могли сдвинуться, и одному времени верить нельзя.
+        val bornDead = diedWith(context, status.updatedAt)
+        val fresh = status.updatedAt > 0 && now - status.updatedAt < STALE_MS
+        if (fresh && !verify && bornDead == DEATH_NONE) return status
+        if (!verify && now - lastLivenessAt < LIVENESS_THROTTLE_MS) return current
         lastLivenessAt = now
         if (serviceProcessRunning(context) == false) {
-            // Сервиса нет, а снимок говорит «работает»: это процесс, убитый системой. Правим
-            // состояние у всех, кто его показывает (кнопка, карточка, плитка).
-            val dead = status.copy(
-                up = false,
-                busy = false,
-                wanted = false,
-                gaveUp = false,
-                status = "туннель не запущен",
-                // Отметку времени ставим свою: иначе проверка будет повторяться каждые две
-                // секунды и каждый раз дёргать интерфейс одним и тем же выводом. В файл это
-                // состояние не пишется — его владелец только процесс сервиса.
-                updatedAt = now
-            )
-            applySnapshot(context, dead, force = true)
-            return dead
+            // Сервиса нет, а снимок говорит «работает»: процесс закрыло обновление, перезагрузка
+            // или система. Правим состояние у всех, кто его показывает (кнопка, карточка, плитка).
+            return markDead(context, status, if (bornDead != DEATH_NONE) bornDead else DEATH_KILLED, now)
         }
         return status
+    }
+
+    /**
+     * Отметить снимок мёртвым у всех, кто его показывает. В файл это состояние не пишется — его
+     * владелец только процесс сервиса.
+     */
+    private fun markDead(context: Context, status: TunnelStatus, reason: Int, now: Long): TunnelStatus {
+        deadStamp = status.updatedAt
+        death = reason
+        val dead = status.copy(
+            up = false,
+            busy = false,
+            wanted = false,
+            gaveUp = false,
+            // Фазу — тоже: мёртвый «переподключаюсь» иначе навсегда оставил бы на экране «Подключаюсь…».
+            phase = TunnelStatus.PHASE_IDLE,
+            status = when (reason) {
+                DEATH_UPDATE -> "туннель остановлен: приложение обновилось"
+                DEATH_REBOOT -> "туннель остановлен: телефон перезагружался"
+                else -> "туннель не запущен"
+            },
+            // Отметку времени ставим свою: иначе проверка будет повторяться каждые две секунды и
+            // каждый раз дёргать интерфейс одним и тем же выводом.
+            updatedAt = now
+        )
+        applySnapshot(context, dead, force = true)
+        return dead
+    }
+
+    /**
+     * Написан ли снимок до перезагрузки или до обновления приложения: [DEATH_REBOOT],
+     * [DEATH_UPDATE] или [DEATH_NONE], если по времени этого не сказать.
+     */
+    @Suppress("DEPRECATION")
+    private fun diedWith(context: Context, writtenAt: Long): Int {
+        if (writtenAt <= 0L) return DEATH_NONE
+        // Время загрузки по настенным часам; 10 с запаса на их неточность.
+        val bootAt = System.currentTimeMillis() - android.os.SystemClock.elapsedRealtime()
+        if (writtenAt < bootAt - 10_000L) return DEATH_REBOOT
+        if (installedAt < 0L) {
+            installedAt = runCatching {
+                context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
+            }.getOrDefault(0L)
+        }
+        if (installedAt > 0L && writtenAt < installedAt) return DEATH_UPDATE
+        return DEATH_NONE
     }
 
     /** Перечитать снимок с диска (после возврата в приложение или по кнопке «обновить»). */
@@ -176,7 +251,14 @@ object TunnelStatusBus {
 
     private fun applySnapshot(context: Context, status: TunnelStatus?, force: Boolean = false) {
         val fresh = status ?: return
+        // Тот же самый снимок, что уже признан мёртвым, — не новость от сервиса.
+        if (!force && deadStamp != 0L && fresh.updatedAt == deadStamp) return
         if (!force && loaded && fresh.updatedAt == current.updatedAt) return
+        if (!force) {
+            // Сервис написал новый снимок — он и есть правда, прежний вывод «мёртв» снимаем.
+            deadStamp = 0L
+            death = DEATH_NONE
+        }
         current = fresh
         loaded = true
         // Журнал: часть полей живёт в снимке (счётчики, последняя ошибка), их надо отразить,
