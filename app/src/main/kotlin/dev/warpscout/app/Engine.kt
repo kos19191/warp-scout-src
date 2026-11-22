@@ -252,6 +252,11 @@ class Engine(private val context: Context) {
         }
         last = result
         runCatching { Report.writeAll(result.report, ConfigFiles.dir(context, "reports"), "warpscout") }
+        // Что открылось — в список «Доступность» Журнала (с 1.10.30): без VPN отдельно, через туннель
+        // лучшей проверенной точки отдельно. Раньше Журнал показывал только итог без VPN и без
+        // подписи — ChatGPT стоял «открылся», хотя через туннель не открывался.
+        runCatching { Availability.saveFromScan(context, result.report, result.best?.endpoint?.render()) }
+            .onFailure { sink.log("список доступности не записан: ${it.javaClass.simpleName}") }
         if (result.best == null) {
             // Годных точек нет (молчат или «рукопожатие есть, данных нет»). Раньше лучшей всё равно
             // объявлялась молчащая точка с 60 баллами: её конфиг записывался, тройка из мёртвых

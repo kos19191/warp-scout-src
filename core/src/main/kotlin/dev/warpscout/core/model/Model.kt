@@ -223,7 +223,18 @@ data class ResourceCheck(
     val mustContain: String? = null,
     val timeoutMs: Int = 8000,
     /** true — ресурс должен работать без VPN (контрольная точка: если падает и она, проблема не в блокировке). */
-    val baselineExpected: Boolean = false
+    val baselineExpected: Boolean = false,
+    /** Код сервиса в настройке «Что проверять» (с 1.10.30); пусто — служебная проверка. */
+    val id: String = "",
+    /** Как проверяется — для человека: «страна, которую видит сайт», «серверы Telegram». */
+    val hint: String = "",
+    /**
+     * Страны, которые сервис не обслуживает (с 1.10.30). Непусто — ответ разбирается как trace
+     * Cloudflare (`loc=XX`): сайт ответил, но видит страну из списка — значит, сервис откажет.
+     * Без этого ChatGPT стоял «открылся»: на `cdn-cgi/trace` отвечает Cloudflare перед сайтом, а
+     * сам ChatGPT отказывал по стране.
+     */
+    val blockedCountries: Set<String> = emptySet()
 )
 
 data class ResourceResult(
@@ -233,7 +244,9 @@ data class ResourceResult(
     val elapsedMs: Long = 0,
     val errorClass: String? = null,
     val via: NetworkVia = NetworkVia.DEFAULT,
-    val bytes: Int = 0
+    val bytes: Int = 0,
+    /** Какую страну видит сайт — код «NL» (с 1.10.30, для сервисов с запретом по странам). */
+    val detail: String = ""
 )
 
 /** Оценка кандидата: из чего сложился балл — отчёт должен быть объяснимым. */
@@ -288,7 +301,12 @@ data class Candidate(
      * открывших одинаково много сайтов, лучше та, через которую быстрее качается: «открылось» не
      * отличает 50 Мбит/с от 300 Кбит/с.
      */
-    val speedKbps: Int = -1
+    val speedKbps: Int = -1,
+    /**
+     * Что открылось изнутри туннеля этого кандидата — построчно (с 1.10.30). Раньше от проверки
+     * оставалось только «открылось 7 из 9», и список «Доступность» показывать было нечего.
+     */
+    val resourceResults: List<ResourceResult> = emptyList()
 ) {
     val score: Int get() = parts.total
     val junk: dev.warpscout.core.model.JunkProfile get() = config.junk

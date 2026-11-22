@@ -823,7 +823,10 @@ class WarpVpnService : VpnService() {
         // Ручной старт — новый отсчёт: отложенные повторы отменяются, счётчики циклов — с нуля.
         wanted = true
         TunnelState.wanted = true
-        TunnelState.stoppedByUser = false
+        // Проверочный подъём подбора (quiet) — не решение человека включить туннель: отметку
+        // «выключил вручную» он не снимает. С 1.10.30 проверка доступности через туннель при
+        // подборе включена у всех, и без этого подбор при выключенном туннеле стирал бы отметку.
+        if (!quietSession) TunnelState.stoppedByUser = false
         cancelWaits()
         slowRetries = 0
         cycleSilent.clear()
@@ -1577,7 +1580,11 @@ class WarpVpnService : VpnService() {
                 TunnelState.setLink(System.currentTimeMillis(), result.web, result.webMs, result.tg, result.tgMs, result.exit)
                 reportLink(reason, result)
                 val settings = serviceSettings()
-                if (result.web == TunnelStatus.LINK_FAIL && reconnectOnFail && wanted && linkAlive(myEpoch)) {
+                if (result.web == TunnelStatus.LINK_FAIL && reconnectOnFail && wanted && linkAlive(myEpoch) && quietSession) {
+                    // Проверочный подъём подбора точку не меняет: «связи нет» — это и есть ответ
+                    // проверки, а переключение подменило бы проверяемую точку другой (с 1.10.30).
+                    TunnelDebug.stage("проверка в подборе: связи через точку нет — точку не меняю, это итог проверки")
+                } else if (result.web == TunnelStatus.LINK_FAIL && reconnectOnFail && wanted && linkAlive(myEpoch)) {
                     if (settings.linkReconnect) {
                         switchAfterDeadLink()
                     } else {

@@ -134,21 +134,20 @@ class ResourceProber(private val http: HttpClient = HttpClient()) {
 
     fun check(rc: ResourceCheck, viaNote: String = "default"): ResourceResult {
         val started = System.currentTimeMillis()
+        val via = if (viaNote == "tunnel") dev.warpscout.core.model.NetworkVia.TUNNEL else dev.warpscout.core.model.NetworkVia.DEFAULT
+        // Приложение, а не сайт (Telegram): достучаться до его серверов (с 1.10.30).
+        if (rc.url.startsWith(TCP_PREFIX)) return tcpCheck(rc, started).copy(via = via)
         return try {
             val resp = http.get(rc.url, maxBytes = 256 * 1024)
-            val ok = resp.status in rc.expectStatus &&
-                (rc.mustContain == null || resp.body.contains(rc.mustContain, ignoreCase = true))
+            val verdict = judge(rc, resp.status, resp.body)
             ResourceResult(
                 check = rc,
-                ok = ok,
+                ok = verdict.ok,
                 status = resp.status,
                 elapsedMs = System.currentTimeMillis() - started,
-                errorClass = when {
-                    ok -> null
-                    resp.status !in rc.expectStatus -> "http_${resp.status}"
-                    else -> "content_mismatch"
-                },
-                bytes = resp.bytes
+                errorClass = verdict.errorClass,
+                bytes = resp.bytes,
+                detail = verdict.detail
             )
         } catch (e: Exception) {
             ResourceResult(
@@ -159,7 +158,7 @@ class ResourceProber(private val http: HttpClient = HttpClient()) {
                 errorClass = classify(e),
                 bytes = 0
             )
-        }.let { it.copy(via = if (viaNote == "tunnel") dev.warpscout.core.model.NetworkVia.TUNNEL else dev.warpscout.core.model.NetworkVia.DEFAULT) }
+        }.copy(via = via)
     }
 
     fun checkAll(checks: List<ResourceCheck>, parallelism: Int = 6): List<ResourceResult> {
@@ -172,6 +171,57 @@ class ResourceProber(private val http: HttpClient = HttpClient()) {
         }
     }
 
+    /**
+     * Прогнать проверки параллельно, но не больше шести разом (с 1.10.30): по одной восемь
+     * сервисов и свои сайты ждали бы друг друга до минуты. Порядок результатов — как в списке;
+     * отмена — между ответами; недождавшиеся — «нет ответа». Общая для проверки через туннель при
+     * подборе и для «Проверить сейчас».
+     */
+    fun checkParallel(
+        checks: List<ResourceCheck>,
+        viaNote: String,
+        isCancelled: () -> Boolean = { false }
+    ): List<ResourceResult> {
+        if (checks.isEmpty()) return emptyList()
+        val via = if (viaNote == "tunnel") dev.warpscout.core.model.NetworkVia.TUNNEL else dev.warpscout.core.model.NetworkVia.DEFAULT
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(checks.size.coerceIn(1, 6))
+        try {
+            val futures = checks.map { c -> pool.submit(java.util.concurrent.Callable { check(c, viaNote) }) }
+            val out = ArrayList<ResourceResult>(checks.size)
+            for ((i, f) in futures.withIndex()) {
+                if (isCancelled()) break
+                val limit = (checks[i].timeoutMs.toLong() * 3).coerceIn(5_000L, 40_000L)
+                out += runCatching { f.get(limit, java.util.concurrent.TimeUnit.MILLISECONDS) }.getOrElse {
+                    ResourceResult(check = checks[i], ok = false, errorClass = "timeout", via = via)
+                }
+            }
+            return out
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    /**
+     * Подключение к серверам приложения: `tcp://адрес:порт|адрес:порт` — годится любой. Через туннель
+     * это честный ответ «серверы доступны»: соединение устанавливается по ту сторону WARP, а не
+     * подтверждается самим телефоном.
+     */
+    private fun tcpCheck(rc: ResourceCheck, started: Long): ResourceResult {
+        val targets = rc.url.removePrefix(TCP_PREFIX).split('|').map { it.trim() }.filter { it.isNotEmpty() }
+        var lastError = "no_target"
+        for (t in targets) {
+            val host = t.substringBeforeLast(':')
+            val port = t.substringAfterLast(':', "443").toIntOrNull() ?: 443
+            try {
+                java.net.Socket().use { s -> s.connect(java.net.InetSocketAddress(host, port), rc.timeoutMs.coerceIn(1_000, 10_000)) }
+                return ResourceResult(check = rc, ok = true, elapsedMs = System.currentTimeMillis() - started)
+            } catch (e: Exception) {
+                lastError = classify(e)
+            }
+        }
+        return ResourceResult(check = rc, ok = false, elapsedMs = System.currentTimeMillis() - started, errorClass = lastError)
+    }
+
     private fun classify(e: Throwable): String = when {
         e is UnknownHostException -> "dns_fail"
         e is SocketTimeoutException -> "timeout"
@@ -180,6 +230,59 @@ class ResourceProber(private val http: HttpClient = HttpClient()) {
         e is SSLException -> "tls_fail"
         e is java.io.IOException -> "io_error"
         else -> e.javaClass.simpleName.lowercase()
+    }
+
+    /** Решение по ответу сервера: годится ли, почему нет и что показать человеку. */
+    data class Judgement(val ok: Boolean, val errorClass: String?, val detail: String)
+
+    companion object {
+        const val TCP_PREFIX = "tcp://"
+
+        /**
+         * Чистое решение по ответу — без сети, его проверяет самопроверка ядра. С 1.10.30 для
+         * сервисов с запретом по странам (ChatGPT) ответ trace Cloudflare разбирается: «ответил» ещё
+         * не значит «пустит» — важно, какую страну видит сайт.
+         */
+        fun judge(rc: ResourceCheck, status: Int, body: String): Judgement {
+            if (status !in rc.expectStatus) return Judgement(false, "http_$status", "")
+            if (rc.mustContain != null && !body.contains(rc.mustContain, ignoreCase = true)) {
+                return Judgement(false, "content_mismatch", "")
+            }
+            if (rc.blockedCountries.isNotEmpty()) {
+                val loc = Regex("""(?m)^loc=([A-Z]{2})\s*$""").find(body)?.groupValues?.get(1).orEmpty()
+                if (loc.isEmpty()) return Judgement(false, "no_country", "")
+                if (loc in rc.blockedCountries) return Judgement(false, "region:$loc", loc)
+                return Judgement(true, null, loc)
+            }
+            return Judgement(true, null, "")
+        }
+
+        /** Итог проверки словами — для списка «Доступность» и журнала. */
+        fun describe(r: ResourceResult): String {
+            if (r.ok) {
+                val head = if (r.elapsedMs > 0) "открылся, ${r.elapsedMs} мс" else "открылся"
+                // detail — страна, которую видит сайт (ChatGPT): «открылся · сайт видит страну NL».
+                return if (r.detail.isBlank()) head else "$head · сайт видит страну ${r.detail}"
+            }
+            val e = r.errorClass.orEmpty()
+            return when {
+                e.startsWith("region:") -> "сайт видит страну ${e.removePrefix("region:")} — её сервис не обслуживает"
+                e == "no_country" -> "сайт ответил без страны — проверить не удалось"
+                e == "timeout" -> "нет ответа (истекло время ожидания)"
+                e == "dns_fail" -> "имя не нашлось (DNS)"
+                e == "refused" -> "соединение отклонено"
+                e == "no_route" -> "нет маршрута до сервера"
+                e == "tls_fail" -> "защищённое соединение оборвано — похоже на блокировку"
+                e == "io_error" -> "соединение оборвалось"
+                e == "content_mismatch" -> "ответил не тот сервер (заглушка?)"
+                e == "tunnel_not_started" -> "туннель для проверки не поднялся"
+                e == "no_target" -> "не задан адрес проверки"
+                e == "http_403" -> "сервер отказал (403)"
+                e.startsWith("http_") -> "сервер ответил кодом ${e.removePrefix("http_")}"
+                e.isBlank() -> "нет ответа"
+                else -> e
+            }
+        }
     }
 }
 

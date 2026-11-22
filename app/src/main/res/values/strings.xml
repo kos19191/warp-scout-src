@@ -28,10 +28,8 @@
     <string name="apps_traffic_need_access">Нужно разрешение «Доступ к истории использования» — открою настройки. Без него Android не отдаёт расход по приложениям.</string>
     <string name="apps_traffic_none">Данных пока нет: либо туннель только что подключён, либо расход нулевой.</string>
     <string name="apps_traffic_header">Расход с момента подключения (весь трафик приложения, пока туннель поднят):</string>
-    <string name="section_resource_results">Что реально открылось</string>
-    <string name="services_hint">Если сайт открывается и пишет «Unable to load site» или «try turning off VPN» — туннель работает, это отказ сервиса (Cloudflare/OpenAI) на нашу сторону. Обычно помогает отключить IPv6 и переподключиться, сменить endpoint или профиль шума.</string>
-    <string name="resources_off">Проверки ресурсов выключены — включите их во вкладке «Подбор».</string>
-    <string name="resource_via_tunnel">из-под туннеля</string>
+    <string name="section_resource_results">Доступность</string>
+    <string name="services_hint">Как проверяется: ChatGPT — по стране, которую видит сайт (через WARP это обычно ваша же страна, и тогда ChatGPT откажет, даже если остальное открывается); Telegram — подключением к его серверам; остальные — загрузкой страницы. Что выбрать для проверки — вкладка «Подбор», раздел «Что проверять».</string>
     <string name="tunnel_bytes">%1$s вверх / %2$s вниз</string>
     <string name="tab_log">Журнал</string>
     <string name="btn_quick_config">Показать конфиг</string>
@@ -57,10 +55,10 @@
     <string name="switch_whitelist">Split-tunnel: whitelist путей обхода</string>
     <string name="switch_ipv6">Отдавать IPv6-адрес</string>
 
-    <string name="section_checks">Доступность ресурсов</string>
-    <string name="switch_resources">Проверять сайты (ChatGPT, Google, Discord, …)</string>
-    <string name="switch_tunnel_verify">Проверять изнутри туннеля (нужна сборка с туннелем)</string>
-    <string name="resources_hint">Список проверяемых доменов редактируется в «Отчёт → ресурсы».</string>
+    <string name="section_checks">Что проверять</string>
+    <string name="switch_resources">При подборе проверять и без VPN — для сравнения</string>
+    <string name="switch_tunnel_verify">При подборе проверять через туннель трёх лучших точек</string>
+    <string name="resources_hint">Что проверять при подборе и по кнопке «Проверить сейчас» в Журнале. Через туннель проверка идёт у трёх лучших точек: что откроется у вас, то и покажет список «Доступность».</string>
 
     <string name="btn_run">Сканировать и подобрать</string>
     <string name="home_last_tune">Последний подбор</string>
@@ -231,20 +229,11 @@
     <string name="banner_connect_cancelled">Подключение отменено — туннель выключен</string>
 
     <!-- топ-3 подобранных конфигов -->
-    <string name="top3_title">Лучшие конфиги</string>
-    <string name="top3_hint">Три точки из последнего подбора. Нажми на любую, чтобы переключиться на неё без нового скана.</string>
+    <string name="top3_title">Лучшие точки</string>
+    <string name="top3_hint">По три точки последнего подбора — для Wi-Fi и для мобильной сети. Кружок — резервная: на неё туннель перейдёт сам, если текущая замолчит. «Перейти сейчас» — переключиться сразу.</string>
     <string name="top3_forget">Забыть список</string>
-    <string name="top3_forgotten">Список лучших конфигов очищен</string>
-    <string name="top3_row">%1$d) %2$s · шум %3$s</string>
-    <string name="top3_row_detail">%1$s · проверен %2$s назад</string>
-    <string name="top3_row_unknown">изнутри не проверялся</string>
-    <string name="top3_row_data">данные идут (%1$d мс)</string>
-    <string name="top3_row_active">сейчас подключён</string>
+    <string name="top3_forgotten">Список лучших точек очищен</string>
     <string name="top3_now">Сейчас подключён: %1$s</string>
-    <string name="top3_row_chosen">последний подключённый</string>
-    <string name="top3_last">Последний подключённый: %1$s</string>
-    <string name="top3_row_off">туннель сейчас выключен</string>
-    <string name="top3_row_other_network">другая сеть</string>
     <string name="top3_switching">Переключаюсь на %1$s</string>
     <string name="top3_res">открылось %1$d из %2$d</string>
     <string name="top3_already">Этот конфиг уже работает</string>
@@ -367,7 +356,6 @@
     <string name="pool_mode_masque">Только MASQUE</string>
     <string name="pool_mode_full">Полный перебор</string>
     <string name="pool_mode_default">Пул генератора</string>
-    <string name="check_result_ms">, %1$s, %2$d мс</string>
     <string name="share_file">Отправить %1$s</string>
     <string name="scan_notif_title">Идёт подбор</string>
     <string name="scan_notif_text">проверяю точки, можно свернуть приложение</string>
@@ -422,12 +410,9 @@
     <string name="mark_unknown">ещё не проверялась</string>
     <string name="mark_current">сейчас подключена</string>
     <string name="mode_advanced">Расширенный режим</string>
-    <string name="mode_simple">Упрощённый режим</string>
-    <string name="sheet_backup_title">Резервная точка</string>
+        <string name="sheet_backup_title">Резервная точка</string>
     <string name="sheet_backup_hint">Отметка только запоминает точку: если текущая замолчит, туннель сам перейдёт на резервную своей сети. «Перейти сейчас» — переключиться прямо сейчас; рабочий туннель не трогается, пока точка не ответит.</string>
     <string name="sheet_connect">Перейти сейчас</string>
-    <string name="sheet_rescan">Подобрать новые точки</string>
-    <string name="sheet_clear">Не выбирать резервную</string>
     <string name="sheet_empty">Точек пока нет: они появятся после подбора.</string>
     <string name="sheet_row_junk">шум %1$s</string>
     <string name="backup_set">Резервная точка: %1$s</string>
@@ -468,15 +453,11 @@
     <string name="sheet_group_handshake">Подобраны через мобильную сеть, не уходя с Wi-Fi: проверены рукопожатием и ответом через туннель, без загрузки.</string>
     <string name="sheet_row_data">данные идут</string>
     <string name="sheet_clear_group">Снять отметку</string>
-    <string name="sheet_scan_mobile">Подобрать для мобильной сети</string>
-    <string name="sheet_row_speed">%1$s</string>
     <string name="backup_set_group">Резервная для сети «%1$s»: %2$s. Туннель не трогаю — сработает, если текущая замолчит</string>
     <string name="backup_cleared_group">Резервная для сети «%1$s» снята</string>
     <string name="scan_mobile_started">Подбираю точки для мобильной сети, не уходя с Wi-Fi…</string>
     <string name="scan_mobile_done">Для мобильной сети: %1$d точки в списке. Резервную для неё можно отметить в «Резервной»</string>
     <string name="scan_mobile_none">Для мобильной сети ничего не нашлось: включены ли мобильные данные? Подробности — в журнале</string>
-    <string name="top3_row_speed">%1$s через туннель</string>
-    <string name="top3_row_handshake">проверена рукопожатием</string>
     <string name="sheet_apps_title">Приложения</string>
     <string name="sheet_apps_hint">Через туннель пойдут только отмеченные — или все, кроме них. Скорость на главном экране — для этих приложений.</string>
     <string name="sheet_apps_save">Сохранить</string>
@@ -495,15 +476,10 @@
     <string name="feat_speed">Замерять скорость после подключения</string>
     <string name="feat_freeze">Менять точку, если загрузка встаёт</string>
     <string name="feat_dns">DNS через туннель при раздельных маршрутах</string>
-    <!-- DNS: адреса по имени и проверка ChatGPT -->
+    <!-- DNS: адреса по имени -->
     <string name="dns_by_name_pending">адрес по имени %1$s (ещё не получен)</string>
     <string name="dns_fallback_note">У «%1$s» ещё нет адреса — пока имя не разрешится, в конфиг идёт Cloudflare.</string>
     <string name="dns_resolved_note">«%1$s»: адреса по имени %2$s — %3$s.</string>
-    <string name="dns_check_btn">Проверить: откроется ли ChatGPT</string>
-    <string name="dns_checking">Проверяю ChatGPT через %1$s…</string>
-    <string name="dns_check_ok">ChatGPT через %1$s: адрес %2$s, сайт видит страну %3$s — должен открыться.</string>
-    <string name="dns_check_blocked">ChatGPT через %1$s: адрес %2$s, сайт видит страну %3$s — скорее всего, откажет.</string>
-    <string name="dns_check_fail">ChatGPT через %1$s: %2$s.</string>
     <string name="theme_title">Тема оформления</string>
     <string name="theme_system">Как в системе</string>
     <string name="theme_light">Светлая</string>
@@ -520,4 +496,29 @@
     <string name="conn_link_ok"> · связь ✓ %1$d мс</string>
     <string name="conn_link_fail"> · связи нет — переподключаю</string>
     <string name="conn_link_tg"> · Telegram не отвечает</string>
+    <!-- ── 1.10.30: тумблер вида, лучшие точки обеих сетей, доступность ── -->
+    <string name="mode_switch_label">%1$s · %2$s</string>
+    <string name="mode_state_on">включено</string>
+    <string name="mode_state_off">выключено</string>
+    <string name="points_live_other">Сейчас подключена %1$s — этой точки нет в списке</string>
+    <string name="points_scan_wifi">Подобрать для Wi-Fi</string>
+    <string name="points_scan_mobile">Подобрать для мобильной сети</string>
+    <string name="points_scan_wifi_later">Подобрать для Wi-Fi можно, когда телефон подключён к Wi-Fi.</string>
+    <string name="avail_service_line">%1$s — %2$s</string>
+    <string name="avail_custom_hint">Свои сайты — по одному в строке</string>
+    <string name="avail_custom_note">Например: rutracker.org или https://example.com/страница. Не больше 20 — каждая проверка занимает секунды.</string>
+    <string name="avail_tunnel_title">Через туннель</string>
+    <string name="avail_direct_title">Без VPN — для сравнения</string>
+    <string name="avail_when_scan">проверено %1$s, при подборе</string>
+    <string name="avail_when_button">проверено %1$s, кнопкой</string>
+    <string name="avail_today">сегодня в %1$s</string>
+    <string name="avail_tunnel_none">Через туннель ещё не проверяли. Подключи туннель и нажми «Проверить сейчас» — или подбор проверит сам.</string>
+    <string name="avail_direct_none">Без VPN ещё не проверяли: эта проверка идёт при подборе, если включена в «Что проверять».</string>
+    <string name="avail_check_now">Проверить сейчас</string>
+    <string name="avail_checking">Проверяю…</string>
+    <string name="avail_need_tunnel">Проверка идёт через туннель — сначала подключи его.</string>
+    <string name="avail_busy_scan">Идёт подбор — он сам проверит доступность через туннель.</string>
+    <string name="avail_nothing">Нечего проверять: отметь сервисы во вкладке «Подбор», раздел «Что проверять».</string>
+    <string name="avail_done">Через туннель открылось %1$d из %2$d</string>
+    <string name="avail_routes_note">В «Что туннелировать» выбрано не всё: сайты вне списков открываются напрямую, и проверка показывает прямой путь.</string>
 </resources>

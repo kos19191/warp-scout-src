@@ -72,6 +72,72 @@ object Presets {
         ResourceCheck("Cloudflare trace", "https://www.cloudflare.com/cdn-cgi/trace", 200..299)
     )
 
+    /**
+     * Сервисы для настройки «Что проверять» и списка «Доступность» (с 1.10.30). Каждая проверка
+     * отвечает на вопрос «работает ли сервис», а не «отвечает ли что-нибудь по этому имени»:
+     *  • ChatGPT — какую страну видит сайт (trace Cloudflare): на сам адрес отвечает Cloudflare перед
+     *    сайтом, а ChatGPT отказывает по стране, и раньше в списке стояло «открылся», хотя не
+     *    открывался;
+     *  • Telegram — подключение к его серверам: приложению нужны они, а не сайт;
+     *  • остальные — загрузка настоящей страницы или API.
+     *
+     * ВАЖНО: настройка хранит id — их не менять, новые добавлять в конец.
+     */
+    val SERVICE_CHECKS: List<ResourceCheck> = listOf(
+        ResourceCheck("YouTube", "https://www.youtube.com/", 200..399, id = "youtube", hint = "главная страница"),
+        ResourceCheck(
+            "Telegram", "tcp://149.154.167.51:443|149.154.175.53:443",
+            id = "telegram", hint = "подключение к серверам Telegram"
+        ),
+        ResourceCheck("WhatsApp", "https://web.whatsapp.com/", 200..399, id = "whatsapp", hint = "веб-версия"),
+        ResourceCheck(
+            "ChatGPT", "https://chatgpt.com/cdn-cgi/trace", 200..299,
+            id = "chatgpt", hint = "какую страну видит сайт",
+            blockedCountries = dev.warpscout.core.net.SmartDnsCheck.UNSUPPORTED
+        ),
+        ResourceCheck("Instagram", "https://www.instagram.com/", 200..399, id = "instagram", hint = "главная страница"),
+        ResourceCheck(
+            "Discord", "https://discord.com/api/v9/gateway", 200..299, mustContain = "gateway",
+            id = "discord", hint = "сервер Discord"
+        ),
+        ResourceCheck("X (Twitter)", "https://x.com/", 200..399, id = "x", hint = "главная страница"),
+        ResourceCheck("Google", "https://www.google.com/generate_204", 200..299, id = "google", hint = "служебная страница")
+    )
+
+    /** Сколько своих сайтов проверять, не больше: каждая проверка — запрос и секунды ожидания. */
+    const val CUSTOM_CHECKS_MAX = 20
+
+    /**
+     * Свои сайты из настроек: по строке (или через запятую) — имя `example.com` или адрес
+     * `https://example.com/путь`. Всё после `#` — комментарий. Непонятное пропускается.
+     */
+    fun customChecks(text: String): List<ResourceCheck> = text
+        .split('\n', ',', ';')
+        .map { it.substringBefore('#').trim() }
+        .filter { it.isNotEmpty() && !it.contains(' ') }
+        .mapNotNull { raw ->
+            val withScheme = if (raw.startsWith("https://", ignoreCase = true) || raw.startsWith("http://", ignoreCase = true)) {
+                raw
+            } else {
+                "https://" + raw.trimEnd('/') + "/"
+            }
+            val scheme = withScheme.substringBefore("://").lowercase()
+            val rest = withScheme.substringAfter("://")
+            val authority = rest.substringBefore('/').substringBefore('?').substringBefore('#')
+            val tail = rest.removePrefix(authority).ifEmpty { "/" }
+            val hostTyped = authority.substringBeforeLast(':').takeIf { authority.count { it == ':' } == 1 } ?: authority
+            val port = if (hostTyped.length < authority.length) authority.substring(hostTyped.length) else ""
+            // Русские имена (сайт.рф) — в запрос идут в виде xn--…: иначе URI их не разбирает, и
+            // сайт молча пропадал из списка. В списке остаётся имя так, как его написали.
+            val ascii = runCatching { java.net.IDN.toASCII(hostTyped.lowercase()) }.getOrNull() ?: return@mapNotNull null
+            val url = "$scheme://$ascii$port$tail"
+            val host = runCatching { java.net.URI(url).host }.getOrNull()?.takeIf { it.isNotBlank() && it.contains('.') }
+                ?: return@mapNotNull null
+            ResourceCheck(hostTyped.lowercase(), url, 200..399, id = "custom:$host", hint = "свой сайт")
+        }
+        .distinctBy { it.url }
+        .take(CUSTOM_CHECKS_MAX)
+
     /** Проверки, которые имеют смысл только внутри туннеля (через них и «видно», что WARP работает). */
     val TUNNEL_ONLY_CHECKS: List<ResourceCheck> = listOf(
         ResourceCheck("Кто я для Cloudflare", "https://cloudflare.com/cdn-cgi/trace", 200..299, mustContain = "warp=on"),

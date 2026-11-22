@@ -237,11 +237,9 @@ class VpnTunnelVerifier(private val context: Context) : TunnelVerifier {
             }
         }
         return try {
-            val out = ArrayList<ResourceResult>(checks.size)
-            for (check in checks) {
-                if (isCancelled()) break
-                out.add(prober.check(check, "tunnel"))
-            }
+            // Проверки — параллельно (с 1.10.30): по одной восемь сервисов и свои сайты ждали бы
+            // друг друга до минуты на каждую из трёх точек. Порядок результатов — как в списке.
+            val out = prober.checkParallel(checks, "tunnel", isCancelled)
             // Скорость через эту точку: из двух, открывших одинаково много сайтов, лучше та, через
             // которую быстрее качается. Короткая загрузка (четверть мегабайта) заодно ловит
             // «заморозку» — такая точка получает 0 и уходит вниз списка.

@@ -30,6 +30,12 @@ class Prefs(private val context: Context) {
             if (wasWhitelist && sp.getInt("routesMode", 0) == 0) edit.putInt("routesMode", 1)
             edit.remove("whitelist").apply()
         }
+        // 1.10.30: проверка доступности через туннель при подборе включается один раз для всех —
+        // так решил человек («по кнопке и при подборе»). Раньше переключатель сохранялся
+        // выключенным при каждом подборе, и одна смена умолчания до обновившихся не дошла бы.
+        if (!sp.getBoolean("availMigrated", false)) {
+            sp.edit().putBoolean("availMigrated", true).putBoolean("tunnel_verify", true).apply()
+        }
     }
     private val junkNames = JunkLibrary.defaultPool().map { it.name }
 
@@ -69,9 +75,24 @@ class Prefs(private val context: Context) {
         get() = sp.getBoolean("resources", true)
         set(v) = sp.edit().putBoolean("resources", v).apply()
 
+    /**
+     * При подборе проверять доступность через туннель у трёх лучших точек. С 1.10.30 включено по
+     * умолчанию: так выбрал человек («по кнопке и при подборе»), и только так список «Доступность»
+     * показывает то, что откроется через туннель, а не без VPN.
+     */
     var verifyInTunnel: Boolean
-        get() = sp.getBoolean("tunnel_verify", false)
+        get() = sp.getBoolean("tunnel_verify", true)
         set(v) = sp.edit().putBoolean("tunnel_verify", v).apply()
+
+    /** Какие сервисы проверять (коды из Presets.SERVICE_CHECKS, с 1.10.30). По умолчанию — все. */
+    var availServices: Set<String>
+        get() = sp.getStringSet("availServices", null)?.toSet() ?: Presets.SERVICE_CHECKS.map { it.id }.toSet()
+        set(v) = sp.edit().putStringSet("availServices", v.toSet()).apply()
+
+    /** Свои сайты для проверки доступности: по одному в строке (с 1.10.30). */
+    var availCustom: String
+        get() = sp.getString("availCustom", "").orEmpty()
+        set(v) = sp.edit().putString("availCustom", v).apply()
 
     /** Включённые профили шума (по именам из [JunkLibrary]). */
     var enabledJunk: Set<String>
@@ -488,6 +509,17 @@ class Prefs(private val context: Context) {
         return if (v4.isEmpty()) "0.0.0.0/0" else v4.joinToString(", ")
     }
 
+    /**
+     * Что проверять (с 1.10.30): отмеченные сервисы, свои сайты и, если включено, проверки по
+     * скачанным спискам. Один и тот же список — для подбора и для «Проверить сейчас».
+     */
+    fun availabilityChecks(): List<dev.warpscout.core.model.ResourceCheck> {
+        val chosen = availServices
+        return Presets.SERVICE_CHECKS.filter { it.id in chosen } +
+            Presets.customChecks(availCustom) +
+            runCatching { listChecks() }.getOrDefault(emptyList())
+    }
+
     /** Проверки по спискам: берём кеш `.lst` и превращаем в canary-запросы. */
     fun listChecks(limitPerList: Int = 3): List<dev.warpscout.core.model.ResourceCheck> {
         if (!checkByLists) return emptyList()
@@ -560,7 +592,9 @@ class Prefs(private val context: Context) {
         endpointSpec = endpointSpec(),
         junkProfiles = junkPool,
         net = NetSettings(attempts = attempts, timeoutMs = timeoutMs, concurrency = concurrency),
-        resources = if (checkResources) Presets.RESOURCE_CHECKS + listChecks() else emptyList(),
+        // С 1.10.30 — отмеченное в «Что проверять». Проверки без VPN и через туннель включаются
+        // отдельно, поэтому список нужен, если включена хоть одна из них.
+        resources = if (checkResources || verifyInTunnel) availabilityChecks() else emptyList(),
         // Адреса выбранного DNS — с учётом найденных по имени (см. DnsBook): у «умных» DNS они
         // меняются, а без адресов набор подставил бы пустой список.
         dns = dnsServers(),

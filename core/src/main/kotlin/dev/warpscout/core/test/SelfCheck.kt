@@ -48,6 +48,8 @@ import dev.warpscout.core.tune.Weights
 import dev.warpscout.core.wg.Wg
 import dev.warpscout.core.tune.NoiseBook
 import dev.warpscout.core.tunnel.DataGate
+import dev.warpscout.core.presets.Presets
+import dev.warpscout.core.model.ResourceResult
 
 /**
  * Автономные проверки ядра. Запускаются и на десктопе (`warp-scout selftest`), и как unit-тесты
@@ -107,6 +109,10 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             sustainChecks()
             dataGateChecks()
             noiseBookChecks()
+        }
+
+        section("доступность сервисов (1.10.30)") {
+            availabilityChecks()
         }
         section("расход батареи: интервал keepalive") {
             keepalivePolicy()
@@ -825,6 +831,84 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         val slow = runGate({ true }, rtt = 1_200L)
         expect("проверка данных: медленная сеть (1,2 с на ответ) — рабочий", slow.first, DataGate.Verdict.FLOWING)
         check("проверка данных: укладывается в окно", flowing.second <= DataGate.WINDOW_MS && slow.second <= DataGate.WINDOW_MS)
+    }
+
+    /**
+     * Доступность сервисов (1.10.30): ChatGPT «открылся» только если сайт видит обслуживаемую
+     * страну; приложения проверяются подключением к их серверам; свои сайты разбираются из текста.
+     */
+    private fun availabilityChecks() {
+        val chatgpt = Presets.SERVICE_CHECKS.firstOrNull { it.id == "chatgpt" }
+        check("доступность: ChatGPT проверяется по стране", chatgpt != null && "RU" in chatgpt.blockedCountries)
+        if (chatgpt != null) {
+            val ru = dev.warpscout.core.net.ResourceProber.judge(chatgpt, 200, "fl=1f1\nip=1.2.3.4\nloc=RU\ncolo=ARN\n")
+            check("доступность: ChatGPT видит RU — не открылся", !ru.ok && ru.errorClass == "region:RU", "${ru.errorClass}")
+            val nl = dev.warpscout.core.net.ResourceProber.judge(chatgpt, 200, "ip=1.2.3.4\nloc=NL\ncolo=AMS\n")
+            check("доступность: ChatGPT видит NL — открылся", nl.ok && nl.detail == "NL", nl.detail)
+            val nlText = dev.warpscout.core.net.ResourceProber.describe(
+                ResourceResult(chatgpt, ok = true, elapsedMs = 120, detail = nl.detail)
+            )
+            check("доступность: страна в строке словами", nlText.contains("страну NL"), nlText)
+            val blocked = ResourceResult(chatgpt, ok = false, errorClass = "region:RU")
+            check(
+                "доступность: отказ по стране объяснён словами",
+                dev.warpscout.core.net.ResourceProber.describe(blocked).contains("RU")
+            )
+            val noLoc = dev.warpscout.core.net.ResourceProber.judge(chatgpt, 200, "<html>заглушка</html>")
+            check("доступность: ответ без страны — не «открылся»", !noLoc.ok)
+            check("доступность: код 403 — не «открылся»", !dev.warpscout.core.net.ResourceProber.judge(chatgpt, 403, "loc=NL").ok)
+        }
+        val ids = Presets.SERVICE_CHECKS.map { it.id }
+        expect("доступность: восемь сервисов", ids.size, 8)
+        check("доступность: коды сервисов не повторяются", ids.toSet().size == ids.size && ids.none { it.isBlank() })
+        val discord = Presets.SERVICE_CHECKS.first { it.id == "discord" }
+        check(
+            "доступность: чужой ответ вместо API — не «открылся»",
+            !dev.warpscout.core.net.ResourceProber.judge(discord, 200, "<html>stub</html>").ok
+        )
+
+        val custom = Presets.customChecks("example.com\nhttps://a.example.org/путь # мой\nне сайт\n\nexample.com, локалхост")
+        expect("свои сайты: разобраны два", custom.size, 2)
+        expect("свои сайты: имя без адреса — https", custom.firstOrNull()?.url, "https://example.com/")
+        expect("свои сайты: адрес как есть", custom.getOrNull(1)?.url, "https://a.example.org/путь")
+        val idn = Presets.customChecks("сайт.рф\nhttps://Example.com:8443/a?b=1")
+        expect("свои сайты: русское имя — в виде xn--", idn.firstOrNull()?.url, "https://xn--80aswg.xn--p1ai/")
+        expect("свои сайты: русское имя в списке как написали", idn.firstOrNull()?.name, "сайт.рф")
+        expect("свои сайты: порт и запрос сохранены", idn.getOrNull(1)?.url, "https://example.com:8443/a?b=1")
+        val many = Presets.customChecks((1..40).joinToString("\n") { "s$it.example.com" })
+        expect("свои сайты: не больше ${Presets.CUSTOM_CHECKS_MAX}", many.size, Presets.CUSTOM_CHECKS_MAX)
+
+        // Подключение к серверам приложения (Telegram): открытый порт — да, закрытый — нет.
+        val server = java.net.ServerSocket(0, 4, java.net.InetAddress.getByName("127.0.0.1"))
+        try {
+            val port = server.localPort
+            val prober = dev.warpscout.core.net.ResourceProber()
+            val open = prober.check(ResourceCheck("t", "tcp://127.0.0.1:$port", timeoutMs = 2_000))
+            check("доступность: серверы отвечают — «открылся»", open.ok, "${open.errorClass}")
+            val closedPort = java.net.ServerSocket(0).use { it.localPort }
+            val closed = prober.check(ResourceCheck("t", "tcp://127.0.0.1:$closedPort|127.0.0.1:$port", timeoutMs = 2_000))
+            check("доступность: годится любой из адресов", closed.ok, "${closed.errorClass}")
+            val none = prober.check(ResourceCheck("t", "tcp://127.0.0.1:$closedPort", timeoutMs = 2_000))
+            check("доступность: порт закрыт — не «открылся»", !none.ok && none.errorClass != null)
+            // Параллельная проверка (подбор и «Проверить сейчас»): порядок — как в списке, итог —
+            // у каждой своей строки, отметка «через туннель» не теряется.
+            val batch = listOf(
+                ResourceCheck("a", "tcp://127.0.0.1:$port", timeoutMs = 2_000),
+                ResourceCheck("b", "tcp://127.0.0.1:$closedPort", timeoutMs = 2_000),
+                ResourceCheck("c", "tcp://127.0.0.1:$port", timeoutMs = 2_000)
+            )
+            val par = prober.checkParallel(batch, "tunnel")
+            expect("доступность: параллельно — порядок как в списке", par.joinToString("") { it.check.name }, "abc")
+            check("доступность: параллельно — итог у каждой строки свой", par.map { it.ok } == listOf(true, false, true))
+            check(
+                "доступность: параллельно — помечено «через туннель»",
+                par.all { it.via == dev.warpscout.core.model.NetworkVia.TUNNEL }
+            )
+            val cancelled = prober.checkParallel(batch, "tunnel") { true }
+            check("доступность: отмена — пустой итог, без ожидания", cancelled.isEmpty())
+        } finally {
+            runCatching { server.close() }
+        }
     }
 
     /** Книга шума по сетям (1.10.30): когда шум считать замерзающим и на что его менять. */

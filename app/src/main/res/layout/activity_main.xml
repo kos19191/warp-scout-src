@@ -192,7 +192,12 @@
                             style="@style/Text.Caption"
                             android:text="@string/top3_hint" />
 
-                        <RadioGroup
+                        <!--
+                          Части «Wi-Fi» и «Мобильная сеть» — та же сборка, что в шторке упрощённого
+                          экрана (fillPointGroups, с 1.10.30): кружок — резервная, «Перейти сейчас»,
+                          свой подбор у каждой сети.
+                        -->
+                        <LinearLayout
                             android:id="@+id/groupTop3"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
@@ -298,8 +303,9 @@
                 </com.google.android.material.card.MaterialCardView>
 
                 <!--
-                  Тот же еле заметный тумблер, что внизу упрощённого экрана: здесь он возвращает
-                  упрощённый вид. Выбор запоминается.
+                  Тот же еле заметный тумблер «Расширенный режим», что внизу упрощённого экрана:
+                  здесь он включён, выключили — вернулся упрощённый вид (с 1.10.30; раньше здесь был
+                  «Упрощённый режим»). Подпись «· включено» ставится в коде. Выбор запоминается.
                 -->
                 <LinearLayout
                     android:layout_width="wrap_content"
@@ -311,9 +317,10 @@
                     android:orientation="horizontal">
 
                     <TextView
+                        android:id="@+id/textModeLabel"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="@string/mode_simple"
+                        android:text="@string/mode_advanced"
                         android:textAppearance="?attr/textAppearanceLabelMedium"
                         android:textColor="?attr/colorOnSurfaceVariant" />
 
@@ -322,7 +329,8 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginStart="4dp"
-                        android:contentDescription="@string/mode_simple"
+                        android:checked="true"
+                        android:contentDescription="@string/mode_advanced"
                         android:scaleX="0.75"
                         android:scaleY="0.75" />
                 </LinearLayout>
@@ -445,22 +453,15 @@
                     android:layout_marginTop="6dp"
                     android:textAppearance="?attr/textAppearanceBodySmall" />
 
-                <!-- ── проверки ресурсов ──────────────────────────────────── -->
+                <!--
+                  ── что проверять (с 1.10.30) ──────────────────────────────
+                  Сервисы для списка «Доступность» в Журнале: отметки строятся в коде из
+                  Presets.SERVICE_CHECKS, ниже — свои сайты. Те же проверки идут при подборе (через
+                  туннель трёх лучших точек) и по кнопке «Проверить сейчас».
+                -->
                 <TextView
                     style="@style/SectionHeader"
                     android:text="@string/section_checks" />
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchResources"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/switch_resources" />
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchTunnelVerify"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/switch_tunnel_verify" />
 
                 <TextView
                     android:layout_width="match_parent"
@@ -472,7 +473,44 @@
                     android:id="@+id/resourceBox"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
                     android:orientation="vertical" />
+
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:hint="@string/avail_custom_hint">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/editAvailCustom"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="top"
+                        android:inputType="textMultiLine|textUri"
+                        android:minLines="2" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/avail_custom_note"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchTunnelVerify"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/switch_tunnel_verify" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchResources"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/switch_resources" />
 
                 <TextView
                     android:layout_width="match_parent"
@@ -646,19 +684,10 @@
                     android:textColor="?attr/colorOnSurfaceVariant"
                     android:visibility="gone" />
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnDnsCheck"
-                    style="@style/Widget.Material3.Button.TextButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/dns_check_btn" />
-
-                <TextView
-                    android:id="@+id/textDnsCheck"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textAppearance="?attr/textAppearanceBodySmall"
-                    android:visibility="gone" />
+                <!--
+                  Кнопки «Проверить: откроется ли ChatGPT» больше нет (с 1.10.30): какую страну видит
+                  ChatGPT, показывает строка в списке «Доступность» Журнала.
+                -->
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -1365,15 +1394,51 @@
                     android:layout_height="wrap_content"
                     android:textAppearance="?attr/textAppearanceBodySmall" />
 
-                <!-- ── отчёт ──────────────────────────────────────────────── -->
-                <TextView
-                    style="@style/SectionHeader"
-                    android:text="@string/section_report" />
-
-                <!-- ── что реально открылось: проверки ресурсов с ✓/✗ ── -->
+                <!--
+                  ── доступность (с 1.10.30): что открылось через туннель и что без VPN ──
+                  Раньше здесь был один список «Что реально открылось» — итог без VPN и без
+                  подписи. Теперь у каждого списка написано, откуда проверяли, через какую точку
+                  и когда; через туннель можно проверить сразу — кнопкой.
+                -->
                 <TextView
                     style="@style/SectionHeader"
                     android:text="@string/section_resource_results" />
+
+                <TextView
+                    android:id="@+id/textAvailTunnelHead"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+                <LinearLayout
+                    android:id="@+id/availTunnelBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnAvailCheck"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/avail_check_now" />
+
+                <TextView
+                    android:id="@+id/textAvailRoutesNote"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/avail_routes_note"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/textAvailDirectHead"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:textAppearance="?attr/textAppearanceLabelLarge" />
 
                 <LinearLayout
                     android:id="@+id/resourceResultsBox"
@@ -1388,6 +1453,12 @@
                     android:layout_marginTop="6dp"
                     android:text="@string/services_hint"
                     android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <!-- ── отчёт ──────────────────────────────────────────────── -->
+                <TextView
+                    style="@style/SectionHeader"
+                    android:text="@string/section_report" />
+
                 <TextView
                     android:id="@+id/textReport"
                     style="@style/Text.Mono" />

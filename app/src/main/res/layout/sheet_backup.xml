@@ -41,27 +41,14 @@
             android:textAppearance="?attr/textAppearanceBodyMedium"
             android:visibility="gone" />
 
-        <!-- Части «Wi-Fi» и «Мобильная сеть»: заголовок, строки, «Снять отметку» — собираются в коде. -->
+        <!--
+          Части «Wi-Fi» и «Мобильная сеть»: заголовок, строки, «Снять отметку» и свой подбор у каждой
+          сети — собираются в коде той же функцией, что и карточка расширенного вида (с 1.10.30).
+        -->
         <LinearLayout
             android:id="@+id/sheetRows"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/sheetScanMobile"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:text="@string/sheet_scan_mobile"
-            android:visibility="gone" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/sheetRescan"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/sheet_rescan" />
     </LinearLayout>
 </androidx.core.widget.NestedScrollView>

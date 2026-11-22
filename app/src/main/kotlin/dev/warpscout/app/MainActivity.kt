@@ -136,7 +136,6 @@ class MainActivity : AppCompatActivity() {
     private var settingsReconnect: Runnable? = null
 
     /** Тройка подобранных конфигов, показанная сейчас (в порядке «лучший → третий»). */
-    private var shortlistEntries: List<ConfigShortlist.Entry> = emptyList()
 
     /** Пока true — переподключение по настройкам не затевается (идёт заполнение экрана из Prefs). */
     private var suppressSettingsReconnect = false
@@ -193,6 +192,7 @@ class MainActivity : AppCompatActivity() {
             refreshRoutesState()
             updateEndpointNote()
             renderShortlist()
+            renderAvailability()
             askNotificationPermission()
             CrashLog.lastCrash(this)?.let { crash ->
                 banner(getString(R.string.banner_last_crash), error = true)
@@ -241,6 +241,11 @@ class MainActivity : AppCompatActivity() {
      */
     override fun onPause() {
         screenResumed = false
+        // Свои сайты для «Доступности» — сохраняем и без кнопки «Сохранить»: набрал список и ушёл
+        // из приложения — список не должен пропасть (с 1.10.30).
+        if (uiReady()) runCatching {
+            prefs.availCustom = binding.editAvailCustom.text?.toString()?.trim().orEmpty()
+        }
         stopTunnelPolling()
         tunnelHandler.removeCallbacks(bannerHide)
         tunnelHandler.removeCallbacks(simpleTick)
@@ -305,6 +310,7 @@ class MainActivity : AppCompatActivity() {
         binding.switchResources.isChecked = prefs.checkResources
         binding.switchTunnelVerify.isChecked = prefs.verifyInTunnel
         binding.switchTunnelVerify.isEnabled = tunnel.supported
+        binding.editAvailCustom.setText(prefs.availCustom)
         fillDnsSpinner()
         fillFeatureSwitches()
         binding.btnSchedule.setText(if (prefs.scheduleOn) R.string.btn_schedule_off else R.string.btn_schedule)
@@ -352,6 +358,8 @@ class MainActivity : AppCompatActivity() {
         prefs.enableIpv6 = binding.switchIpv6.isChecked
         prefs.checkResources = binding.switchResources.isChecked
         prefs.verifyInTunnel = binding.switchTunnelVerify.isChecked
+        prefs.availCustom = binding.editAvailCustom.text?.toString()?.trim().orEmpty()
+        saveAvailServices()
         if (binding.dnsSpinner.selectedItemPosition >= 0) prefs.dnsIndex = binding.dnsSpinner.selectedItemPosition
         prefs.poolMode = poolModeOf(binding.poolGroup.checkedButtonId)
         prefs.autoApply = binding.checkAutoApply.isChecked
@@ -417,43 +425,6 @@ class MainActivity : AppCompatActivity() {
         }, "warpscout-dns-name").apply { isDaemon = true }.start()
     }
 
-    /**
-     * «Откроется ли ChatGPT с этим DNS»: спрашиваем у выбранного DNS адрес chatgpt.com и смотрим,
-     * из какой страны его видит сайт (см. SmartDnsCheck). Через туннель, если он поднят.
-     */
-    private fun runDnsCheck() {
-        val index = prefs.dnsIndex
-        val preset = DnsBook.preset(index)
-        binding.textDnsCheck.visibility = View.VISIBLE
-        binding.textDnsCheck.setTextColor(ContextCompat.getColor(this, R.color.colorOnSurfaceVariant))
-        binding.textDnsCheck.text = getString(R.string.dns_checking, preset.name)
-        binding.btnDnsCheck.isEnabled = false
-        val app = applicationContext
-        Thread({
-            if (preset.host.isNotBlank() && DnsBook.resolved(app, preset.host).isEmpty()) {
-                runCatching { DnsBook.refresh(app, index) }
-            }
-            val server = DnsBook.servers(app, index).firstOrNull { !it.contains(':') }
-            val result = server?.let { runCatching { dev.warpscout.core.net.SmartDnsCheck.check(it) }.getOrNull() }
-            runOnUiThread {
-                if (!::binding.isInitialized) return@runOnUiThread
-                binding.btnDnsCheck.isEnabled = true
-                val (text, ok) = when {
-                    server == null -> getString(R.string.dns_check_fail, preset.name, getString(R.string.dns_by_name_pending, preset.host)) to false
-                    result == null -> getString(R.string.dns_check_fail, preset.name, "проверка не удалась") to false
-                    result.country.isEmpty() -> getString(R.string.dns_check_fail, preset.name, result.note) to false
-                    result.opens -> getString(R.string.dns_check_ok, preset.name, result.address, result.country) to true
-                    else -> getString(R.string.dns_check_blocked, preset.name, result.address, result.country) to false
-                }
-                binding.textDnsCheck.text = text
-                binding.textDnsCheck.setTextColor(
-                    ContextCompat.getColor(this, if (ok) R.color.check_ok else R.color.check_fail)
-                )
-                TunnelDebug.stage("проверка DNS для ChatGPT: $text")
-            }
-        }, "warpscout-dns-check").apply { isDaemon = true }.start()
-    }
-
     // ------------------------------------------------ переключатели новых функций
 
     private fun fillFeatureSwitches() {
@@ -483,7 +454,6 @@ class MainActivity : AppCompatActivity() {
         bind(binding.switchFeatSpeed, getString(R.string.feat_speed), { prefs.featSpeedAuto }, { prefs.featSpeedAuto = it })
         bind(binding.switchFeatFreeze, getString(R.string.feat_freeze), { prefs.featFreezeReconnect }, { prefs.featFreezeReconnect = it })
         bind(binding.switchFeatDns, getString(R.string.feat_dns), { prefs.featDnsInTunnel }, { prefs.featDnsInTunnel = it })
-        binding.btnDnsCheck.setOnClickListener { runCatching { runDnsCheck() } }
     }
 
     private fun buildJunkChecks() {
@@ -505,20 +475,35 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Отметки «Что проверять»: код сервиса → его галочка (см. buildResourceList). */
+    private val availBoxes = ArrayList<Pair<String, MaterialCheckBox>>()
+
+    /**
+     * «Что проверять» (с 1.10.30): галочки сервисов из Presets.SERVICE_CHECKS вместо прежнего
+     * списка-подсказки, который нельзя было менять. Сохраняются сразу при нажатии.
+     */
     private fun buildResourceList() {
         binding.resourceBox.removeAllViews()
-        Presets.RESOURCE_CHECKS.forEach { check ->
-            binding.resourceBox.addView(
-                android.widget.TextView(this).apply {
-                    text = "• ${check.name}"
-                    textSize = 12f
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    )
-                }
-            )
+        availBoxes.clear()
+        val chosen = prefs.availServices
+        Presets.SERVICE_CHECKS.forEach { check ->
+            val box = MaterialCheckBox(this).apply {
+                text = getString(R.string.avail_service_line, check.name, check.hint)
+                isChecked = check.id in chosen
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            }
+            box.setOnCheckedChangeListener { _, _ -> runCatching { saveAvailServices() } }
+            availBoxes += check.id to box
+            binding.resourceBox.addView(box)
         }
+    }
+
+    private fun saveAvailServices() {
+        if (availBoxes.isEmpty()) return
+        prefs.availServices = availBoxes.filter { it.second.isChecked }.map { it.first }.toSet()
     }
 
     private fun showKeys() {
@@ -585,6 +570,8 @@ class MainActivity : AppCompatActivity() {
             if (safe == TAB_LOG) {
                 logTail.forceEnd()
                 diagTail.forceEnd()
+                // Подбор мог пройти в фоне — список «Доступность» показываем свежим.
+                renderAvailability()
             }
         }.onFailure { t ->
             TunnelDebug.error("не удалось открыть раздел $index: " + SafeMode.describe(t))
@@ -825,34 +812,125 @@ class MainActivity : AppCompatActivity() {
         else -> getString(R.string.bytes_mb, value / 1048576.0)
     }
 
-    // ------------------------------------------------ проверки ресурсов (Журнал)
+    // ------------------------------------------------ доступность (Журнал)
 
     /**
-     * «Что реально открылось» — построчный список проверок с ✓/✗, а не пересказ отчёта.
-     * Сюда смотришь, когда сайт «вроде должен работать, но не работает».
+     * «Доступность» (с 1.10.30): два списка с подписями — через туннель (точка, время, при подборе
+     * или по кнопке) и без VPN (база сравнения подбора). Раньше здесь был один список без подписи,
+     * и итог без VPN читался как «через туннель открылось».
      */
-    private fun renderResources(results: List<dev.warpscout.core.model.ResourceResult>) {
-        binding.resourceResultsBox.removeAllViews()
-        if (results.isEmpty()) {
-            binding.resourceResultsBox.addView(verdictRow(getString(R.string.resources_off), false))
+    private fun renderAvailability() {
+        if (!::binding.isInitialized) return
+        runCatching { renderAvailabilityUnsafe() }.onFailure { t ->
+            TunnelDebug.error("список доступности: " + SafeMode.describe(t))
+        }
+    }
+
+    private fun renderAvailabilityUnsafe() {
+        val viaTunnel = Availability.load(this, Availability.VIA_TUNNEL)
+        val direct = Availability.load(this, Availability.VIA_DIRECT)
+        binding.textAvailTunnelHead.text = if (viaTunnel == null) {
+            getString(R.string.avail_tunnel_title)
+        } else {
+            val head = getString(R.string.avail_tunnel_title) +
+                (if (viaTunnel.point.isNotBlank()) " · " + viaTunnel.point else "")
+            head + "\n" + availWhen(viaTunnel)
+        }
+        fillAvailBox(binding.availTunnelBox, viaTunnel, getString(R.string.avail_tunnel_none))
+        binding.textAvailDirectHead.text = if (direct == null) {
+            getString(R.string.avail_direct_title)
+        } else {
+            getString(R.string.avail_direct_title) + "\n" + availWhen(direct)
+        }
+        fillAvailBox(binding.resourceResultsBox, direct, getString(R.string.avail_direct_none))
+        // «Что туннелировать» — не всё: сайты вне списков идут мимо туннеля, и проверка это покажет.
+        binding.textAvailRoutesNote.visibility = if (prefs.routesMode >= 2) View.VISIBLE else View.GONE
+    }
+
+    /** «проверено сегодня в 14:05 · по кнопке» / «· при подборе». */
+    private fun availWhen(report: Availability.Report): String {
+        val at = java.util.Date(report.at)
+        val sameDay = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US).let {
+            it.format(at) == it.format(java.util.Date())
+        }
+        val time = java.text.SimpleDateFormat(if (sameDay) "HH:mm" else "dd.MM HH:mm", java.util.Locale.getDefault()).format(at)
+        return getString(
+            if (report.source == Availability.SOURCE_BUTTON) R.string.avail_when_button else R.string.avail_when_scan,
+            if (sameDay) getString(R.string.avail_today, time) else time
+        )
+    }
+
+    private fun fillAvailBox(box: LinearLayout, report: Availability.Report?, empty: String) {
+        box.removeAllViews()
+        if (report == null || report.lines.isEmpty()) {
+            box.addView(
+                android.widget.TextView(this).apply {
+                    text = empty
+                    textSize = 13f
+                    setPadding(0, 4, 0, 4)
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.colorOnSurfaceVariant))
+                }
+            )
             return
         }
-        results.forEach { r ->
-            val via = if (r.via == dev.warpscout.core.model.NetworkVia.TUNNEL) {
-                ", " + getString(R.string.resource_via_tunnel)
-            } else {
-                ""
-            }
-            val tail = when {
-                !r.ok -> ", " + (r.errorClass ?: getString(R.string.no_answer)) + (r.status?.let { " ($it)" } ?: "")
-                r.status != null && r.elapsedMs > 0 -> getString(R.string.check_result_ms, r.status, r.elapsedMs)
-                r.status != null -> ", ${r.status}"
-                else -> ""
-            }
-            binding.resourceResultsBox.addView(
-                verdictRow((if (r.ok) "✓ " else "✗ ") + r.check.name + tail + via, r.ok)
-            )
+        report.lines.forEach { line ->
+            box.addView(verdictRow((if (line.ok) "✓ " else "✗ ") + line.name + " — " + line.text, line.ok))
         }
+    }
+
+    /** Идёт «Проверить сейчас» — второй раз не запускаем. */
+    @Volatile
+    private var availChecking = false
+
+    /**
+     * «Проверить сейчас»: те же проверки, что при подборе, — из приложения через туннель, который
+     * работает сейчас. Туннель не трогается; итог — в список «Через туннель».
+     */
+    private fun checkAvailabilityNow() {
+        if (availChecking) return
+        // Свой подбор или фоновый (у него свой движок): процесс привязан к сети без VPN.
+        if (engine.running || Availability.processBound(this)) {
+            banner(getString(R.string.avail_busy_scan))
+            return
+        }
+        if (!tunnel.supported || !tunnel.isUp) {
+            banner(getString(R.string.avail_need_tunnel))
+            return
+        }
+        persistUi()
+        if (prefs.availabilityChecks().isEmpty()) {
+            banner(getString(R.string.avail_nothing))
+            return
+        }
+        // Точка — та, что знает сервис (он мог сменить её сам); шум не пишем: сервис мог заменить
+        // его под эту сеть (см. NoiseMemory), и подпись из настроек могла бы соврать.
+        val point = runCatching { TunnelDebug.endpoint }.getOrDefault("").trim()
+        availChecking = true
+        binding.btnAvailCheck.isEnabled = false
+        binding.btnAvailCheck.setText(R.string.avail_checking)
+        TunnelDebug.stage("доступность: проверяю через туннель ${point.ifBlank { "(точка неизвестна)" }}")
+        val app = applicationContext
+        Thread({
+            val result = runCatching { Availability.checkNow(app, point) { false } }
+            runOnUiThread {
+                availChecking = false
+                if (!::binding.isInitialized || isFinishing || isDestroyed) return@runOnUiThread
+                runCatching {
+                    binding.btnAvailCheck.isEnabled = true
+                    binding.btnAvailCheck.setText(R.string.avail_check_now)
+                    renderAvailability()
+                    result.onSuccess { r ->
+                        val ok = r.lines.count { it.ok }
+                        TunnelDebug.stage("доступность через туннель: открылось $ok из ${r.lines.size}" +
+                            r.lines.filter { !it.ok }.joinToString("") { "; ✗ ${it.name}: ${it.text}" })
+                        banner(getString(R.string.avail_done, ok, r.lines.size))
+                    }.onFailure { t ->
+                        TunnelDebug.error("доступность: проверка не удалась: " + SafeMode.describe(t))
+                        banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+                    }
+                }
+            }
+        }, "warpscout-avail").apply { isDaemon = true }.start()
     }
 
     private fun verdictRow(text: String, ok: Boolean): android.widget.TextView =
@@ -1299,6 +1377,15 @@ class MainActivity : AppCompatActivity() {
                 toast(getString(R.string.schedule_on, periodLabel(hours)))
             }
             updateScheduleNote()
+        }
+
+        // «Проверить сейчас» в Журнале: доступность через работающий туннель (с 1.10.30).
+        binding.btnAvailCheck.setOnClickListener {
+            runCatching { checkAvailabilityNow() }.onFailure { t ->
+                availChecking = false
+                TunnelDebug.error("доступность: " + SafeMode.describe(t))
+                banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+            }
         }
 
         binding.btnTop3Forget.setOnClickListener {
@@ -1788,7 +1875,7 @@ class MainActivity : AppCompatActivity() {
             ?: result.configText
             ?: best?.let { ConfigFiles.render(it) }.orEmpty()
         updateServerNote()
-        renderResources(result.report.resources)
+        renderAvailability()
         binding.textReport.text = runCatching { Report.toMarkdown(result.report) }
             .getOrElse { getString(R.string.report_broken, it.message.orEmpty()) }
         renderShortlist()
@@ -2007,126 +2094,169 @@ class MainActivity : AppCompatActivity() {
         // Запоминаем в самом начале: опрос сравнивает с этим и не перерисовывает список зря.
         val marksText = runCatching { TunnelStatusBus.snapshot(this).marks }.getOrDefault("")
         lastMarksRendered = marksText
-        // Тройка текущей сети (Wi-Fi или мобильной); нет своей — показываем другую, как раньше
-        // показывали единственную, с пометкой «другая сеть».
-        val transport = runCatching { TuningCache.transportOf(this) }.getOrDefault("")
-        val allEntries = runCatching { ConfigShortlist.ordered(this, transport) }.getOrDefault(emptyList())
-        val mineEntries = allEntries.filter { ConfigShortlist.group(it.network) == ConfigShortlist.group(transport) }
-        val entries = (if (mineEntries.isNotEmpty()) mineEntries else allEntries).take(ConfigShortlist.MAX)
-        shortlistEntries = entries
-        val liveEndpointEarly = runCatching { TunnelDebug.endpoint }.getOrDefault("").trim()
-        if (entries.isEmpty() && liveEndpointEarly.isBlank()) {
-            binding.cardTop3.visibility = View.GONE
-            binding.groupTop3.removeAllViews()
-            return
-        }
+        // С 1.10.30 карточка — то же, что шторка «Резервная точка» упрощённого экрана: обе сети,
+        // отметка резервной, «Перейти сейчас» и свой подбор у каждой (см. fillPointGroups).
+        // Карточку показываем всегда: даже без точек в ней кнопки подбора для обеих сетей.
         binding.cardTop3.visibility = View.VISIBLE
-        binding.groupTop3.removeAllViews()
-        val network = runCatching { TuningCache.transportOf(this) }.getOrDefault("")
-        val up = runCatching { tunnel.isUp }.getOrDefault(false)
-        val marks = parseMarks(marksText)
-        // Отмечаем ту точку, через которую реально идёт (или шёл последний) трафик. Раньше метка
-        // появлялась только при поднятом туннеле и только если переключились из этого списка —
-        // то есть после обычного «Включить туннель» не было видно ничего. Теперь сверяемся с
-        // последней точкой входа: она ставится при любом подключении.
-        // Реальная точка, через которую идёт туннель, а не «последняя из подбора»: сервис знает
-        // точный host:port, и он может отличаться от того, что записан в настройках.
-        val liveEndpoint = liveEndpointEarly
-        val lastEndpoint = liveEndpoint.ifBlank { prefs.lastEndpoint.trim() }
-        if (lastEndpoint.isNotEmpty() && entries.none { it.endpoint.trim() == lastEndpoint }) {
-            // Подключены к точке, которой нет в списке трёх (например, поднимали сохранённый
-            // конфиг). Молчать нельзя: иначе в списке «ничего не выбрано» при живом туннеле.
-            binding.groupTop3.addView(
-                MaterialRadioButton(this).apply {
-                    id = View.generateViewId()
-                    // «Сейчас подключён» — только когда туннель работает: на снимке экрана к
-                    // Диагностике-8 эта строка стояла под «Туннель выключен».
-                    text = getString(if (up) R.string.top3_now else R.string.top3_last, lastEndpoint) + "\n" +
-                        getString(if (up) R.string.top3_row_active else R.string.top3_row_off)
-                    textSize = 14f
-                    setPadding(0, 8, 0, 8)
-                    isChecked = true
-                    setTypeface(typeface, android.graphics.Typeface.BOLD)
-                    isEnabled = false
-                },
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
-            )
-        }
-        val lp = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        )
-        for ((i, entry) in entries.withIndex()) {
-            val active = if (lastEndpoint.isNotEmpty()) {
-                entry.endpoint.trim() == lastEndpoint
-            } else {
-                ConfigShortlist.isActive(entry, prefs)
-            }
-            val row = MaterialRadioButton(this)
-            row.id = View.generateViewId()
-            row.text = shortlistRowText(i, entry, network, active, up, marks)
-            row.textSize = 14f
-            row.setPadding(0, 8, 0, 8)
-            row.isChecked = active
-            if (active) row.setTypeface(row.typeface, android.graphics.Typeface.BOLD)
-            // Нажатие на уже выбранную строку тоже обрабатываем: «переподключиться к ней» — законное
-            // желание, если туннель отвалился, а RadioGroup сам по себе повторный выбор не заметит.
-            row.setOnClickListener { switchToShortlist(entry) }
-            // Долгое нажатие — сделать точку резервной (или снять отметку): то же, что «Резервная»
-            // в упрощённом экране. На неё сервис перейдёт первой, если текущая замолчит.
-            row.setOnLongClickListener {
-                toggleBackup(entry.endpoint, ConfigShortlist.group(entry.network))
-                true
-            }
-            binding.groupTop3.addView(row, lp)
-        }
+        val any = fillPointGroups(binding.groupTop3, leave = {}, changed = { runCatching { renderShortlist() } })
+        binding.btnTop3Forget.visibility = if (any) View.VISIBLE else View.GONE
     }
 
-    /** Две строки в одной: кто это и насколько он хорош. Ширины хватает, длинный шум переносится. */
-    private fun shortlistRowText(
-        index: Int,
-        entry: ConfigShortlist.Entry,
-        network: String,
-        active: Boolean,
-        up: Boolean,
-        marks: Map<String, PointMark> = emptyMap()
-    ): String {
-        val header = getString(R.string.top3_row, index + 1, entry.endpoint, entry.junk)
-        val result = if (entry.resourcesOk >= 0 && entry.resourcesTotal > 0) {
-            getString(R.string.top3_res, entry.resourcesOk, entry.resourcesTotal)
-        } else if (entry.dataMs >= 0) {
-            // С 1.10.29 каждая точка тройки проверена ответом через туннель — так и пишем, вместо
-            // «изнутри не проверялся», который читался как «неизвестно, работает ли».
-            getString(R.string.top3_row_data, entry.dataMs)
-        } else {
-            getString(R.string.top3_row_unknown)
+    /**
+     * Лучшие точки двумя частями — Wi-Fi и мобильная сеть — одинаково в шторке упрощённого экрана
+     * и в карточке расширенного (с 1.10.30). Раньше в расширенном была только тройка текущей сети:
+     * нажатие переключало, резервная ставилась долгим нажатием — «в расширенном немного другое».
+     * Теперь везде одно и то же:
+     *  • отметка (кружок) — только резервная точка своей сети, туннель не трогается;
+     *  • «Перейти сейчас» — отдельной кнопкой, только у точек текущей сети и не у работающей;
+     *  • «Снять отметку» — у каждой сети своя;
+     *  • у каждой части своя кнопка подбора: Wi-Fi — когда телефон на Wi-Fi, мобильная — и с Wi-Fi.
+     *
+     * [leave] — перед действием, которое уводит с экрана (шторку надо закрыть); [changed] — после
+     * смены отметки. Возвращает true, если есть что показать (точки или работающая точка).
+     */
+    private fun fillPointGroups(container: LinearLayout, leave: () -> Unit, changed: () -> Unit): Boolean {
+        container.removeAllViews()
+        val transport = runCatching { TuningCache.transportOf(this) }.getOrDefault("")
+        val all = runCatching { ConfigShortlist.ordered(this, transport) }.getOrDefault(emptyList())
+        val snap = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
+        val marks = parseMarks(snap?.marks)
+        val up = runCatching { tunnel.isUp }.getOrDefault(false)
+        val live = if (up) runCatching { TunnelDebug.endpoint }.getOrDefault("").trim() else ""
+        val currentGroup = ConfigShortlist.group(transport)
+        val otherGroup = if (currentGroup == ConfigShortlist.GROUP_MOBILE) ConfigShortlist.GROUP_WIFI else ConfigShortlist.GROUP_MOBILE
+        val canScanMobile = currentGroup == ConfigShortlist.GROUP_WIFI && runCatching { CellularNetwork.maybeAvailable(this) }.getOrDefault(false)
+        val density = resources.displayMetrics.density
+        fun dp(v: Int): Int = (v * density).toInt()
+        fun wrap() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        fun caption(text: CharSequence, bottom: Int = 4) = android.widget.TextView(this).apply {
+            this.text = text
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.colorOnSurfaceVariant))
+            setPadding(0, 0, 0, dp(bottom))
         }
-        val age = humanDuration((System.currentTimeMillis() - entry.savedAt).coerceAtLeast(0L))
-        val detail = StringBuilder(getString(R.string.top3_row_detail, result, age))
-        if (active) {
-            detail.append(" · ").append(
-                getString(if (up) R.string.top3_row_active else R.string.top3_row_chosen)
+        fun textAction(text: String, onClick: () -> Unit) = android.widget.TextView(this).apply {
+            // Простая текстовая кнопка цвета темы — как «Снять отметку» в шторке.
+            this.text = text
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelLarge)
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.colorPrimary))
+            setPadding(0, dp(8), dp(16), dp(8))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onClick() }
+        }
+
+        for (group in listOf(currentGroup, otherGroup)) {
+            val entries = all.filter { ConfigShortlist.group(it.network) == group }.take(ConfigShortlist.MAX)
+            val isCurrent = group == currentGroup
+            val title = getString(if (group == ConfigShortlist.GROUP_MOBILE) R.string.sheet_group_mobile else R.string.sheet_group_wifi)
+            container.addView(
+                android.widget.TextView(this).apply {
+                    text = if (isCurrent) getString(R.string.sheet_group_now, title) else title
+                    setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall)
+                    setPadding(0, dp(14), 0, dp(2))
+                }
             )
+            val hint = when {
+                entries.isEmpty() -> getString(R.string.sheet_group_empty)
+                entries.any { it.handshakeOnly } -> getString(R.string.sheet_group_handshake) +
+                    (if (!isCurrent) " " + getString(R.string.sheet_group_other) else "")
+                !isCurrent -> getString(R.string.sheet_group_other)
+                else -> ""
+            }
+            if (hint.isNotBlank()) container.addView(caption(hint))
+            // Подключены к точке не из списка (сохранённый конфиг, ручной сервер): молчать нельзя,
+            // иначе при живом туннеле в списке «ничего не работает».
+            if (isCurrent && live.isNotEmpty() && entries.none { it.endpoint.trim() == live }) {
+                container.addView(caption(dotLine(getString(R.string.points_live_other, live), ContextCompat.getColor(this, R.color.check_ok))))
+            }
+            val backup = prefs.backupFor(group)
+            val radios = ArrayList<MaterialRadioButton>()
+            for (entry in entries) {
+                val ep = entry.endpoint.trim()
+                val row = dev.warpscout.app.databinding.ItemBackupRowBinding.inflate(layoutInflater, container, false)
+                val isLive = isCurrent && ep == live && live.isNotEmpty()
+                // Метки дозора — про текущую сеть: у точек другой сети их не показываем.
+                val state = when {
+                    isLive -> getString(R.string.mark_current)
+                    isCurrent -> markText(ep, marks) ?: getString(R.string.mark_unknown)
+                    else -> getString(R.string.mark_unknown)
+                }
+                val color = when {
+                    isLive -> ContextCompat.getColor(this, R.color.check_ok)
+                    isCurrent -> markColor(ep, marks)
+                    else -> ContextCompat.getColor(this, R.color.state_off)
+                }
+                val line = android.text.SpannableStringBuilder()
+                    .append(ep)
+                    .append("\n")
+                    .append(dotLine(state, color))
+                    .append(" · ")
+                    .append(getString(R.string.sheet_row_junk, entry.junk))
+                if (entry.resourcesOk >= 0 && entry.resourcesTotal > 0) {
+                    line.append(" · ").append(getString(R.string.top3_res, entry.resourcesOk, entry.resourcesTotal))
+                } else if (entry.dataMs >= 0) {
+                    line.append(" · ").append(getString(R.string.sheet_row_data))
+                }
+                if (entry.speedKbps > 0) line.append(" · ").append(SpeedTest.human(entry.speedKbps))
+                row.rowRadio.text = line
+                row.rowRadio.isChecked = ep == backup
+                row.rowRadio.setOnClickListener { clicked ->
+                    radios.forEach { other -> other.isChecked = other === clicked }
+                    // Только запоминаем: туннель не трогаем (просьба «выбрать, но не применять»).
+                    if (prefs.backupFor(group) != ep) {
+                        prefs.setBackupFor(group, ep)
+                        TunnelDebug.stage("резервная точка для сети «${groupName(group)}» выбрана: $ep (туннель не трогаю)")
+                        banner(getString(R.string.backup_set_group, groupName(group), ep))
+                        changed()
+                    }
+                }
+                radios += row.rowRadio
+                // Перейти сейчас — только на точку текущей сети и не на ту, что уже работает.
+                row.rowConnect.visibility = if (isCurrent && !isLive) View.VISIBLE else View.GONE
+                row.rowConnect.setOnClickListener {
+                    leave()
+                    switchToShortlist(entry)
+                }
+                container.addView(row.root)
+            }
+            if (backup.isNotBlank()) {
+                container.addView(
+                    textAction(getString(R.string.sheet_clear_group)) {
+                        if (prefs.backupFor(group).isNotBlank()) toggleBackup(prefs.backupFor(group), group)
+                        changed()
+                    },
+                    wrap()
+                )
+            }
+            // Свой подбор у каждой сети. Wi-Fi подбирается только на Wi-Fi; мобильная — и с Wi-Fi
+            // (через мобильную сеть, не уходя с Wi-Fi), если в телефоне есть SIM.
+            val scanMode = when {
+                isCurrent -> Engine.SCAN_CURRENT
+                group == ConfigShortlist.GROUP_MOBILE && canScanMobile -> Engine.SCAN_MOBILE
+                else -> -1
+            }
+            if (scanMode >= 0) {
+                val label = if (group == ConfigShortlist.GROUP_MOBILE) R.string.points_scan_mobile else R.string.points_scan_wifi
+                container.addView(
+                    com.google.android.material.button.MaterialButton(
+                        this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle
+                    ).apply {
+                        text = getString(label)
+                        setOnClickListener {
+                            leave()
+                            // Подбор гасит туннель на время замеров и возвращает его сам (на новой
+                            // точке, если найдёт), — см. restoreTunnelAfterScan.
+                            startScan(autoConnect = false, mode = scanMode)
+                        }
+                    },
+                    wrap().apply { topMargin = dp(4) }
+                )
+            } else if (group == ConfigShortlist.GROUP_WIFI) {
+                container.addView(caption(getString(R.string.points_scan_wifi_later)))
+            }
         }
-        if (entry.network.isNotBlank() && network.isNotBlank() && entry.network != network) {
-            detail.append(" · ").append(getString(R.string.top3_row_other_network))
-        }
-        // Проверка дозора: молчащую точку видно до нажатия, а не после трёх секунд без туннеля.
-        if (!(active && up)) {
-            markText(entry.endpoint, marks)?.let { detail.append(" · ").append(it) }
-        }
-        if (entry.speedKbps > 0) {
-            detail.append(" · ").append(getString(R.string.top3_row_speed, SpeedTest.human(entry.speedKbps)))
-        } else if (entry.handshakeOnly && entry.dataMs < 0) {
-            detail.append(" · ").append(getString(R.string.top3_row_handshake))
-        }
-        if (entry.endpoint.trim() == prefs.backupFor(ConfigShortlist.group(entry.network))) {
-            detail.append(" · ").append(getString(R.string.simple_backup_title).lowercase())
-        }
-        return header + "\n" + detail
+        return all.isNotEmpty() || live.isNotEmpty()
     }
 
     /**
@@ -3283,18 +3413,51 @@ class MainActivity : AppCompatActivity() {
         s.simpleSendLog.setOnClickListener { runCatching { exportJournal() } }
         speedValueColors = s.simpleSpeedValue.textColors
         s.simpleVersion.text = binding.textVersion.text
-        // Тумблеры вида: в упрощённом — «Расширенный режим», в расширенном — «Упрощённый режим».
-        // Выбор запоминается и переживает перезапуск; экран при этом не пересоздаётся.
+        // Один и тот же тумблер «Расширенный режим» в обоих видах (с 1.10.30): в упрощённом он
+        // выключен, в расширенном включён. Раньше в расширенном стоял «Упрощённый режим», и тумблер
+        // по смыслу менялся местами. Нажали — ползунок переезжает, подпись меняется на
+        // «включено»/«выключено», и через мгновение меняется вид. Выбор запоминается.
         s.simpleModeSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (suppressModeListener || !isChecked) return@setOnCheckedChangeListener
-            prefs.uiMode = Prefs.UI_ADVANCED
-            applyUiMode()
+            showModeLabels(advanced = true)
+            switchUiModeSoon(Prefs.UI_ADVANCED)
         }
         binding.switchSimpleMode.setOnCheckedChangeListener { _, isChecked ->
-            if (suppressModeListener || !isChecked) return@setOnCheckedChangeListener
-            prefs.uiMode = Prefs.UI_SIMPLE
-            applyUiMode()
+            if (suppressModeListener || isChecked) return@setOnCheckedChangeListener
+            showModeLabels(advanced = false)
+            switchUiModeSoon(Prefs.UI_SIMPLE)
         }
+    }
+
+    /** Подписи у тумблеров: «Расширенный режим · включено» / «· выключено». */
+    private fun showModeLabels(advanced: Boolean) {
+        runCatching {
+            val text = getString(
+                R.string.mode_switch_label,
+                getString(R.string.mode_advanced),
+                getString(if (advanced) R.string.mode_state_on else R.string.mode_state_off)
+            )
+            binding.simple.simpleModeLabel.text = text
+            binding.textModeLabel.text = text
+        }
+    }
+
+    /** Сменить вид чуть позже: чтобы было видно, как ползунок переехал (не мгновенный скачок). */
+    private fun switchUiModeSoon(mode: Int) {
+        tunnelHandler.postDelayed({
+            runCatching {
+                if (isFinishing || isDestroyed) return@runCatching
+                // Передумали за эти доли секунды (ползунок вернули назад) — вид не меняем.
+                val still = if (mode == Prefs.UI_ADVANCED) binding.simple.simpleModeSwitch.isChecked
+                else !binding.switchSimpleMode.isChecked
+                if (!still) {
+                    showModeLabels(advanced = !prefs.simpleUi())
+                    return@runCatching
+                }
+                prefs.uiMode = mode
+                applyUiMode()
+            }
+        }, MODE_SWITCH_DELAY_MS)
     }
 
     /**
@@ -3308,10 +3471,17 @@ class MainActivity : AppCompatActivity() {
             binding.pagesFrame.visibility = if (simple) View.GONE else View.VISIBLE
             binding.navBar.visibility = if (simple) View.GONE else View.VISIBLE
             binding.cardConnStatus.visibility = if (simple) View.GONE else View.VISIBLE
+            // Тумблер «Расширенный режим»: в упрощённом виде выключен, в расширенном включён.
             suppressModeListener = true
             binding.simple.simpleModeSwitch.isChecked = false
-            binding.switchSimpleMode.isChecked = false
+            binding.switchSimpleMode.isChecked = true
             suppressModeListener = false
+            binding.simple.simpleModeLabel.text = getString(
+                R.string.mode_switch_label, getString(R.string.mode_advanced), getString(R.string.mode_state_off)
+            )
+            binding.textModeLabel.text = getString(
+                R.string.mode_switch_label, getString(R.string.mode_advanced), getString(R.string.mode_state_on)
+            )
             if (simple) {
                 updateSimple()
                 startSimpleTick()
@@ -3665,123 +3835,22 @@ class MainActivity : AppCompatActivity() {
         val dialog = com.google.android.material.bottomsheet.BottomSheetDialog(this)
         val sheet = dev.warpscout.app.databinding.SheetBackupBinding.inflate(layoutInflater)
         val all = runCatching { ConfigShortlist.load(this) }.getOrDefault(emptyList())
-        val snap = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
-        val marks = parseMarks(snap?.marks)
-        val live = if (tunnel.isUp) TunnelDebug.endpoint.trim() else ""
-        val currentGroup = ConfigShortlist.group(runCatching { TuningCache.transportOf(this) }.getOrDefault(""))
-        val otherGroup = if (currentGroup == ConfigShortlist.GROUP_MOBILE) ConfigShortlist.GROUP_WIFI else ConfigShortlist.GROUP_MOBILE
         sheet.sheetEmpty.visibility = if (all.isEmpty()) View.VISIBLE else View.GONE
-        val density = resources.displayMetrics.density
-        fun dp(v: Int): Int = (v * density).toInt()
-
-        for (group in listOf(currentGroup, otherGroup)) {
-            val entries = all.filter { ConfigShortlist.group(it.network) == group }
-            val isCurrent = group == currentGroup
-            val title = getString(if (group == ConfigShortlist.GROUP_MOBILE) R.string.sheet_group_mobile else R.string.sheet_group_wifi)
-            sheet.sheetRows.addView(
-                android.widget.TextView(this).apply {
-                    text = if (isCurrent) getString(R.string.sheet_group_now, title) else title
-                    setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall)
-                    setPadding(0, dp(14), 0, dp(2))
+        // Части «Wi-Fi» и «Мобильная сеть» — общей функцией с карточкой расширенного вида: выбор
+        // резервной и подбор для каждой сети выглядят и работают одинаково в обоих режимах.
+        // После смены отметки шторка перерисовывается сама: «Снять отметку» появляется и уходит.
+        fun fill() {
+            fillPointGroups(
+                sheet.sheetRows,
+                leave = { dialog.dismiss() },
+                changed = {
+                    runCatching { renderShortlist() }
+                    updateSimple()
+                    runCatching { fill() }
                 }
             )
-            val hint = when {
-                entries.isEmpty() -> getString(R.string.sheet_group_empty)
-                entries.any { it.handshakeOnly } -> getString(R.string.sheet_group_handshake) +
-                    (if (!isCurrent) " " + getString(R.string.sheet_group_other) else "")
-                !isCurrent -> getString(R.string.sheet_group_other)
-                else -> ""
-            }
-            if (hint.isNotBlank()) {
-                sheet.sheetRows.addView(
-                    android.widget.TextView(this).apply {
-                        text = hint
-                        setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
-                        setTextColor(ContextCompat.getColor(this@MainActivity, R.color.colorOnSurfaceVariant))
-                        setPadding(0, 0, 0, dp(4))
-                    }
-                )
-            }
-            val backup = prefs.backupFor(group)
-            val radios = ArrayList<MaterialRadioButton>()
-            for (entry in entries) {
-                val ep = entry.endpoint.trim()
-                val row = dev.warpscout.app.databinding.ItemBackupRowBinding.inflate(layoutInflater, sheet.sheetRows, false)
-                val isLive = isCurrent && ep == live && live.isNotEmpty()
-                // Метки дозора — про текущую сеть: у точек другой сети их не показываем.
-                val state = when {
-                    isLive -> getString(R.string.mark_current)
-                    isCurrent -> markText(ep, marks) ?: getString(R.string.mark_unknown)
-                    else -> getString(R.string.mark_unknown)
-                }
-                val color = when {
-                    isLive -> ContextCompat.getColor(this, R.color.check_ok)
-                    isCurrent -> markColor(ep, marks)
-                    else -> ContextCompat.getColor(this, R.color.state_off)
-                }
-                val line = android.text.SpannableStringBuilder()
-                    .append(ep)
-                    .append("\n")
-                    .append(dotLine(state, color))
-                    .append(" · ")
-                    .append(getString(R.string.sheet_row_junk, entry.junk))
-                if (entry.dataMs >= 0) line.append(" · ").append(getString(R.string.sheet_row_data))
-                if (entry.speedKbps > 0) line.append(" · ").append(SpeedTest.human(entry.speedKbps))
-                row.rowRadio.text = line
-                row.rowRadio.isChecked = ep == backup
-                row.rowRadio.setOnClickListener { clicked ->
-                    radios.forEach { other -> other.isChecked = other === clicked }
-                    // Только запоминаем: туннель не трогаем (просьба «выбрать, но не применять»).
-                    if (prefs.backupFor(group) != ep) {
-                        prefs.setBackupFor(group, ep)
-                        TunnelDebug.stage("резервная точка для сети «${groupName(group)}» выбрана: $ep (туннель не трогаю)")
-                        banner(getString(R.string.backup_set_group, groupName(group), ep))
-                    }
-                }
-                radios += row.rowRadio
-                // Перейти сейчас — только на точку текущей сети и не на ту, что уже работает.
-                row.rowConnect.visibility = if (isCurrent && !isLive) View.VISIBLE else View.GONE
-                row.rowConnect.setOnClickListener {
-                    dialog.dismiss()
-                    switchToShortlist(entry)
-                }
-                sheet.sheetRows.addView(row.root)
-            }
-            if (backup.isNotBlank()) {
-                // «Снять отметку» — простой текстовой кнопкой цвета темы: своя у каждой сети.
-                sheet.sheetRows.addView(
-                    android.widget.TextView(this).apply {
-                        text = getString(R.string.sheet_clear_group)
-                        setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelLarge)
-                        setTextColor(ContextCompat.getColor(this@MainActivity, R.color.colorPrimary))
-                        setPadding(0, dp(8), dp(16), dp(8))
-                        isClickable = true
-                        isFocusable = true
-                        setOnClickListener {
-                            dialog.dismiss()
-                            if (prefs.backupFor(group).isNotBlank()) toggleBackup(prefs.backupFor(group), group)
-                        }
-                    },
-                    LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    )
-                )
-            }
         }
-        // На Wi-Fi тройку для мобильной сети можно подобрать, не уходя с него.
-        val canScanMobile = currentGroup == ConfigShortlist.GROUP_WIFI && CellularNetwork.maybeAvailable(this)
-        sheet.sheetScanMobile.visibility = if (canScanMobile) View.VISIBLE else View.GONE
-        sheet.sheetScanMobile.setOnClickListener {
-            dialog.dismiss()
-            startScan(autoConnect = false, mode = Engine.SCAN_MOBILE)
-        }
-        sheet.sheetRescan.setOnClickListener {
-            dialog.dismiss()
-            // Подбор гасит туннель на время замеров и возвращает его сам (на новой точке, если
-            // найдёт), — см. restoreTunnelAfterScan.
-            startScan(autoConnect = false)
-        }
+        fill()
         dialog.setContentView(sheet.root)
         dialog.setOnDismissListener { updateSimple() }
         dialog.show()
@@ -4011,6 +4080,9 @@ class MainActivity : AppCompatActivity() {
         /** Сколько приложений рисуем сразу: остальные — через поиск (иначе экран «залипает»). */
         const val APP_ROWS_LIMIT = 60
         const val STATE_TAB = "warpscout.tab"
+
+        /** Пауза между переездом ползунка «Расширенный режим» и сменой вида. */
+        const val MODE_SWITCH_DELAY_MS = 280L
 
         const val TAB_START = 0
         const val TAB_CONFIG = 2

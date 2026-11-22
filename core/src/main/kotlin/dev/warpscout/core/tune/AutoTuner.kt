@@ -458,6 +458,7 @@ class AutoTuner(
                     resourcesOk = ok,
                     resourcesTotal = spec.resources.size,
                     speedKbps = speed,
+                    resourceResults = results,
                     config = cand.config.copy(name = "${spec.namePrefix}-${ok}of${spec.resources.size}")
                 )
             )
