@@ -28,7 +28,9 @@ import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.model.WarpAccount
 import dev.warpscout.core.dpi.DpiComparator
 import dev.warpscout.core.model.ResourceCheck
+import dev.warpscout.core.net.CfTrace
 import dev.warpscout.core.net.EndpointPool
+import dev.warpscout.core.net.ExitCheck
 import dev.warpscout.core.net.EndpointSpec
 import dev.warpscout.core.net.HttpClient
 import dev.warpscout.core.net.NetSettings
@@ -158,6 +160,7 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             )
             expect("снимок: старый формат — второй выход выключен", TunnelStatus.fromJson("{}")?.second, TunnelStatus.SECOND_OFF)
             protonFreeChecks()
+            exitCheckChecks()
         }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
@@ -2351,6 +2354,61 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
      * 1.10.31: Proton VPN Free с автопоиском — конфиг узнаётся, список gluetun разбирается, порядок
      * перебора предсказуемый, а смена сервера не закрывает очередь второго выхода.
      */
+    /**
+     * Проверка второго выхода (с 1.10.32): адрес из таблицы второго выхода, честный разбор ответа
+     * (через WARP — не «Россия»), строка для настроек и прежний её формат, сырой HTTP.
+     */
+    private fun exitCheckChecks() {
+        val router = ExitRouter.of(listOf("104.18.32.0/24", "2606:4700:4400::ac40:9bd1/128"))
+        expect("выход: из адресов сайта берётся тот, что во втором выходе",
+            ExitCheck.pickRouted(listOf("172.64.155.209", "104.18.32.47"), router), "104.18.32.47")
+        expect("выход: IPv4 раньше IPv6",
+            ExitCheck.pickRouted(listOf("2606:4700:4400::ac40:9bd1", "104.18.32.47"), router), "104.18.32.47")
+        expect("выход: IPv6 — если IPv4 в таблице нет",
+            ExitCheck.pickRouted(listOf("2606:4700:4400::ac40:9bd1", "172.64.155.209"), router), "2606:4700:4400::ac40:9bd1")
+        check("выход: ни один адрес не в таблице — null",
+            ExitCheck.pickRouted(listOf("172.64.155.209", "мусор", ""), router) == null)
+
+        val nl = CfTrace.parse("fl=1\nh=chatgpt.com\nip=185.107.56.3\nloc=NL\ncolo=AMS\nwarp=off\n")
+        val warp = CfTrace.parse("fl=1\nip=2a09:bac1::1\nloc=RU\ncolo=HEL\nwarp=on\n")
+        val ru = CfTrace.parse("fl=1\nip=95.24.1.1\nloc=RU\ncolo=HEL\nwarp=off\n")
+        val vNl = ExitCheck.verdict(nl, null, 1000L, 230)
+        check("выход: ответ из NL мимо WARP — успех", vNl.code == "NL" && vNl.ok && vNl.detail == "185.107.56.3" && vNl.ms == 230, vNl.toString())
+        val vW = ExitCheck.verdict(warp, null, 1000L, 90)
+        check("выход: ответ через WARP — не «Россия», а «ушло через WARP»", vW.code == ExitCheck.VIA_WARP && !vW.ok, vW.toString())
+        val vRu = ExitCheck.verdict(ru, null, 1000L, 50)
+        check("выход: свой сервер в России — «RU», не успех", vRu.code == "RU" && !vRu.ok, vRu.toString())
+        val vFail = ExitCheck.verdict(null, "SocketTimeoutException", 1000L)
+        check("выход: нет ответа — причина словами", vFail.code == ExitCheck.FAIL && vFail.detail == "SocketTimeoutException", vFail.toString())
+        expect("выход: ответ без страны — не успех", ExitCheck.verdict(CfTrace.parse("ip=1.2.3.4\ncolo=AMS"), null, 1L).code, ExitCheck.FAIL)
+
+        expect("выход: строка для настроек — туда и обратно", ExitCheck.decode(vNl.encode()), vNl)
+        expect("выход: прежняя строка без мс читается", ExitCheck.decode("DE|1.2.3.4|1700000000000"),
+            ExitCheck.Result("DE", "1.2.3.4", 1700000000000L, -1))
+        expect("выход: причина с «|» не ломает строку",
+            ExitCheck.decode(ExitCheck.Result(ExitCheck.FAIL, "a|b", 5L).encode())?.detail, "a/b")
+        check("выход: пустая или битая строка — проверки не было",
+            ExitCheck.decode("") == null && ExitCheck.decode("NL|x") == null && ExitCheck.decode("NL|x|не-время") == null)
+
+        val plain = ExitCheck.parseHttp("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nip=1.2.3.4\nloc=NL\nwarp=off\n".toByteArray())
+        check("выход: HTTP-ответ разобран", plain.code == 200 && CfTrace.parse(plain.body)?.loc == "NL", plain.toString())
+        val body = "ip=1.2.3.4\nloc=DE\nwarp=off\n"
+        val chunked = ExitCheck.parseHttp(
+            ("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" +
+                Integer.toHexString(11) + "\r\n" + body.substring(0, 11) + "\r\n" +
+                Integer.toHexString(body.length - 11) + "\r\n" + body.substring(11) + "\r\n0\r\n\r\n").toByteArray()
+        )
+        check("выход: ответ по частям (chunked) склеен", chunked.code == 200 && chunked.body == body, chunked.toString())
+        expect("выход: код ошибки виден", ExitCheck.parseHttp("HTTP/1.1 403 Forbidden\r\n\r\nno".toByteArray()).code, 403)
+        expect("выход: не HTTP — код -1", ExitCheck.parseHttp("<html>portal</html>".toByteArray()).code, -1)
+
+        val seen = java.util.Collections.synchronizedList(mutableListOf<Int>())
+        val resolved = AllowListPlanner.resolveAll(listOf("a.test", "b.test", "c.test"), resolve = { listOf("1.1.1.1") }, threads = 2) { n, total ->
+            if (total == 3) seen += n
+        }
+        check("DoH: ход «готово N из M» — по каждому домену", resolved.size == 3 && seen.sorted() == listOf(1, 2, 3), seen.toString())
+    }
+
     private fun protonFreeChecks() {
         val key1 = "1fGFZtHU8r8qwdnron9E80NdvLw5WcUdhPgh7phzQnA="
         val key2 = "cFWV9L1uNf/u4Hiojt0u4G4E4I12WB65JRq7nkHl0ns="

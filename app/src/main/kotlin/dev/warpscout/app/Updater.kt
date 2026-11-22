@@ -1,18 +1,28 @@
 package dev.warpscout.app
 
+import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import dev.warpscout.core.json.JsonVal
 import dev.warpscout.core.json.parseJson
-import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
 
 /**
- * «Обновления» (с 1.10.31): только по нажатию — проверить последний релиз на GitHub, скачать APK
- * своей сборки (scout или tunnel) и отдать установщику Android. Ключ подписи у всех версий один,
- * поэтому новая ставится поверх, с настройками.
+ * «Обновления» (с 1.10.31): только по нажатию — проверить последний релиз на GitHub и скачать APK
+ * своей сборки (scout или tunnel). Ключ подписи у всех версий один, поэтому новая ставится поверх,
+ * с настройками.
+ *
+ * С 1.10.32 скачивает системная загрузка Android — в «Загрузки», с уведомлением «Загрузка
+ * завершена», — а ставит человек нажатием на файл (или на уведомление). В 1.10.31 WarpScout ставил
+ * APK сам, для этого нужно было разрешение «Установка приложений», и «Защита приложений» Samsung
+ * (движок McAfee) назвала 1.10.31 вредоносной: приложение, которое само скачивает и ставит другие
+ * APK, для антивируса выглядит как «загрузчик» вирусов. Без разрешения ставить нечем — и не за что
+ * подозревать.
  *
  * Сначала спрашиваем API GitHub: там размер файла и коммит тега (по нему видна пересборка той же
  * версии). Но лимит API без входа — 60 запросов в час на адрес, а адрес выхода WARP общий на многих
@@ -48,6 +58,9 @@ object Updater {
     class BadHash : Exception("контрольная сумма не сошлась")
 
     fun apkName(version: String, flavor: String): String = "WarpScout-$version-$flavor.apk"
+
+    /** Состояние системной загрузки: [status] — DownloadManager.STATUS_*, байты — сколько из скольких. */
+    data class Download(val status: Int, val done: Long, val total: Long, val reason: Int)
 
     fun check(currentVersion: String, buildRev: String, flavor: String): Check {
         val viaApi = runCatching { latestFromApi(flavor) }
@@ -134,55 +147,72 @@ object Updater {
     }
 
     /**
-     * Скачать APK в [dir] (старые скачанные удаляются) и сверить с SHA256SUMS.txt релиза, если он
-     * есть. [progress] — проценты (или -1, если размер неизвестен).
+     * Поставить APK в системную загрузку: файл ляжет в «Загрузки», по окончании Android покажет
+     * уведомление «Загрузка завершена». null — системная загрузка недоступна: на Android 8–9 ей
+     * нужно разрешение на запись в память, которого у нас нет, — тогда качает браузер
+     * ([browserIntent]).
      */
-    fun download(release: Release, dir: File, progress: (Int) -> Unit): File {
-        dir.mkdirs()
-        dir.listFiles()?.forEach { runCatching { it.delete() } }
-        val target = File(dir, release.apkName)
-        val part = File(dir, release.apkName + ".part")
-        val conn = (URL(release.apkUrl).openConnection() as HttpURLConnection).apply {
-            instanceFollowRedirects = true
-            connectTimeout = 15_000
-            readTimeout = 30_000
-            setRequestProperty("User-Agent", userAgent())
+    fun enqueue(context: Context, release: Release): Long? {
+        if (Build.VERSION.SDK_INT < 29) return null
+        val dm = context.getSystemService(DownloadManager::class.java) ?: return null
+        // Тип файла не задаём: GitHub отдаёт его сам (в переадресации на файл релиза стоит
+        // response-content-type APK), и по нему нажатие на «Загрузка завершена» открывает установщик.
+        val request = DownloadManager.Request(Uri.parse(release.apkUrl))
+            .setTitle(release.apkName)
+            .setDescription("WarpScout ${release.version}")
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, release.apkName)
+            .addRequestHeader("User-Agent", userAgent())
+        return dm.enqueue(request)
+    }
+
+    /** Как идёт загрузка [id]; null — её нет (отменили в шторке или удалили файл). */
+    fun query(context: Context, id: Long): Download? {
+        val dm = context.getSystemService(DownloadManager::class.java) ?: return null
+        dm.query(DownloadManager.Query().setFilterById(id))?.use { c ->
+            if (!c.moveToFirst()) return null
+            fun long(column: String): Long = c.getColumnIndex(column).takeIf { it >= 0 }?.let { c.getLong(it) } ?: 0L
+            return Download(
+                status = long(DownloadManager.COLUMN_STATUS).toInt(),
+                done = long(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR),
+                total = long(DownloadManager.COLUMN_TOTAL_SIZE_BYTES),
+                reason = long(DownloadManager.COLUMN_REASON).toInt(),
+            )
         }
+        return null
+    }
+
+    /**
+     * Сверить скачанный файл с SHA256SUMS.txt релиза: true — совпало, false — файл испорчен,
+     * null — сверить не с чем (списка нет или он не скачался).
+     */
+    fun verify(context: Context, id: Long, release: Release): Boolean? {
+        val expected = release.sumsUrl?.let { url -> runCatching { expectedHash(url, release.apkName) }.getOrNull() }
+            ?: return null
+        val dm = context.getSystemService(DownloadManager::class.java) ?: return null
         val digest = MessageDigest.getInstance("SHA-256")
-        try {
-            val code = conn.responseCode
-            if (code !in 200..299) error("HTTP $code")
-            val total = conn.contentLengthLong.takeIf { it > 0 } ?: release.size
-            var done = 0L
-            conn.inputStream.use { input ->
-                part.outputStream().use { out ->
-                    val buf = ByteArray(64 * 1024)
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        out.write(buf, 0, n)
-                        digest.update(buf, 0, n)
-                        done += n
-                        progress(if (total > 0) ((done * 100) / total).toInt().coerceIn(0, 100) else -1)
-                    }
+        dm.openDownloadedFile(id).use { pfd ->
+            java.io.FileInputStream(pfd.fileDescriptor).use { input ->
+                val buf = ByteArray(64 * 1024)
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    digest.update(buf, 0, n)
                 }
             }
-            if (total > 0 && done != total) error("скачано $done из $total байт")
-        } finally {
-            runCatching { conn.disconnect() }
         }
         val hash = digest.digest().joinToString("") { "%02x".format(it) }
-        val expected = release.sumsUrl?.let { url -> runCatching { expectedHash(url, release.apkName) }.getOrNull() }
-        if (expected != null && !expected.equals(hash, ignoreCase = true)) {
-            runCatching { part.delete() }
-            throw BadHash()
-        }
-        if (target.exists()) target.delete()
-        if (!part.renameTo(target)) {
-            part.copyTo(target, overwrite = true)
-            part.delete()
-        }
-        return target
+        return expected.equals(hash, ignoreCase = true)
+    }
+
+    /** Файл загрузки на месте (его не удалили из «Загрузок» руками). */
+    fun fileExists(context: Context, id: Long): Boolean = runCatching {
+        context.getSystemService(DownloadManager::class.java)?.openDownloadedFile(id)?.close() != null
+    }.getOrDefault(false)
+
+    /** Убрать загрузку вместе с файлом (испорченный файл ставить нельзя). */
+    fun remove(context: Context, id: Long) {
+        runCatching { context.getSystemService(DownloadManager::class.java)?.remove(id) }
     }
 
     /** Строка «<sha256>  <имя>» из SHA256SUMS.txt; null — файла нет в списке. */
@@ -193,13 +223,15 @@ object Updater {
         ?.split(Regex("\\s+"))?.firstOrNull()
         ?.takeIf { it.length == 64 }
 
-    /** Установщик Android для скачанного файла (через FileProvider: file:// он не принимает). */
-    fun installIntent(context: Context, file: File): Intent {
-        val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-        return Intent(Intent.ACTION_VIEW)
-            .setDataAndType(uri, "application/vnd.android.package-archive")
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-    }
+    /**
+     * Список загрузок Android. Нажатие на файл там открывает установщик — и ставит обновление тот,
+     * кто открыл файл («Загрузки»), а не WarpScout.
+     */
+    fun downloadsIntent(): Intent = Intent(DownloadManager.ACTION_VIEW_DOWNLOADS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    /** Android 8–9: скачать браузером (см. [enqueue]). */
+    fun browserIntent(release: Release): Intent =
+        Intent(Intent.ACTION_VIEW, Uri.parse(release.apkUrl)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
     private fun get(url: String, api: Boolean): String {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {

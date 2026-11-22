@@ -1,10 +1,13 @@
 package dev.warpscout.app
 
 import android.content.Context
+import android.os.Build
 import dev.warpscout.core.lists.AllowListPlanner
 import dev.warpscout.core.lists.AllowLists
 import dev.warpscout.core.lists.SiteList
 import dev.warpscout.core.net.CfTrace
+import dev.warpscout.core.net.ExitCheck
+import dev.warpscout.core.tunnel.ExitRouter
 
 /**
  * Сайты второго выхода — сами (с 1.10.31).
@@ -17,6 +20,8 @@ import dev.warpscout.core.net.CfTrace
  *
  * Проверка выхода — запрос `chatgpt.com/cdn-cgi/trace`: chatgpt.com всегда идёт через второй выход
  * (его адреса добавляются в любом случае), а ответ Cloudflare говорит, из какой страны пришёл запрос.
+ * С 1.10.32 — на адрес, который точно лежит в таблице второго выхода, и с честным разбором ответа
+ * (см. ExitCheck): «ушло через WARP» больше не выдаётся за «свой сервер в России».
  */
 object SecondRoutes {
 
@@ -55,9 +60,12 @@ object SecondRoutes {
 
     /**
      * Собрать адреса: скачать нужные списки (нет в кеше или старше недели), домены → адреса через
-     * DoH. Долго (секунды–минута) и с сетью — звать не из UI-потока.
+     * DoH. Долго (секунды–минута) и с сетью — звать не из UI-потока. [progress] (с 1.10.32) —
+     * «адреса найдены у N из M сайтов», из потоков DoH: по нему кнопка показывает, что работа идёт.
+     * Он стоит перед [log]: прежние вызовы `build(…) { строка -> … }` отдают лямбду последнему
+     * параметру — журналу, как и раньше.
      */
-    fun build(context: Context, prefs: Prefs, log: (String) -> Unit): Result {
+    fun build(context: Context, prefs: Prefs, progress: ((Int, Int) -> Unit)? = null, log: (String) -> Unit): Result {
         val repo = AllowListsRepo(context)
         val ids = prefs.secondSources.filter { AllowLists.byId[it] != null }.sortedBy { SOURCES.indexOf(it) }
         val now = System.currentTimeMillis()
@@ -85,7 +93,7 @@ object SecondRoutes {
         listHosts.removeAll(ownHosts)
         val all = ownHosts.toList() + listHosts.toList()
         log("второй выход: разворачиваю ${all.size} сайтов в адреса через DoH…")
-        val resolved = AllowListPlanner.resolveAll(all)
+        val resolved = AllowListPlanner.resolveAll(all, progress = progress)
         val first = SiteList.cidrs(
             SiteList.Parsed(emptyList(), own.prefixes, emptyList()),
             resolved.filterKeys { it in ownHosts }
@@ -120,26 +128,76 @@ object SecondRoutes {
     }
 
     /**
-     * Из какой страны выходит второй выход: запрос через туннель к chatgpt.com (его адреса —
-     * во втором выходе). Строка для [Prefs.secondCheck]: «DE|адрес|время» или «!|причина|время».
+     * Из какой страны выходит второй выход (с 1.10.32 — точно): запрос через туннель к chatgpt.com,
+     * но на тот его адрес, что лежит в таблице второго выхода, и с именем сайта в TLS. В 1.10.31
+     * адрес выбирала система: не совпал с собранными — запрос шёл через WARP, и экран писал «свой
+     * сервер отвечает из России». Строка для [Prefs.secondCheck] — см. ExitCheck.Result.
+     * С сетью и до 7 с — не из UI-потока.
      */
-    fun checkExit(): String {
+    fun checkExit(context: Context, prefs: Prefs): String {
         val now = System.currentTimeMillis()
-        val result = runCatching {
-            val conn = java.net.URL(CHECK_URL).openConnection() as java.net.HttpURLConnection
-            conn.connectTimeout = 7000
-            conn.readTimeout = 7000
-            conn.instanceFollowRedirects = false
-            try {
-                conn.inputStream.bufferedReader().use { it.readText().take(4096) }
-            } finally {
-                runCatching { conn.disconnect() }
-            }
+        val router = ExitRouter.of(ExitRouter.parse(prefs.secondCidrs))
+        if (router.isEmpty) return ExitCheck.Result(ExitCheck.FAIL, "адресов второго выхода нет", now).encode()
+        // Адрес chatgpt.com — сначала как его видит телефон, потом через DoH (так собирались адреса).
+        val system = runCatching {
+            java.net.InetAddress.getAllByName(CHECK_HOST).mapNotNull { it.hostAddress }
+        }.getOrDefault(emptyList())
+        val ip = ExitCheck.pickRouted(system, router)
+            ?: ExitCheck.pickRouted(runCatching { AllowListPlanner.dohResolve(CHECK_HOST) }.getOrDefault(emptyList()), router)
+            ?: return ExitCheck.Result(ExitCheck.FAIL, "адрес $CHECK_HOST не попал во второй выход — обновите адреса", now).encode()
+        // Адрес в таблице есть, но не в маршрутах туннеля (раздельный режим, адреса собраны после
+        // подключения): запрос ушёл бы мимо туннеля. Так и говорим — нужно переподключение.
+        if (vpnCovers(context, ip) == false) return ExitCheck.Result(ExitCheck.NOT_ROUTED, ip, now).encode()
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        val body = runCatching {
+            ExitCheck.fetchTrace(
+                ip, CHECK_HOST, 7000, "WarpScout/${BuildConfig.VERSION_NAME}",
+                verify = { host, session -> javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier().verify(host, session) }
+            )
         }
-        val trace = CfTrace.parse(result.getOrNull())
-        return when {
-            trace != null && trace.loc.isNotBlank() -> "${trace.loc}|${trace.ip}|$now"
-            else -> "!|" + (result.exceptionOrNull()?.javaClass?.simpleName ?: "ответ не похож на Cloudflare") + "|$now"
+        val ms = (android.os.SystemClock.elapsedRealtime() - t0).toInt()
+        val error = body.exceptionOrNull()?.let { (it.message ?: it.javaClass.simpleName).take(90) }
+        return ExitCheck.verdict(CfTrace.parse(body.getOrNull()), error, now, ms).encode()
+    }
+
+    /**
+     * Маршруты работающего VPN (только обычные, unicast); null — VPN не найден или Android их не
+     * отдал. В раздельном режиме адреса второго выхода попадают в маршруты только при подключении:
+     * собранные позже ждут переподключения.
+     */
+    private fun vpnRoutes(context: Context): List<android.net.RouteInfo>? = runCatching {
+        val cm = context.getSystemService(android.net.ConnectivityManager::class.java) ?: return null
+        @Suppress("DEPRECATION")
+        val vpn = cm.allNetworks.firstOrNull { n ->
+            cm.getNetworkCapabilities(n)?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true
+        } ?: return null
+        cm.getLinkProperties(vpn)?.routes.orEmpty()
+            .filter { r -> Build.VERSION.SDK_INT < 29 || r.type == android.net.RouteInfo.RTN_UNICAST }
+            .ifEmpty { null }
+    }.getOrNull()
+
+    /** Адрес-запись («104.18.32.47», «1.2.3.0/24») → InetAddress без DNS; null — не адрес. */
+    private fun addressOf(text: String): java.net.InetAddress? {
+        val host = text.substringBefore('/').trim()
+        // Сначала — что это запись адреса: ipBytes на имени сайта пошёл бы в DNS.
+        if (!ExitCheck.isIpLiteral(host)) return null
+        val bytes = ExitRouter.ipBytes(host) ?: return null
+        return runCatching { java.net.InetAddress.getByAddress(bytes) }.getOrNull()
+    }
+
+    /** Входит ли адрес в маршруты VPN: true / false; null — не узнать (VPN не найден). */
+    fun vpnCovers(context: Context, ip: String): Boolean? {
+        val routes = vpnRoutes(context) ?: return null
+        val addr = addressOf(ip) ?: return null
+        return routes.any { runCatching { it.matches(addr) }.getOrDefault(false) }
+    }
+
+    /** Сколько адресов из [cidrs] не входит в маршруты VPN; null — не узнать. Маршруты берутся один раз. */
+    fun uncovered(context: Context, cidrs: Collection<String>): Int? {
+        val routes = vpnRoutes(context) ?: return null
+        return cidrs.count { cidr ->
+            val addr = addressOf(cidr) ?: return@count false
+            routes.none { runCatching { it.matches(addr) }.getOrDefault(false) }
         }
     }
 }

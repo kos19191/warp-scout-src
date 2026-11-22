@@ -42,6 +42,11 @@ object Availability {
 
     private fun file(context: Context, via: String) = File(context.filesDir, "availability-$via.txt")
 
+    /** Сброс по умолчанию (с 1.10.32): забыть итоги проверок доступности (через туннель и без). */
+    fun forgetAll(context: Context) {
+        listOf(VIA_TUNNEL, VIA_DIRECT).forEach { via -> runCatching { file(context, via).delete() } }
+    }
+
     /** Разделитель полей в файле — из текста убираем, переводы строк тоже. */
     private fun clean(s: String): String = s.replace('|', '/').replace('\n', ' ').replace('\r', ' ').trim()
 

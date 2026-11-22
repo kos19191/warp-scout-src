@@ -56,6 +56,11 @@ object NoiseMemory {
     fun preferred(context: Context, net: String): String? =
         runCatching { NoiseBook.preferred(read(file(context)), net, System.currentTimeMillis()) }.getOrNull()
 
+    /** Сброс по умолчанию (с 1.10.32): забыть, какой шум где замерзал. */
+    fun forgetAll(context: Context) {
+        synchronized(lock) { runCatching { file(context).delete() } }
+    }
+
     private fun file(context: Context): File = File(context.applicationContext.filesDir, FILE)
 
     private fun read(f: File): List<NoiseBook.Event> = runCatching {

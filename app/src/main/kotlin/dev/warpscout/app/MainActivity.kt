@@ -30,6 +30,7 @@ import dev.warpscout.core.lists.AllowListPlanner
 import dev.warpscout.core.lists.ProtonFree
 import dev.warpscout.core.lists.SiteList
 import dev.warpscout.core.model.WarpConfig
+import dev.warpscout.core.net.ExitCheck
 import dev.warpscout.core.net.SpeedTest
 import dev.warpscout.core.net.WarpDefaults
 import dev.warpscout.core.presets.Presets
@@ -37,6 +38,7 @@ import dev.warpscout.core.report.ConfigExport
 import dev.warpscout.core.report.Report
 import dev.warpscout.core.tune.ProgressSink
 import dev.warpscout.core.tune.TuningResult
+import dev.warpscout.core.tunnel.ExitRouter
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
@@ -218,6 +220,16 @@ class MainActivity : AppCompatActivity() {
             shown = this
             // Подбор мог идти, пока экран создавался заново: показываем его и даём остановить.
             syncScanUi(fresh = true)
+            // Экран создан заново после сброса по умолчанию (с 1.10.32): говорим, что дальше.
+            // Плашку через секунду может сменить «приложения по умолчанию» — поэтому и всплывающей строкой.
+            afterResetNote?.let { note ->
+                afterResetNote = null
+                banner(note)
+                toast(note)
+            }
+            // APK, скачанный «Обновлениями» 1.10.31 в кеш приложения, больше не нужен: с 1.10.32
+            // обновление качается в «Загрузки» (см. Updater). 11 МБ не должны лежать вечно.
+            runCatching { File(cacheDir, "updates").takeIf { it.exists() }?.deleteRecursively() }
         } catch (t: Throwable) {
             SafeMode.show(this, t, "запуск интерфейса")
         }
@@ -242,14 +254,16 @@ class MainActivity : AppCompatActivity() {
         screenResumed = false
         // Свои сайты для «Доступности» — сохраняем и без кнопки «Сохранить»: набрал список и ушёл
         // из приложения — список не должен пропасть (с 1.10.30).
-        if (uiReady()) runCatching {
+        // Во время сброса по умолчанию (с 1.10.32) экран пересоздаётся: старые поля не должны
+        // записаться обратно в только что очищенные настройки.
+        if (uiReady() && !resetInProgress) runCatching {
             prefs.availCustom = binding.editAvailCustom.text?.toString()?.trim().orEmpty()
         }
         stopTunnelPolling()
         tunnelHandler.removeCallbacks(bannerHide)
         tunnelHandler.removeCallbacks(simpleTick)
         // Отложенное «изменено…» — сразу, а не после ухода с экрана.
-        dirtyLater?.let { tunnelHandler.removeCallbacks(it); it.run() }
+        dirtyLater?.let { tunnelHandler.removeCallbacks(it); if (!resetInProgress) it.run() }
         super.onPause()
     }
 
@@ -298,8 +312,6 @@ class MainActivity : AppCompatActivity() {
             // Список бесплатных серверов Proton — раз в неделю.
             refreshProtonIfStale()
             updateSecondState()
-            // Вернулись из настроек «Установка неизвестных приложений» — ставим скачанное обновление.
-            resumePendingInstall()
         }.onFailure { t ->
             TunnelDebug.error("обновление экрана: " + SafeMode.describe(t))
             runCatching { banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true) }
@@ -1528,7 +1540,21 @@ class MainActivity : AppCompatActivity() {
             updateSecondState()
             markSettingsDirty(getString(R.string.dirty_second_exit))
         }
-        binding.btnSecondResolve.setOnClickListener { refreshSecondNow() }
+        binding.btnSecondResolve.setOnClickListener {
+            runCatching { refreshSecondNow() }.onFailure { t ->
+                secondBusy = false
+                binding.btnSecondResolve.isEnabled = true
+                TunnelDebug.error("второй выход: " + SafeMode.describe(t))
+                secondDone(getString(R.string.banner_ui_error, SafeMode.describe(t)), RES_FAIL)
+            }
+        }
+        // Сброс по умолчанию (с 1.10.32): всё как после установки — после подтверждения.
+        binding.btnResetAll.setOnClickListener {
+            runCatching { confirmResetAll() }.onFailure { t ->
+                TunnelDebug.error("сброс: " + SafeMode.describe(t))
+                banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+            }
+        }
         binding.switchSecondViaWarp.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked == prefs.secondViaWarp) return@setOnCheckedChangeListener
             prefs.secondViaWarp = isChecked
@@ -2296,47 +2322,265 @@ class MainActivity : AppCompatActivity() {
         else -> R.string.second_src_google_ai
     }
 
+    // ------------------------------------------- второй выход: кнопка с ходом и итогом (с 1.10.32)
+
+    /** Кнопка «Обновить адреса и проверить выход» работает — второй раз не запускаем. */
+    private var secondBusy = false
+
+    /** Что уже сделано кнопкой (адреса собраны…) — начало итоговой строки. */
+    private var secondBuilt = ""
+
+    /** По итогу кнопки предложить переподключение (новые адреса вне маршрутов, второго выхода нет в сессии). */
+    private var secondWantReconnect = false
+
+    /** Шаг работы — строкой под кнопкой, с полосой хода. */
+    private fun secondProgress(text: String) {
+        if (!uiReady()) return
+        runCatching {
+            binding.progressSecond.visibility = View.VISIBLE
+            binding.textSecondResult.visibility = View.VISIBLE
+            binding.textSecondResult.setTextColor(ContextCompat.getColor(this, R.color.colorOnSurfaceVariant))
+            binding.textSecondResult.text = text
+        }
+    }
+
+    /** Итог: цветная точка (зелёная — работает, красная — нет, жёлтая — нужно действие, серая — к сведению). */
+    private fun secondDone(text: String, kind: Int) {
+        if (!uiReady()) return
+        runCatching {
+            binding.progressSecond.visibility = View.GONE
+            binding.textSecondResult.visibility = View.VISIBLE
+            binding.textSecondResult.setTextColor(ContextCompat.getColor(this, R.color.colorOnSurface))
+            val color = ContextCompat.getColor(
+                this,
+                when (kind) {
+                    RES_OK -> R.color.check_ok
+                    RES_FAIL -> R.color.check_fail
+                    RES_WARN -> R.color.orb_warn
+                    else -> R.color.state_off
+                }
+            )
+            binding.textSecondResult.text = dotLine(text, color)
+        }
+    }
+
+    /** Кнопка закончила: итог под кнопкой, кнопка снова доступна, при нужде — предложить переподключение. */
+    private fun finishSecond(text: String, kind: Int) {
+        secondBusy = false
+        val reconnect = secondWantReconnect
+        secondWantReconnect = false
+        if (!uiReady()) return
+        binding.btnSecondResolve.isEnabled = true
+        secondDone(text, kind)
+        updateSecondState()
+        TunnelDebug.stage("второй выход: итог — " + text.replace('\n', ' '))
+        if (reconnect) offerSecondReconnect()
+    }
+
     /**
-     * «Обновить адреса и проверить выход»: собрать адреса сейчас (списки + свои сайты, DoH),
-     * обновить таблицу работающего туннеля без переподключения и проверить страну выхода.
+     * «Обновить адреса и проверить выход». Три шага, каждый виден под кнопкой:
+     *  1) собрать адреса сайтов второго выхода (списки + свои сайты, DoH) — с ходом «N из M»;
+     *  2) отдать новую таблицу работающему туннелю без переподключения;
+     *  3) проверить, из какой страны выходит запрос (ExitCheck: на адрес из таблицы второго выхода).
+     * Итог — цветной строкой прямо под кнопкой: что сделано, работает ли второй выход и что делать,
+     * если нет. В 1.10.31 итог уходил в плашку на «Главной» — с «Настроек» её не видно, и человек
+     * не понимал, работает ли кнопка (22.11).
      */
     private fun refreshSecondNow() {
         persistUi()
-        if (!prefs.secondExitOn || prefs.secondConf.isBlank()) {
-            updateSecondState()
-            banner(binding.textSecondState.text.toString(), error = true)
+        if (secondBusy) {
+            toast(getString(R.string.second_busy))
             return
         }
+        val conf = prefs.secondConf
+        when {
+            !prefs.secondExitOn -> {
+                secondDone(getString(R.string.second_res_off), RES_FAIL)
+                return
+            }
+            conf.isBlank() -> {
+                secondDone(getString(R.string.second_need_conf), RES_FAIL)
+                return
+            }
+            runCatching { WgConf.toWarpConfig("второй выход", conf) }.getOrNull() == null -> {
+                secondDone(getString(R.string.second_bad_conf), RES_FAIL)
+                return
+            }
+        }
+        secondBusy = true
+        secondBuilt = ""
+        secondWantReconnect = false
         binding.btnSecondResolve.isEnabled = false
-        binding.textSecondState.text = getString(R.string.second_resolving)
+        secondProgress(getString(R.string.second_step_lists))
+        TunnelDebug.stage("второй выход: кнопка «Обновить адреса и проверить выход»")
+        val before = ExitRouter.parse(prefs.secondCidrs).toSet()
+        val upAtStart = tunnel.supported && tunnel.isUp
+        val lastShown = java.util.concurrent.atomic.AtomicLong(0L)
         Thread {
-            val result = runCatching { SecondRoutes.build(this, prefs) { line -> runOnUiThread { sink().log(line) } } }
+            val result = runCatching {
+                SecondRoutes.build(
+                    this, prefs,
+                    log = { line -> runOnUiThread { sink().log(line) } },
+                    progress = { done, total ->
+                        // Строку хода обновляем не чаще четырёх раз в секунду: доменов сотни.
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        val prev = lastShown.get()
+                        if ((done == total || now - prev >= 250L) && lastShown.compareAndSet(prev, now)) {
+                            runOnUiThread { if (secondBusy) secondProgress(getString(R.string.second_step_resolve, done, total)) }
+                        }
+                    }
+                )
+            }
             val changed = result.getOrNull()?.let { SecondRoutes.save(prefs, it) } ?: false
+            val after = ExitRouter.parse(prefs.secondCidrs).toSet()
+            val added = after - before
+            val removed = before - after
+            // Новые адреса вне маршрутов туннеля (раздельный режим) заработают только после
+            // переподключения: считаем их здесь, вне главного потока.
+            val outside = if (changed && upAtStart) SecondRoutes.uncovered(this, added) else 0
             runOnUiThread {
-                if (!uiReady()) return@runOnUiThread
-                binding.btnSecondResolve.isEnabled = true
-                result.onSuccess { r ->
-                    banner(getString(R.string.second_resolved, r.note()))
-                    TunnelDebug.stage("второй выход: ${r.note()}")
-                    if (changed && tunnel.supported && tunnel.isUp) tunnel.reloadSecondRoutes()
-                }.onFailure { banner(it.message ?: it.javaClass.simpleName, error = true) }
-                updateSecondState()
-                runSecondCheck()
+                if (!uiReady()) {
+                    secondBusy = false
+                    return@runOnUiThread
+                }
+                runCatching { afterSecondBuild(result, changed, added.size, removed.size, outside) }.onFailure { t ->
+                    TunnelDebug.error("второй выход: " + SafeMode.describe(t))
+                    finishSecond(getString(R.string.banner_ui_error, SafeMode.describe(t)), RES_FAIL)
+                }
             }
         }.apply { isDaemon = true; name = "warpscout-second" }.start()
+    }
+
+    /** Шаг 2: адреса собраны — отдать туннелю и перейти к проверке выхода. */
+    private fun afterSecondBuild(result: Result<SecondRoutes.Result>, changed: Boolean, added: Int, removed: Int, outside: Int?) {
+        val r = result.getOrElse { t ->
+            finishSecond(getString(R.string.second_res_build_failed, t.message ?: t.javaClass.simpleName), RES_FAIL)
+            return
+        }
+        if (r.cidrs.isEmpty()) {
+            finishSecond(getString(R.string.second_res_no_cidrs, r.note()), RES_FAIL)
+            return
+        }
+        secondBuilt = getString(R.string.second_res_built, r.note()) + " · " +
+            if (changed) getString(R.string.second_res_diff, added, removed) else getString(R.string.second_res_same)
+        updateSecondState()
+        if (!tunnel.supported || !tunnel.isUp) {
+            finishSecond(secondBuilt + "\n" + getString(R.string.second_res_tunnel_off), RES_INFO)
+            return
+        }
+        if (changed && (outside ?: 0) > 0) {
+            secondBuilt += "\n" + getString(R.string.second_res_need_reconnect, outside ?: 0)
+            secondWantReconnect = true
+        }
+        if (!changed) {
+            waitSecondThenCheck(0)
+            return
+        }
+        // Таблицу работающего туннеля сервис меняет на лету, без переподключения, — но не мгновенно
+        // (команда идёт в его процесс). Проверка раньше времени ушла бы через WARP и показала бы
+        // «второй выход не принял запрос», поэтому даём сервису полторы секунды.
+        tunnel.reloadSecondRoutes()
+        secondProgress(getString(R.string.second_step_apply))
+        tunnelHandler.postDelayed({ runCatching { waitSecondThenCheck(0) } }, 1_500L)
+    }
+
+    /** Шаг 3: второй выход в работающем туннеле поднят — проверяем; поднимается — ждём до 20 с. */
+    private fun waitSecondThenCheck(attempt: Int) {
+        if (!uiReady()) {
+            secondBusy = false
+            return
+        }
+        val snap = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
+        when (snap?.second) {
+            TunnelStatus.SECOND_UP -> runSecondCheck(fromButton = true)
+            TunnelStatus.SECOND_STARTING -> {
+                if (attempt < 10) {
+                    secondProgress(getString(R.string.second_step_wait_up))
+                    tunnelHandler.postDelayed({ runCatching { waitSecondThenCheck(attempt + 1) } }, 2_000L)
+                } else {
+                    finishSecond(secondBuilt + "\n" + getString(R.string.second_res_still_starting), RES_WARN)
+                }
+            }
+            TunnelStatus.SECOND_FAILED -> {
+                secondWantReconnect = true
+                finishSecond(secondBuilt + "\n" + getString(R.string.second_res_failed), RES_FAIL)
+            }
+            else -> {
+                // В этом подключении второго выхода нет (включили после подключения).
+                secondWantReconnect = true
+                finishSecond(secondBuilt + "\n" + getString(R.string.second_res_not_in_session), RES_WARN)
+            }
+        }
+    }
+
+    /** Итог проверки словами и цветом — для строки под кнопкой. */
+    private fun checkVerdict(r: ExitCheck.Result?): Pair<String, Int> = when {
+        r == null -> getString(R.string.second_res_fail, "нет ответа") to RES_FAIL
+        r.ok -> {
+            val name = SecondProton.countryName(this, r.code)
+            getString(
+                R.string.second_res_ok,
+                if (name == r.code) r.code else "$name (${r.code})",
+                r.detail,
+                if (r.ms >= 0) getString(R.string.second_res_ms, r.ms) else ""
+            ) to RES_OK
+        }
+        r.code == "RU" -> getString(R.string.second_res_ru, r.detail) to RES_FAIL
+        r.code == ExitCheck.VIA_WARP -> getString(R.string.second_res_warp) to RES_FAIL
+        r.code == ExitCheck.NOT_ROUTED -> getString(R.string.second_res_not_routed, r.detail) to RES_WARN
+        else -> getString(R.string.second_res_fail, r.detail) to RES_FAIL
+    }
+
+    /** Переподключить туннель, чтобы второй выход заработал с новыми адресами (по согласию). */
+    private fun offerSecondReconnect() {
+        if (!uiReady() || !tunnel.supported || !tunnel.isUp) return
+        android.app.AlertDialog.Builder(this)
+            .setTitle(R.string.second_reconnect_title)
+            .setMessage(R.string.second_reconnect_msg)
+            .setPositiveButton(R.string.second_reconnect_ok) { _, _ ->
+                runCatching {
+                    secondProgress(getString(R.string.second_step_reconnect))
+                    TunnelDebug.stage("второй выход: переподключаю по кнопке — новые адреса в маршруты")
+                    applyWithRoutes(getString(R.string.second_reconnect_why))
+                    // Проверку после переподключения запускает scheduleSecondCheck. Если туннель так и
+                    // не поднялся, строка хода не должна «крутиться» вечно: через минуту — итог.
+                    tunnelHandler.postDelayed({
+                        runCatching {
+                            if (uiReady() && binding.progressSecond.visibility == View.VISIBLE && !secondBusy && !secondCheckRunning) {
+                                secondDone(getString(R.string.second_res_reconnect_slow), RES_WARN)
+                            }
+                        }
+                    }, 60_000L)
+                }.onFailure { t -> TunnelDebug.error("второй выход: " + SafeMode.describe(t)) }
+            }
+            .setNegativeButton(R.string.update_later, null)
+            .show()
     }
 
     private var secondCheckRunning = false
     private var secondRefreshRunning = false
 
     /**
-     * Из какой страны выходит второй выход: запрос к chatgpt.com через туннель (его адреса всегда во
-     * втором выходе). Только когда туннель поднят — иначе проверять нечего.
+     * Из какой страны выходит второй выход (ExitCheck через туннель). Только когда туннель поднят и
+     * второй выход в нём работает — иначе проверять нечего, и это тоже пишется под кнопкой.
+     * [fromButton] — проверка — последний шаг кнопки: итог дописывается к уже сделанному.
      */
-    private fun runSecondCheck() {
-        if (secondCheckRunning || !prefs.secondExitOn || prefs.secondConf.isBlank()) return
+    private fun runSecondCheck(fromButton: Boolean = false) {
+        if (!prefs.secondExitOn || prefs.secondConf.isBlank()) {
+            if (fromButton) finishSecond(secondBuilt, RES_INFO)
+            return
+        }
+        if (secondCheckRunning) {
+            // Проверка уже идёт (после «Сохранить и применить»): её итог сам появится под кнопкой.
+            if (fromButton) {
+                secondBusy = false
+                binding.btnSecondResolve.isEnabled = true
+            }
+            return
+        }
         if (!tunnel.supported || !tunnel.isUp) {
             updateSecondState()
+            if (fromButton) finishSecond(secondBuilt + "\n" + getString(R.string.second_res_tunnel_off), RES_INFO)
             return
         }
         // Второй выход в этой сессии не работает — запрос ушёл бы через WARP, и «выход: RU»
@@ -2344,18 +2588,37 @@ class MainActivity : AppCompatActivity() {
         val snap = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
         if (snap?.second != TunnelStatus.SECOND_UP) {
             updateSecondState()
+            if (fromButton) finishSecond(secondBuilt + "\n" + getString(R.string.second_res_failed), RES_FAIL)
             return
         }
         secondCheckRunning = true
         binding.textSecondState.text = getString(R.string.second_checking)
+        secondProgress(getString(R.string.second_step_check))
         Thread {
-            val res = runCatching { SecondRoutes.checkExit() }
-                .getOrDefault("!|ошибка|${System.currentTimeMillis()}")
+            val res = runCatching { SecondRoutes.checkExit(this, prefs) }.getOrElse { t ->
+                ExitCheck.Result(ExitCheck.FAIL, t.message ?: t.javaClass.simpleName, System.currentTimeMillis()).encode()
+            }
             runOnUiThread {
                 secondCheckRunning = false
                 prefs.secondCheck = res
-                TunnelDebug.stage("второй выход: проверка — " + res.substringBeforeLast('|').replace('|', ' '))
-                if (uiReady()) updateSecondState()
+                val r = ExitCheck.decode(res)
+                TunnelDebug.stage(
+                    "второй выход: проверка — " + (r?.let { "${it.code} ${it.detail}" + (if (it.ms >= 0) ", ${it.ms} мс" else "") } ?: res)
+                )
+                if (!uiReady()) {
+                    secondBusy = false
+                    return@runOnUiThread
+                }
+                runCatching {
+                    val (text, kind) = checkVerdict(r)
+                    if (r?.code == ExitCheck.NOT_ROUTED) secondWantReconnect = true
+                    if (fromButton) {
+                        finishSecond(secondBuilt + "\n" + text, kind)
+                    } else {
+                        updateSecondState()
+                        secondDone(text, kind)
+                    }
+                }.onFailure { t -> TunnelDebug.error("второй выход: " + SafeMode.describe(t)) }
             }
         }.apply { isDaemon = true; name = "warpscout-second-check" }.start()
     }
@@ -2374,9 +2637,18 @@ class MainActivity : AppCompatActivity() {
                 val up = tunnel.supported && tunnel.isUp
                 when {
                     up && snap?.second == TunnelStatus.SECOND_UP -> runSecondCheck()
-                    up && snap?.second == TunnelStatus.SECOND_FAILED -> updateSecondState()
+                    up && snap?.second == TunnelStatus.SECOND_FAILED -> {
+                        updateSecondState()
+                        secondDone(getString(R.string.second_res_failed), RES_FAIL)
+                    }
                     attempt < 8 -> scheduleSecondCheck(attempt + 1)
-                    else -> updateSecondState()
+                    else -> {
+                        updateSecondState()
+                        // Строка хода под кнопкой не должна «крутиться» вечно (с 1.10.32).
+                        if (binding.progressSecond.visibility == View.VISIBLE) {
+                            secondDone(getString(R.string.second_res_still_starting), RES_WARN)
+                        }
+                    }
                 }
             }
         }, if (attempt == 0) 6_000L else 5_000L)
@@ -2456,14 +2728,17 @@ class MainActivity : AppCompatActivity() {
                                 }
                             )
                         }
-                        val check = prefs.secondCheck.split('|')
-                        val at = check.getOrNull(2)?.toLongOrNull() ?: 0L
+                        // Строка проверки (с 1.10.32 — и «ушло через WARP», «вне маршрутов», время ответа).
+                        val check = ExitCheck.decode(prefs.secondCheck)
                         append("\n").append(
                             when {
-                                check.size < 3 -> getString(R.string.second_check_none)
-                                check[0] == "!" -> getString(R.string.second_check_fail, check[1], clock(at))
-                                check[0] == "RU" -> getString(R.string.second_check_ru, clock(at))
-                                else -> getString(R.string.second_check_ok, check[0], check[1], clock(at))
+                                check == null -> getString(R.string.second_check_none)
+                                check.code == ExitCheck.FAIL -> getString(R.string.second_check_fail, check.detail, clock(check.at))
+                                check.code == ExitCheck.VIA_WARP -> getString(R.string.second_check_warp, clock(check.at))
+                                check.code == ExitCheck.NOT_ROUTED -> getString(R.string.second_check_not_routed, clock(check.at))
+                                check.code == "RU" -> getString(R.string.second_check_ru, clock(check.at))
+                                else -> getString(R.string.second_check_ok, check.code, check.detail, clock(check.at)) +
+                                    if (check.ms >= 0) getString(R.string.second_check_ms, check.ms) else ""
                             }
                         )
                         if (prefs.appsMode == Prefs.APPS_ONLY && prefs.appsSelected.isNotEmpty()) {
@@ -4221,9 +4496,72 @@ class MainActivity : AppCompatActivity() {
         // Байты за миллисекунды × 8 = килобиты в секунду.
         val down = ((rx - prev.second).coerceAtLeast(0L) * 8L / dt).toInt()
         val upRate = ((tx - prev.third).coerceAtLeast(0L) * 8L / dt).toInt()
+        // С 1.10.32 — две строки, «↓ …» над «↑ …», стрелки цветом кнопки: в одну строку скорость
+        // упиралась в кольцо (снимок экрана 22.11).
         val text = getString(R.string.simple_rate, SpeedTest.human(down), SpeedTest.human(upRate))
-        if (s.simpleRate.text.toString() != text) s.simpleRate.text = text
+        if (s.simpleRate.text.toString() != text) {
+            val styled = android.text.SpannableString(text)
+            val accent = ContextCompat.getColor(this, R.color.orb_accent)
+            text.forEachIndexed { i, c ->
+                if (c == '↓' || c == '↑') {
+                    styled.setSpan(android.text.style.ForegroundColorSpan(accent), i, i + 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    styled.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), i, i + 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+            }
+            s.simpleRate.text = styled
+        }
         s.simpleRate.visibility = View.VISIBLE
+        runCatching { fitRateToOrb(text.split('\n')) }
+    }
+
+    /** Обычный размер строки скорости (px) — из разметки; запоминается до первого уменьшения. */
+    private var rateBasePx = 0f
+
+    /**
+     * Скорость — целиком внутри внутреннего кольца кнопки (с 1.10.32). Строки стоят в нижней
+     * половине круга, где он уже; ширина круга на высоте строки — хорда. Не помещается (крупный
+     * шрифт в настройках телефона, «100 Мбит/с») — уменьшаем шрифт, но не меньше 9sp.
+     *
+     * Колонка (значок, «Подключено», время, скорость) стоит по центру кнопки, поэтому низ i-й строки
+     * лежит на above/2 + (i + 1 − n/2)·h ниже центра, где above — высота всего, что над скоростью (от
+     * размера скорости не зависит), h — высота строки. Расчёт не опирается на текущий размер строки:
+     * размер не «прыгает» туда-обратно каждую секунду.
+     */
+    private fun fitRateToOrb(lines: List<String>) {
+        val s = binding.simple
+        val rate = s.simpleRate
+        val orb = s.simpleOrb
+        if (orb.width <= 0 || !rate.isLaidOut || rate.height <= 0) {
+            // Строка только что появилась и ещё не разложена — посчитаем после раскладки.
+            rate.post { runCatching { if (rate.isLaidOut && rate.height > 0) fitRateToOrb(lines) } }
+            return
+        }
+        val dm = resources.displayMetrics
+        if (rateBasePx <= 0f) rateBasePx = rate.textSize
+        val base = rateBasePx
+        // Внутреннее кольцо — 0.76 размера кнопки минус 7dp (см. PowerOrbView), и ещё 5dp поля.
+        val radius = minOf(orb.width, orb.height) / 2f * 0.76f - 12f * dm.density
+        val above = rate.top.toFloat()
+        val paint = android.text.TextPaint(rate.paint).apply { textSize = base }
+        val fm = paint.fontMetrics
+        val lineH = (fm.bottom - fm.top) + rate.lineSpacingExtra
+        val widths = lines.map { paint.measureText(it) }
+        val n = lines.size
+        val min = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, 9f, dm)
+        val step = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, 0.5f, dm)
+        var size = base
+        while (size > min) {
+            val k = size / base
+            val fits = widths.indices.all { i ->
+                val y = above / 2f + (i + 1 - n / 2f) * lineH * k
+                val half = if (y >= radius) 0f else kotlin.math.sqrt(radius * radius - y * y)
+                widths[i] * k / 2f <= half
+            }
+            if (fits) break
+            size -= step
+        }
+        size = size.coerceAtLeast(min)
+        if (abs(rate.textSize - size) > 0.5f) rate.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, size)
     }
 
     /** «00:12:34» от начала текущей сессии (время помнит сервис — переживает перезапуск экрана). */
@@ -4600,13 +4938,103 @@ class MainActivity : AppCompatActivity() {
         if (s.simpleTunnelSub.text.toString() != sub) s.simpleTunnelSub.text = sub
     }
 
+    // ------------------------------------------------ сброс по умолчанию (с 1.10.32)
+
+    /** Идёт сброс: onPause не должен записать поля экрана обратно в очищенные настройки. */
+    private var resetInProgress = false
+
+    /** «Сбросить всё по умолчанию» — только после подтверждения: стирается и найденное подбором. */
+    private fun confirmResetAll() {
+        if (resetBusy()) return
+        android.app.AlertDialog.Builder(this)
+            .setTitle(R.string.reset_title)
+            .setMessage(R.string.reset_message)
+            .setPositiveButton(R.string.reset_ok) { _, _ ->
+                runCatching { resetAll() }.onFailure { t ->
+                    resetInProgress = false
+                    TunnelDebug.error("сброс: " + SafeMode.describe(t))
+                    banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** Подбор, подключение или сборка идут — сбрасывать посреди них нельзя: говорим и не сбрасываем. */
+    private fun resetBusy(): Boolean {
+        val busy = engine.running || connecting || preparingRoutes || secondBusy
+        if (busy) {
+            banner(getString(R.string.reset_busy), error = true)
+            toast(getString(R.string.reset_busy))
+        }
+        return busy
+    }
+
+    /**
+     * Всё как после установки (так решил человек, 22.11): настройки — по умолчанию, свои списки
+     * стёрты, найденные точки, очередь и резервные забыты, конфиг второго выхода удалён, туннель
+     * выключен (как выключенный рукой — сам не включится). Остаются журнал и бекапы (перед сбросом
+     * пишется свежий — «Восстановить» вернёт настройки), запасной ключ WARP (каждый подбор всё равно
+     * берёт свежий, а без запасного при недоступном генераторе не подключиться вовсе) и скачанные
+     * списки сайтов и серверов Proton (это кеш, а не настройки). Потом экран создаётся заново —
+     * ровно как первый запуск: кнопка «Найти и подключить» подберёт точки.
+     */
+    private fun resetAll() {
+        if (resetInProgress || resetBusy()) return
+        resetInProgress = true
+        TunnelDebug.stage("сброс по умолчанию: начинаю — всё как после установки")
+        val backup = runCatching { Backup.save(this, getString(R.string.backup_note_reset)) }.getOrNull()
+        val wasUp = tunnel.supported && (tunnel.isUp || tunnel.active)
+        // Выключает человек: сервис запомнит это, и ни сеть, ни перезагрузка туннель не включат.
+        if (wasUp) runCatching { tunnel.stopByUser() }
+        binding.btnResetAll.isEnabled = false
+        banner(getString(R.string.reset_running))
+        val app = applicationContext
+        Thread {
+            if (wasUp) runCatching { tunnel.waitStopped(5000) }
+            val errors = mutableListOf<String>()
+            fun step(name: String, block: () -> Unit) {
+                runCatching(block).onFailure { errors += "$name: ${it.message ?: it.javaClass.simpleName}" }
+            }
+            step("фоновый подбор") { Schedule.disable(app) }
+            step("настройки") { prefs.clearAll() }
+            step("обновления") { app.getSharedPreferences("warpscout_update", MODE_PRIVATE).edit().clear().commit() }
+            step("точки") {
+                ConfigShortlist.forget(app)
+                TuningCache.forget(app)
+                EndpointMemory.forgetAll(app)
+                NoiseMemory.forgetAll(app)
+            }
+            step("доступность") { Availability.forgetAll(app) }
+            // Конфиг, которым плитка и автозапуск поднимают туннель (TunnelLastConfig сборки tunnel).
+            step("конфиг туннеля") { File(app.filesDir, "tunnel-last.conf").delete() }
+            step("файлы конфигов") {
+                listOf("configs", "reports").forEach { dir -> File(app.filesDir, dir).listFiles()?.forEach { it.delete() } }
+            }
+            step("итог подбора") { engine.forgetResults() }
+            // Снимок для сервиса — уже из пустых настроек (с переносами первого запуска).
+            step("сервис") { ServiceSettingsStore.syncFromPrefs(app) }
+            runOnUiThread {
+                TunnelDebug.stage(
+                    "сброс по умолчанию: готово" + (backup?.let { ", бекап ${it.name}" } ?: ", бекап не записан") +
+                        (if (errors.isEmpty()) "" else " — не получилось: " + errors.joinToString("; "))
+                )
+                afterResetNote = getString(if (errors.isEmpty()) R.string.reset_done else R.string.reset_partly, errors.joinToString("; ").take(120))
+                // Журнал подбора живёт в памяти процесса (переживает экран) — после сброса он пустой.
+                runCatching { scanLog.setLength(0) }
+                // Экран — заново, с настройками по умолчанию (как первый запуск после установки).
+                runCatching { recreate() }.onFailure { t ->
+                    resetInProgress = false
+                    TunnelDebug.error("сброс: экран не пересоздался — " + SafeMode.describe(t))
+                }
+            }
+        }.apply { isDaemon = true; name = "warpscout-reset" }.start()
+    }
+
     // ------------------------------------------------ обновления (с 1.10.31)
 
     /** Проверка или скачивание идёт — второй раз не запускаем. */
     private var updateBusy = false
-
-    /** Скачанное обновление ждёт разрешения «Установка неизвестных приложений». */
-    private var pendingInstall: File? = null
 
     /**
      * «Проверить обновления»: последний релиз на GitHub. Есть новее (или свежая пересборка той же
@@ -4614,11 +5042,11 @@ class MainActivity : AppCompatActivity() {
      */
     private fun checkForUpdate() {
         if (updateBusy) {
-            banner(getString(R.string.update_busy))
+            updateNote(getString(R.string.update_busy))
             return
         }
         updateBusy = true
-        banner(getString(R.string.update_checking))
+        updateNote(getString(R.string.update_checking))
         Thread {
             val result = runCatching {
                 Updater.check(BuildConfig.VERSION_NAME, BuildConfig.BUILD_REV, BuildConfig.FLAVOR)
@@ -4629,9 +5057,9 @@ class MainActivity : AppCompatActivity() {
                 runCatching {
                     result.onSuccess { r ->
                         when (r) {
-                            is Updater.Check.Latest -> banner(getString(R.string.update_latest, r.version))
+                            is Updater.Check.Latest -> updateNote(getString(R.string.update_latest, r.version))
                             is Updater.Check.NoAsset ->
-                                banner(getString(R.string.update_no_asset, r.tag, r.want), error = true)
+                                updateNote(getString(R.string.update_no_asset, r.tag, r.want), error = true)
                             is Updater.Check.Newer -> offerUpdate(
                                 r.release,
                                 getString(R.string.update_available_title, r.release.version),
@@ -4645,17 +5073,42 @@ class MainActivity : AppCompatActivity() {
                         }
                     }.onFailure { t ->
                         TunnelDebug.stage("обновления: проверка не прошла — ${t.message ?: t.javaClass.simpleName}")
-                        banner(getString(R.string.update_check_failed, t.message ?: t.javaClass.simpleName), error = true)
+                        updateNote(getString(R.string.update_check_failed, t.message ?: t.javaClass.simpleName), error = true)
                     }
                 }.onFailure { t -> TunnelDebug.error("обновления: " + SafeMode.describe(t)) }
             }
         }.apply { isDaemon = true; name = "warpscout-update-check" }.start()
     }
 
+    /**
+     * Итог проверки обновлений: плашкой и всплывающей строкой. Кнопка «Обновления» в расширенном
+     * виде — в самом низу «Главной», а плашка — наверху: без всплывающей строки ответа на нажатие
+     * не было бы видно.
+     */
+    private fun updateNote(text: String, error: Boolean = false) {
+        banner(text, error)
+        if (!simpleShown()) runCatching { Toast.makeText(this, text, Toast.LENGTH_SHORT).show() }
+    }
+
     private fun sizeText(bytes: Long): String =
         if (bytes <= 0L) "APK" else String.format(java.util.Locale.US, "%.1f МБ", bytes / 1_048_576.0)
 
     private fun offerUpdate(release: Updater.Release, title: String, message: String) {
+        // Этот же файл уже скачан (или качается) — второй раз не качаем.
+        val sp = updatePrefs()
+        val known = sp.getLong("dlId", -1L).takeIf { it >= 0L && sp.getString("dlName", null) == release.apkName }
+        val state = known?.let { id -> runCatching { Updater.query(this, id) }.getOrNull() }
+        if (known != null && state?.status == android.app.DownloadManager.STATUS_SUCCESSFUL && Updater.fileExists(this, known)) {
+            showUpdateReady(release)
+            return
+        }
+        if (known != null && (state?.status == android.app.DownloadManager.STATUS_RUNNING ||
+                state?.status == android.app.DownloadManager.STATUS_PENDING)
+        ) {
+            if (!updateBusy) watchDownload(known, release)
+            updateNote(getString(R.string.update_busy))
+            return
+        }
         android.app.AlertDialog.Builder(this)
             .setTitle(title)
             .setMessage(message)
@@ -4664,87 +5117,104 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    /**
+     * Скачать системной загрузкой (с 1.10.32): файл ляжет в «Загрузки», Android покажет «Загрузка
+     * завершена». Ставит его человек нажатием — своего разрешения на установку у WarpScout нет
+     * (см. Updater). На Android 8–9 системной загрузке нужно разрешение на запись — там качает браузер.
+     */
     private fun downloadUpdate(release: Updater.Release) {
         if (updateBusy) {
-            banner(getString(R.string.update_busy))
+            updateNote(getString(R.string.update_busy))
             return
         }
+        val id = runCatching { Updater.enqueue(this, release) }.getOrElse { t ->
+            TunnelDebug.stage("обновления: системная загрузка не приняла файл — ${t.message ?: t.javaClass.simpleName}")
+            null
+        }
+        if (id == null) {
+            runCatching { startActivity(Updater.browserIntent(release)) }
+                .onSuccess { updateNote(getString(R.string.update_via_browser, release.apkName)) }
+                .onFailure { t -> updateNote(getString(R.string.update_failed, t.message ?: t.javaClass.simpleName), error = true) }
+            return
+        }
+        updatePrefs().edit().putLong("dlId", id).putString("dlName", release.apkName).apply()
+        TunnelDebug.stage("обновления: скачиваю ${release.apkName} в «Загрузки»")
+        watchDownload(id, release)
+    }
+
+    /** Следим за загрузкой, пока она идёт: проценты — плашкой, в конце — сверка и «Открыть загрузки». */
+    private fun watchDownload(id: Long, release: Updater.Release) {
         updateBusy = true
         banner(getString(R.string.update_downloading, 0))
-        TunnelDebug.stage("обновления: скачиваю ${release.apkName}")
-        val dir = File(cacheDir, "updates")
         Thread {
             var lastPct = -1
-            val result = runCatching {
-                Updater.download(release, dir) { pct ->
-                    // Плашку обновляем шагами по 5 %, а не на каждый пакет.
-                    if (pct >= 0 && pct / 5 != lastPct / 5) {
-                        lastPct = pct
-                        runOnUiThread {
-                            if (!isFinishing && !isDestroyed) banner(getString(R.string.update_downloading, pct))
-                        }
-                    }
+            var done: Updater.Download? = null
+            var gone = false
+            val deadline = System.currentTimeMillis() + 20 * 60_000L
+            while (System.currentTimeMillis() < deadline) {
+                val d = runCatching { Updater.query(this, id) }.getOrNull()
+                if (d == null) {
+                    gone = true
+                    break
+                }
+                if (d.status == android.app.DownloadManager.STATUS_SUCCESSFUL ||
+                    d.status == android.app.DownloadManager.STATUS_FAILED
+                ) {
+                    done = d
+                    break
+                }
+                val pct = if (d.total > 0L) ((d.done * 100L) / d.total).toInt().coerceIn(0, 100) else -1
+                // Плашку обновляем шагами по 5 %, а не каждую секунду.
+                if (pct >= 0 && pct / 5 != lastPct / 5) {
+                    lastPct = pct
+                    runOnUiThread { if (!isFinishing && !isDestroyed) banner(getString(R.string.update_downloading, pct)) }
+                }
+                try {
+                    Thread.sleep(1000L)
+                } catch (e: InterruptedException) {
+                    break
                 }
             }
+            val outcome = done
+            val vanished = gone
+            val ok = outcome?.status == android.app.DownloadManager.STATUS_SUCCESSFUL
+            val verified = if (ok) runCatching { Updater.verify(this, id, release) }.getOrNull() else null
+            if (verified == false) Updater.remove(this, id)
             runOnUiThread {
                 updateBusy = false
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 runCatching {
-                    result.onSuccess { file ->
-                        TunnelDebug.stage("обновления: скачано ${file.name}, открываю установщик")
-                        installUpdate(file)
-                    }.onFailure { t ->
-                        TunnelDebug.stage("обновления: не скачалось — ${t.message ?: t.javaClass.simpleName}")
-                        banner(
-                            if (t is Updater.BadHash) getString(R.string.update_bad_hash)
-                            else getString(R.string.update_failed, t.message ?: t.javaClass.simpleName),
-                            error = true
-                        )
+                    when {
+                        vanished -> updateNote(getString(R.string.update_cancelled))
+                        outcome == null -> updateNote(getString(R.string.update_failed, getString(R.string.update_too_long)), error = true)
+                        !ok -> {
+                            TunnelDebug.stage("обновления: не скачалось — причина ${outcome.reason}")
+                            updateNote(getString(R.string.update_failed, "код ${outcome.reason}"), error = true)
+                        }
+                        verified == false -> {
+                            TunnelDebug.stage("обновления: контрольная сумма не сошлась — файл удалён")
+                            updateNote(getString(R.string.update_bad_hash), error = true)
+                        }
+                        else -> showUpdateReady(release)
                     }
                 }.onFailure { t -> TunnelDebug.error("обновления: " + SafeMode.describe(t)) }
             }
         }.apply { isDaemon = true; name = "warpscout-update-download" }.start()
     }
 
-    /**
-     * Отдать файл установщику Android. Ставить приложения из WarpScout Android разрешает только
-     * после отдельного согласия: без него открываем настройки, а установка продолжится, когда
-     * человек вернётся (см. [resumePendingInstall]).
-     */
-    private fun installUpdate(file: File) {
-        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
-            pendingInstall = file
-            updatePrefs().edit().putString("pending", file.absolutePath)
-                .putLong("pendingAt", System.currentTimeMillis()).apply()
-            banner(getString(R.string.update_need_permission))
-            runCatching {
-                startActivity(
-                    Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
-                )
-            }.onFailure { t -> banner(getString(R.string.update_failed, t.message ?: t.javaClass.simpleName), error = true) }
-            return
-        }
-        pendingInstall = null
-        updatePrefs().edit().clear().apply()
-        runCatching { startActivity(Updater.installIntent(this, file)) }
-            .onFailure { t -> banner(getString(R.string.update_failed, t.message ?: t.javaClass.simpleName), error = true) }
-    }
-
-    /**
-     * Вернулись из настроек «Установка неизвестных приложений»: разрешили — ставим скачанное.
-     * Путь к файлу помним и на диске: после смены разрешения Android может перезапустить процесс.
-     */
-    private fun resumePendingInstall() {
-        runCatching {
-            val sp = updatePrefs()
-            val file = pendingInstall ?: sp.getString("pending", null)?.let { File(it) }
-                ?.takeIf { System.currentTimeMillis() - sp.getLong("pendingAt", 0L) < 30 * 60_000L }
-                ?: return
-            if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) return
-            pendingInstall = null
-            sp.edit().clear().apply()
-            if (file.exists()) installUpdate(file)
-        }
+    /** Скачано и сверено: остаётся нажать на файл в «Загрузках» — Android спросит, поставить ли поверх. */
+    private fun showUpdateReady(release: Updater.Release) {
+        TunnelDebug.stage("обновления: ${release.apkName} в «Загрузках» — ставится нажатием на файл")
+        banner(getString(R.string.update_ready_banner, release.apkName))
+        android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.update_ready_title, release.version))
+            .setMessage(getString(R.string.update_ready_msg, release.apkName))
+            .setPositiveButton(R.string.update_open_downloads) { _, _ ->
+                runCatching { startActivity(Updater.downloadsIntent()) }
+                    .onFailure { updateNote(getString(R.string.update_open_failed, release.apkName), error = true) }
+            }
+            .setNegativeButton(R.string.update_later, null)
+            .show()
     }
 
     private fun updatePrefs() = getSharedPreferences("warpscout_update", MODE_PRIVATE)
@@ -4842,5 +5312,15 @@ class MainActivity : AppCompatActivity() {
 
         /** Сколько держится панель «успех». */
         const val BANNER_MS = 8000L
+
+        /** Что сказать после сброса по умолчанию — экрану, созданному заново (с 1.10.32). */
+        @Volatile
+        var afterResetNote: String? = null
+
+        /** Виды итога под кнопкой второго выхода: цвет точки (с 1.10.32). */
+        const val RES_OK = 0
+        const val RES_FAIL = 1
+        const val RES_WARN = 2
+        const val RES_INFO = 3
     }
 }

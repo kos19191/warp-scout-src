@@ -131,18 +131,31 @@ object AllowListPlanner {
             (runCatching { gg.resolveAAAA(host) }.getOrNull() ?: emptyList())
     }
 
-    /** Пакетный резолвинг одним пулом потоков: 200 доменов должны занимать секунды, а не минуты. */
+    /**
+     * Пакетный резолвинг одним пулом потоков: 200 доменов должны занимать секунды, а не минуты.
+     * [progress] (с 1.10.32) — «готово N из M» после каждого домена, из потоков пула: кнопка
+     * второго выхода показывает по нему, что работа идёт, а не висит.
+     */
     fun resolveAll(
         hosts: List<String>,
         resolve: (String) -> List<String> = { dohResolve(it) },
-        threads: Int = 16
+        threads: Int = 16,
+        progress: ((done: Int, total: Int) -> Unit)? = null
     ): Map<String, List<String>> {
         if (hosts.isEmpty()) return emptyMap()
         val ex = Executors.newFixedThreadPool(minOf(threads, hosts.size).coerceAtLeast(1)) { r ->
             Thread(r, "warpscout-resolve").apply { isDaemon = true }
         }
+        val done = java.util.concurrent.atomic.AtomicInteger(0)
         return try {
-            hosts.associateWith { h -> ex.submit(java.util.concurrent.Callable { runCatching { resolve(h) }.getOrDefault(emptyList()) }) }
+            hosts.associateWith { h ->
+                ex.submit(java.util.concurrent.Callable {
+                    val r = runCatching { resolve(h) }.getOrDefault(emptyList())
+                    val n = done.incrementAndGet()
+                    if (progress != null) runCatching { progress(n, hosts.size) }
+                    r
+                })
+            }
                 .mapValues { (_, f) ->
                     runCatching { f.get(15, java.util.concurrent.TimeUnit.SECONDS) }.getOrDefault(emptyList())
                 }

@@ -4,24 +4,28 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <!-- Чтобы честно сказать «ByeDPI установлен/не установлен» на Android 11+ нужен <queries>. -->
+    <!-- Чтобы честно сказать «ByeDPI установлен/не установлен» на Android 11+ нужен <queries>.
+         Второй элемент — приложения с иконкой на рабочем столе: только их вкладка «Туннелирование»
+         и показывает (выбрать, что пускать через туннель). С 1.10.32 это вместо разрешения
+         QUERY_ALL_PACKAGES («видеть все приложения»): антивирусы (у Samsung — «Защита приложений»
+         на движке McAfee) считают его признаком шпионских программ, а нам весь список не нужен. -->
     <queries>
         <package android:name="io.github.dovecoteescapee.byedpi" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Подбор точек для мобильной сети, не уходя с Wi-Fi: попросить у системы мобильную сеть
          рядом с Wi-Fi (requestNetwork). Обычное разрешение, отдельного согласия не нужно. -->
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
 
-    <!-- Android 11+ скрывает список приложений. Он нужен вкладке «Приложения»: выбрать, что
-         пускать через туннель, а что мимо (как в Amnezia). Для сайдлоада это нормально;
-         в Google Play такое разрешение требует отдельного обоснования. -->
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
-
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- «Обновления» (с 1.10.31): скачанный APK ставится поверх по нажатию — Android сам
-         спрашивает подтверждение. Без этого разрешения установщик даже не откроется. -->
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Разрешения «Установка приложений» (REQUEST_INSTALL_PACKAGES) с 1.10.32 нет: с ним
+         1.10.31 «Защита приложений» Samsung назвала вредоносной — приложение, которое само
+         скачивает и ставит APK, для антивируса выглядит как «загрузчик». Обновление теперь
+         скачивает системная загрузка, а ставит его человек нажатием на файл (см. Updater). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- Подбор занимает минуты: пока он идёт, процесс держится foreground-сервисом, иначе
          сворачивание экрана могло оборвать скан, ничего не сказав пользователю. -->

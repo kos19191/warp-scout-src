@@ -858,6 +858,25 @@
                     android:layout_marginTop="4dp"
                     android:text="@string/btn_second_resolve" />
 
+                <!-- Ход и итог кнопки выше (с 1.10.32): шаг 1–3 с полосой, потом цветная строка —
+                     работает ли второй выход и что делать. Раньше итог уходил в плашку на «Главной»,
+                     а отсюда её не видно. -->
+                <com.google.android.material.progressindicator.LinearProgressIndicator
+                    android:id="@+id/progressSecond"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_s"
+                    android:indeterminate="true"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/textSecondResult"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textAppearance="?attr/textAppearanceBodyMedium"
+                    android:visibility="gone" />
+
                 <TextView
                     android:id="@+id/textSecondState"
                     android:layout_width="match_parent"
@@ -1051,6 +1070,28 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:text="@string/btn_save_apply" />
+
+                <!-- ── сброс по умолчанию (с 1.10.32): всё как после установки ── -->
+                <TextView
+                    style="@style/SectionHeader"
+                    android:text="@string/section_reset" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/reset_note"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnResetAll"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:layout_marginBottom="16dp"
+                    android:text="@string/btn_reset_all"
+                    android:textColor="?attr/colorError"
+                    app:strokeColor="?attr/colorError" />
 
             </LinearLayout>
         </ScrollView>

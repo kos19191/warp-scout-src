@@ -321,6 +321,7 @@
     <string name="backup_note_manual">вручную</string>
     <string name="backup_note_connected">подключение %1$s</string>
     <string name="backup_note_tuned">подбор %1$s</string>
+    <string name="backup_note_reset">перед сбросом</string>
     <string name="dirty_apps_mode">режим туннелирования приложений</string>
     <string name="dirty_apps_list">приложения в туннеле</string>
     <string name="dirty_routes_mode">режим маршрутов</string>
@@ -556,7 +557,8 @@
     <string name="second_state_failed">⚠ Сейчас: не поднялся — свой сервер не ответил, эти сайты идут через WARP.</string>
     <string name="second_apps_warn">⚠ Через туннель идут только выбранные приложения — второй выход работает только в них. Для ChatGPT, Claude, Gemini отметьте их приложения и браузер в «Туннелировании».</string>
     <string name="simple_update_desc">Проверить обновления</string>
-    <string name="simple_rate">↓ %1$s · ↑ %2$s</string>
+    <!-- С 1.10.32 — в две строки: в одну скорость упиралась в кольцо кнопки. -->
+    <string name="simple_rate">↓ %1$s\n↑ %2$s</string>
     <string name="simple_tunnel_title">Туннелирование</string>
     <string name="simple_tunnel_desc">Туннелирование: что идёт через туннель</string>
     <string name="simple_tun_apps_all">Все приложения</string>
@@ -571,16 +573,70 @@
     <string name="update_checking">Проверяю обновления…</string>
     <string name="update_latest">Установлена последняя версия: %1$s</string>
     <string name="update_available_title">Доступна версия %1$s</string>
-    <string name="update_available_msg">Сейчас установлена %1$s. Скачать (%2$s) и поставить поверх? Настройки сохранятся.</string>
+    <string name="update_available_msg">Сейчас установлена %1$s. Скачать (%2$s)? Файл ляжет в «Загрузки», поставить поверх — нажатием на него. Настройки сохранятся.</string>
     <string name="update_rebuild_title">Есть свежая сборка версии %1$s</string>
-    <string name="update_rebuild_msg">Установлена сборка %1$s, в релизе — %2$s. Скачать (%3$s) и поставить поверх? Настройки сохранятся.</string>
-    <string name="update_download">Скачать и установить</string>
+    <string name="update_rebuild_msg">Установлена сборка %1$s, в релизе — %2$s. Скачать (%3$s)? Файл ляжет в «Загрузки», поставить поверх — нажатием на него. Настройки сохранятся.</string>
+    <string name="update_download">Скачать</string>
     <string name="update_later">Не сейчас</string>
     <string name="update_downloading">Скачиваю обновление: %1$d %%</string>
     <string name="update_failed">Обновление не скачалось: %1$s</string>
     <string name="update_bad_hash">Файл обновления повреждён (контрольная сумма не сошлась) — попробуйте ещё раз</string>
-    <string name="update_need_permission">Разрешите установку из WarpScout — откроются настройки; вернитесь сюда, и установка начнётся</string>
     <string name="update_check_failed">Не удалось проверить обновления: %1$s</string>
     <string name="update_no_asset">В релизе %1$s нет файла для этой сборки (%2$s)</string>
     <string name="update_busy">Обновление уже скачивается</string>
+    <!-- 1.10.32: обновление скачивает системная загрузка, ставит человек нажатием на файл -->
+    <string name="update_via_browser">Скачиваю %1$s браузером: когда закончится, нажмите на файл — Android предложит поставить поверх</string>
+    <string name="update_cancelled">Загрузка обновления отменена</string>
+    <string name="update_too_long">загрузка идёт больше 20 минут</string>
+    <string name="update_ready_banner">Обновление скачано: %1$s — в «Загрузках»</string>
+    <string name="update_ready_title">Версия %1$s скачана</string>
+    <string name="update_ready_msg">Файл %1$s — в «Загрузках» (и в уведомлении «Загрузка завершена»). Нажмите на него: Android спросит, поставить ли поверх. Настройки сохранятся.</string>
+    <string name="update_open_downloads">Открыть «Загрузки»</string>
+    <string name="update_open_failed">Откройте «Загрузки» или уведомление «Загрузка завершена» и нажмите на %1$s</string>
+
+    <!-- ── 1.10.32: сброс по умолчанию ── -->
+    <string name="section_reset">Сброс</string>
+    <string name="reset_note">Всё как после установки: настройки и галочки — по умолчанию, свои списки стёрты, найденные точки и конфиг второго выхода забыты.</string>
+    <string name="btn_reset_all">Сбросить всё по умолчанию</string>
+    <string name="reset_title">Сбросить всё по умолчанию?</string>
+    <string name="reset_message">WarpScout станет как после установки:\n\n• переключатели, галочки и выборы — по умолчанию (тема, вид экрана, автоматика, DNS, маршруты);\n• свои списки стёрты: сайты туннелирования, свои сайты второго выхода, сайты проверки, адреса и порты подбора; приложения — снова набор по умолчанию;\n• найденные точки, очередь и резервные забыты, туннель выключится — потом нажмите кнопку, и WarpScout подберёт точки заново;\n• конфиг второго выхода (Proton или свой сервер) удалён — его нужно будет вставить снова.\n\nОстаются журнал, бекапы, запасной ключ WARP и скачанные списки сайтов. Перед сбросом сохраню бекап: «Восстановить» на «Главной» вернёт настройки.</string>
+    <string name="reset_ok">Сбросить</string>
+    <string name="reset_busy">Сейчас идёт подбор или подключение — остановите его, потом сбрасывайте</string>
+    <string name="reset_running">Сбрасываю всё по умолчанию…</string>
+    <string name="reset_done">Всё сброшено — как после установки. Нажмите кнопку: WarpScout подберёт точки заново.</string>
+    <string name="reset_partly">Сброшено, но не всё: %1$s. Нажмите кнопку: WarpScout подберёт точки заново.</string>
+
+    <!-- ── 1.10.32: «Обновить адреса и проверить выход» — ход и итог под кнопкой ── -->
+    <string name="second_busy">Проверка уже идёт — итог появится под кнопкой</string>
+    <string name="second_res_off">Второй выход выключен — включите «Включить второй выход» выше.</string>
+    <string name="second_step_lists">Шаг 1 из 3 · списки сайтов…</string>
+    <string name="second_step_resolve">Шаг 1 из 3 · ищу адреса сайтов: %1$d из %2$d</string>
+    <string name="second_step_wait_up">Шаг 2 из 3 · второй выход поднимается — жду…</string>
+    <string name="second_step_check">Шаг 3 из 3 · проверяю, из какой страны выходит запрос к chatgpt.com…</string>
+    <string name="second_step_reconnect">Переподключаю туннель — потом сам проверю выход…</string>
+    <string name="second_step_apply">Шаг 2 из 3 · отдаю новые адреса работающему туннелю…</string>
+    <string name="second_res_reconnect_slow">Туннель поднимается дольше минуты — итог проверки появится здесь, когда он заработает. Можно нажать кнопку ещё раз.</string>
+    <string name="second_res_build_failed">Адреса не собрались: %1$s</string>
+    <string name="second_res_no_cidrs">Адреса не нашлись (%1$s): DoH не ответил. Проверьте интернет и нажмите ещё раз.</string>
+    <string name="second_res_built">Адреса собраны: %1$s</string>
+    <string name="second_res_diff">новых %1$d, убрано %2$d</string>
+    <string name="second_res_same">без изменений</string>
+    <string name="second_res_tunnel_off">Туннель выключен — выход проверю, когда он включится.</string>
+    <string name="second_res_need_reconnect">Новых адресов вне маршрутов туннеля: %1$d — заработают после переподключения.</string>
+    <string name="second_res_still_starting">Второй выход ещё поднимается — нажмите кнопку через минуту.</string>
+    <string name="second_res_failed">Свой сервер не ответил — в этом подключении второй выход не работает, его сайты идут через WARP.</string>
+    <string name="second_res_not_in_session">Второй выход включили после подключения — в работающем туннеле его ещё нет. Нужно переподключение.</string>
+    <string name="second_res_ok">Второй выход работает: выход — %1$s, адрес %2$s%3$s.</string>
+    <string name="second_res_ms">, ответ за %1$d мс</string>
+    <string name="second_res_ru">Второй выход отвечает из России (%1$s): сайты, закрытые для России, через него не откроются. Нужен сервер в другой стране.</string>
+    <string name="second_res_warp">Запрос к chatgpt.com ушёл через WARP, а не через второй выход: свой сервер его не принял. Нажмите «Сохранить и применить» или проверьте сервер.</string>
+    <string name="second_res_not_routed">Адрес chatgpt.com (%1$s) ещё вне маршрутов туннеля — нужно переподключение.</string>
+    <string name="second_res_fail">Проверка не прошла: %1$s — через второй выход нет ответа.</string>
+    <string name="second_reconnect_title">Переподключить туннель?</string>
+    <string name="second_reconnect_msg">Чтобы второй выход заработал с новыми адресами, туннель нужно переподключить — это несколько секунд. Потом я сам проверю выход.</string>
+    <string name="second_reconnect_ok">Переподключить</string>
+    <string name="second_reconnect_why">второй выход: новые адреса</string>
+    <string name="second_check_warp">⚠ Проверка %1$s: запрос ушёл через WARP — второй выход его не принял.</string>
+    <string name="second_check_not_routed">Проверка %1$s: адрес chatgpt.com вне маршрутов туннеля — нужно переподключение.</string>
+    <string name="second_check_ms">, ответ за %1$d мс</string>
 </resources>

@@ -110,6 +110,11 @@ object EndpointMemory {
         }
     }
 
+    /** Сброс по умолчанию (с 1.10.32): забыть рабочие точки всех сетей. */
+    fun forgetAll(context: Context) {
+        synchronized(lock) { runCatching { file(context).delete() } }
+    }
+
     private fun file(context: Context): File =
         File(context.applicationContext.filesDir, FILE)
 

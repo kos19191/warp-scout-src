@@ -4,6 +4,4 @@
     <files-path name="reports" path="reports/" />
     <files-path name="backups" path="backups/" />
     <cache-path name="share" path="share/" />
-    <!-- Скачанное обновление (с 1.10.31): отдаётся установщику Android через FileProvider. -->
-    <cache-path name="updates" path="updates/" />
 </paths>

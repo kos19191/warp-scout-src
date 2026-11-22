@@ -60,7 +60,8 @@
                 android:tint="?attr/colorOnSurfaceVariant" />
 
             <!-- Обновления (с 1.10.31; было «Отправить журнал» — он теперь только в расширенном виде):
-                 по нажатию проверить последний релиз, скачать и предложить поставить поверх. -->
+                 по нажатию проверить последний релиз и скачать его в «Загрузки» (с 1.10.32 ставит
+                 человек нажатием на файл — см. Updater). -->
             <ImageButton
                 android:id="@+id/simpleUpdate"
                 android:layout_width="44dp"
@@ -80,10 +81,12 @@
             android:layout_weight="1"
             android:minHeight="16dp" />
 
+        <!-- 252dp (было 240): с 1.10.32 скорость на кнопке — в две строки, ей нужно место внутри
+             круга. Диск — 0.76 размера (см. PowerOrbView), внутреннее кольцо — ещё на 7dp меньше. -->
         <FrameLayout
             android:id="@+id/simpleOrb"
-            android:layout_width="240dp"
-            android:layout_height="240dp"
+            android:layout_width="252dp"
+            android:layout_height="252dp"
             android:layout_gravity="center_horizontal"
             android:clickable="true"
             android:contentDescription="@string/simple_orb_desc"
@@ -104,8 +107,8 @@
 
                 <ImageView
                     android:id="@+id/simplePowerIcon"
-                    android:layout_width="56dp"
-                    android:layout_height="56dp"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
                     android:importantForAccessibility="no"
                     android:src="@drawable/ic_power" />
 
@@ -113,30 +116,37 @@
                     android:id="@+id/simpleState"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
+                    android:layout_marginTop="8dp"
                     android:text="@string/simple_state_off"
                     android:textAppearance="?attr/textAppearanceTitleMedium"
                     android:textStyle="bold" />
 
+                <!-- Цифры — табличные (tnum): время не «прыгает» по ширине каждую секунду. Моноширинный
+                     шрифт до 1.10.32 делал строку скорости шире круга. -->
                 <TextView
                     android:id="@+id/simpleTimer"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
-                    android:fontFamily="monospace"
+                    android:fontFamily="sans-serif-medium"
+                    android:fontFeatureSettings="tnum"
+                    android:letterSpacing="0.06"
                     android:visibility="gone"
                     android:textAppearance="?attr/textAppearanceBodyMedium"
                     android:textColor="?attr/colorOnSurfaceVariant" />
 
                 <!-- Скорость прямо сейчас (с 1.10.31): сколько идёт через туннель в эту секунду.
-                     Ручного замера больше нет — только живой поток, раз в секунду. -->
+                     Ручного замера больше нет — только живой поток, раз в секунду. С 1.10.32 — две
+                     строки («↓ 24,5 Мбит/с» / «↑ 850 Кбит/с»): в одну строку она вылезала за кольцо. -->
                 <TextView
                     android:id="@+id/simpleRate"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:fontFamily="monospace"
-                    android:maxLines="1"
+                    android:layout_marginTop="6dp"
+                    android:fontFeatureSettings="tnum"
+                    android:gravity="center"
+                    android:lineSpacingExtra="1dp"
+                    android:maxLines="2"
                     android:textAppearance="?attr/textAppearanceBodySmall"
                     android:textColor="?attr/colorOnSurfaceVariant"
                     android:visibility="gone" />
