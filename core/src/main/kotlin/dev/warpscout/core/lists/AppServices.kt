@@ -16,8 +16,25 @@ package dev.warpscout.core.lists
  * Gemini и TikTok — только домены, их адреса собираются через DoH. Приложение без сервиса здесь
  * ([serviceOf] = null) при неполных маршрутах идёт только к выбранным сайтам — об этом экран
  * предупреждает (так решил человек 23.11).
+ *
+ * Спутники (с 1.10.37, [Service.companions]) — приложения, внутри которых сервис на самом деле
+ * работает. Gemini на Android — оболочка в несколько мегабайт: запросы к Google, и проверку страны
+ * тоже, делает приложение Google. Человек отметил Gemini, второй выход работал, а Gemini писал «Эта
+ * страна не поддерживается»: приложение Google в туннель не входило, и запросы шли мимо него, с
+ * российского адреса оператора. Отмечен сервис — его спутники идут в туннель вместе с ним (так решил
+ * человек 23.11); сетей им не добавляем: при неполных маршрутах из них идут только сайты — для
+ * Gemini это его адреса, они и так в маршрутах.
  */
 object AppServices {
+
+    /** Приложение Google: внутри него работает Gemini (с 1.10.37). */
+    const val GOOGLE_APP = "com.google.android.googlequicksearchbox"
+
+    /** Приложение, которое идёт в туннель вместе с сервисом: пакет и название для экрана и журнала. */
+    data class Companion(val pkg: String, val title: String)
+
+    /** Спутник, который нужен выбранным приложениям, и сервис, ради которого он идёт. */
+    data class Joined(val companion: Companion, val service: String)
 
     /** Сервис: название, списки allow-domains, известные пакеты и слова в имени пакета. */
     data class Service(
@@ -26,6 +43,8 @@ object AppServices {
         val packages: Set<String>,
         /** Части имени пакета для клиентов, которых нет в [packages] («…telegram…»). */
         val hints: List<String> = emptyList(),
+        /** Приложения, внутри которых сервис работает: идут в туннель вместе с ним (с 1.10.37). */
+        val companions: List<Companion> = emptyList(),
     )
 
     val SERVICES: List<Service> = listOf(
@@ -66,7 +85,10 @@ object AppServices {
         Service("Discord", listOf("discord"), setOf("com.discord"), listOf("discord")),
         Service("ChatGPT", listOf("openai"), setOf("com.openai.chatgpt"), listOf("openai", "chatgpt")),
         Service("Claude", listOf("claude"), setOf("com.anthropic.claude"), listOf("anthropic")),
-        Service("Gemini", listOf("google-ai"), setOf("com.google.android.apps.bard")),
+        Service(
+            "Gemini", listOf("google-ai"), setOf("com.google.android.apps.bard"),
+            companions = listOf(Companion(GOOGLE_APP, "Google")),
+        ),
         Service(
             "TikTok", listOf("tiktok"),
             setOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill", "com.zhiliaoapp.musically.go"),
@@ -88,6 +110,22 @@ object AppServices {
     fun listsFor(packages: Collection<String>): List<String> {
         val found = packages.mapNotNull { serviceOf(it) }.toSet()
         return SERVICES.filter { it in found }.flatMap { it.lists }.distinct()
+    }
+
+    /**
+     * Спутники набора приложений (с 1.10.37): кого ещё пустить в туннель — без уже выбранных, без
+     * повторов, в порядке [SERVICES]. Отмечен Gemini — приложение Google.
+     */
+    fun companionsFor(packages: Collection<String>): List<Joined> {
+        val chosen = packages.map { it.trim().lowercase() }.toSet()
+        val found = packages.mapNotNull { serviceOf(it) }.toSet()
+        val out = LinkedHashMap<String, Joined>()
+        SERVICES.filter { it in found }.forEach { s ->
+            s.companions.forEach { c ->
+                if (c.pkg.lowercase() !in chosen && c.pkg !in out) out[c.pkg] = Joined(c, s.title)
+            }
+        }
+        return out.values.toList()
     }
 
     /** Названия сервисов набора приложений («Telegram, Instagram, YouTube»). */

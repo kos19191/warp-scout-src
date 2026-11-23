@@ -11,6 +11,11 @@
          на движке McAfee) считают его признаком шпионских программ, а нам весь список не нужен. -->
     <queries>
         <package android:name="io.github.dovecoteescapee.byedpi" />
+        <!-- С 1.10.37: приложение Google идёт в туннель вместе с Gemini (Gemini работает внутри
+             него). Туннель добавляет его по имени пакета, а Android 11+ даёт добавить только
+             видимое приложение; обычно оно видно и так (иконка на рабочем столе), но её можно
+             спрятать — поэтому называем пакет явно. Это не разрешение. -->
+        <package android:name="com.google.android.googlequicksearchbox" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />

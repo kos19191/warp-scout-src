@@ -178,6 +178,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             excludeHostsChecks()
             protonNearChecks()
         }
+        section("Gemini — вместе с приложением Google (1.10.37)") {
+            companionChecks()
+        }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
                 liveNetwork()
@@ -572,6 +575,31 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             "второй выход: поддомены — только для известных списков",
             extra.keys.all { dev.warpscout.core.lists.AllowLists.byId.containsKey(it) }
         )
+    }
+
+    /**
+     * 1.10.37: спутники сервисов. Человек отметил Gemini, второй выход работал, а Gemini писал «Эта
+     * страна не поддерживается»: Gemini работает внутри приложения Google, а оно в туннель не входило.
+     */
+    private fun companionChecks() {
+        val a = dev.warpscout.core.lists.AppServices
+        val gemini = "com.google.android.apps.bard"
+        expect(
+            "спутники: отмечен Gemini — с ним приложение Google",
+            a.companionsFor(listOf("org.telegram.messenger", gemini)).map { it.companion.pkg to it.service },
+            listOf(a.GOOGLE_APP to "Gemini")
+        )
+        check("спутники: Google уже отмечен — второй раз не добавляем", a.companionsFor(listOf(gemini, a.GOOGLE_APP)).isEmpty())
+        check(
+            "спутники: без Gemini — никого",
+            a.companionsFor(listOf("org.telegram.messenger", "com.openai.chatgpt", "com.android.chrome", "com.example.app")).isEmpty()
+        )
+        check("спутники: пустой выбор — никого", a.companionsFor(emptyList()).isEmpty())
+        expect("спутники: название для журнала", a.companionsFor(listOf(gemini)).firstOrNull()?.companion?.title, "Google")
+        // Приложение Google — не Gemini: отмеченное само по себе, оно не идёт целиком по сетям Gemini.
+        check("спутники: приложение Google — не сервис", a.serviceOf(a.GOOGLE_APP) == null)
+        check("спутники: приложение Google — не браузер из списка", !a.isKnownBrowser(a.GOOGLE_APP))
+        expect("спутники: сетей не добавляют — у Gemini только его список", a.listsFor(listOf(gemini, a.GOOGLE_APP)), listOf("google-ai"))
     }
 
     /** Маршруты из частей: сайты для браузера, сети выбранных приложений, прежние режимы. */

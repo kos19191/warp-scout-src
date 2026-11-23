@@ -831,6 +831,23 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 }
+                // Спутники (с 1.10.37): Gemini работает внутри приложения Google, и оно идёт через туннель
+                // вместе с ним — иначе Gemini писал «Эта страна не поддерживается». Говорим, куда оно
+                // идёт, и предупреждаем, если его нет на телефоне: без него Gemini не откроется.
+                if (prefs.appsMode == Prefs.APPS_ONLY && selected > 0) {
+                    dev.warpscout.core.lists.AppServices.companionsFor(prefs.appsSelected).forEach { j ->
+                        val installed = runCatching {
+                            @Suppress("DEPRECATION")
+                            packageManager.getApplicationInfo(j.companion.pkg, 0)
+                        }.isSuccess
+                        val res = when {
+                            !installed -> R.string.tunnel_apps_companion_missing
+                            partial -> R.string.tunnel_apps_companion_sites
+                            else -> R.string.tunnel_apps_companion
+                        }
+                        append("\n").append(getString(res, j.service, j.companion.title))
+                    }
+                }
                 append(otherProfileNote())
             }
             binding.textTunnelSummary.text = text
@@ -4951,7 +4968,15 @@ class MainActivity : AppCompatActivity() {
                 }
                 val app = visibleApps[position]
                 row.appLabel.text = app.label
-                row.appPackage.text = app.pkg
+                // Спутник (с 1.10.37): с Gemini в туннель идёт приложение Google — говорим об этом
+                // прямо в строке, пока выбирают (только в режиме «только выбранные»).
+                val joined = if (mode == Prefs.APPS_ONLY) {
+                    dev.warpscout.core.lists.AppServices.serviceOf(app.pkg)?.companions.orEmpty()
+                        .filter { it.pkg != app.pkg }.joinToString(", ") { it.title }
+                } else {
+                    ""
+                }
+                row.appPackage.text = if (joined.isEmpty()) app.pkg else getString(R.string.apps_row_companion, app.pkg, joined)
                 row.appCheck.isChecked = app.pkg in selected
                 // Иконку читаем, только когда строка видна, и запоминаем: их сотни, а видно десяток.
                 val icon = icons.getOrPut(app.pkg) {

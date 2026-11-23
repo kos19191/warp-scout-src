@@ -22,6 +22,7 @@ import dev.warpscout.core.config.SplitRoutes
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.crypto.Crypto
 import dev.warpscout.core.junk.JunkLibrary
+import dev.warpscout.core.lists.AppServices
 import dev.warpscout.core.lists.ProtonFree
 import dev.warpscout.core.model.AddrFamily
 import dev.warpscout.core.model.Endpoint
@@ -3099,11 +3100,28 @@ class WarpVpnService : VpnService() {
                     TunnelDebug.stage("приложения: режим «только выбранные», но список пуст — идут все")
                 } else {
                     selected.forEach { runCatching { builder.addAllowedApplication(it) } }
+                    // Спутники выбранных (с 1.10.37, см. AppServices.companionsFor): Gemini на Android —
+                    // оболочка, запросы к Google и проверку страны делает приложение Google. Без него
+                    // в туннеле Gemini писал «Эта страна не поддерживается» (23.11): запросы шли мимо
+                    // туннеля, с российского адреса оператора. Нет на телефоне — так и говорим.
+                    val joined = runCatching { AppServices.companionsFor(selected) }.getOrDefault(emptyList())
+                    val (added, absent) = joined.partition {
+                        runCatching { builder.addAllowedApplication(it.companion.pkg) }.isSuccess
+                    }
                     // Сам WarpScout — тоже в туннель: иначе проверка связи и замер скорости шли
                     // мимо него и показывали скорость обычного интернета, а не туннеля, через
                     // который идут выбранные приложения.
                     runCatching { builder.addAllowedApplication(packageName) }
-                    TunnelDebug.stage("приложения: только выбранные (${selected.size}) и сам WarpScout — для проверок")
+                    TunnelDebug.stage(
+                        "приложения: только выбранные (${selected.size}) и сам WarpScout — для проверок" +
+                            added.joinToString("") { "; с ними приложение ${it.companion.title} — внутри него работает ${it.service}" }
+                    )
+                    absent.forEach {
+                        TunnelDebug.stage(
+                            "приложения: ${it.service} работает внутри приложения ${it.companion.title}, а его нет на " +
+                                "телефоне (или оно выключено) — ${it.service} может не открыться"
+                        )
+                    }
                 }
             }
 
