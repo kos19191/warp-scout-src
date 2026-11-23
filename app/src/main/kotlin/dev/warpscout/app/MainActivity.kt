@@ -4091,41 +4091,34 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         // Выход по проверке связи сервиса — самый свежий: он проверен запросом через туннель.
         val snap = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
         val serviceExit = snap?.takeIf { it.up && it.linkWeb == TunnelStatus.LINK_OK }?.linkExit.orEmpty()
-        // С 1.10.31 — только страна («выход: RU»): площадка Cloudflare (HEL, DME) читалась как страна.
-        // С 1.10.34 выход через Россию называется городом с предупреждением (см. exitLabel) — но только
-        // по свежей проверке этой сессии, не по запомненной строке прошлых дней.
+        // Выход — только страной («RU»): площадка Cloudflare (HEL, DME) читалась как страна, а город с
+        // предупреждением про Telegram («Москва — Telegram может тормозить») человек попросил убрать
+        // (23.11): площадка и что с Telegram — в журнале. Страна — по свежей проверке, иначе запомненная.
         val fresh = listOf(serviceExit, exitRegion).firstOrNull { dev.warpscout.core.net.CfTrace.countryOf(it).isNotBlank() }
-        val region = if (fresh != null) {
-            exitLabel(fresh, dev.warpscout.core.net.CfTrace.countryOf(fresh), snap)
-        } else {
-            dev.warpscout.core.net.CfTrace.countryOf(prefs.lastExitRegion).ifBlank { getString(R.string.region_unknown) }
+        val region = dev.warpscout.core.net.CfTrace.countryOf(fresh ?: prefs.lastExitRegion)
+            .ifBlank { getString(R.string.region_unknown) }
+        val text = StringBuilder(getString(R.string.endpoint_now, now.ifBlank { "—" }, region))
+        // Второй выход — третьей строкой, только когда он поднят (см. secondExitCountry).
+        secondExitCountry(snap)?.let { country ->
+            text.append('\n').append(
+                getString(R.string.endpoint_second, country.ifBlank { getString(R.string.region_unknown) })
+            )
         }
-        binding.textEndpointNow.text = getString(
-            R.string.endpoint_now,
-            now.ifBlank { "—" },
-            region
-        )
+        binding.textEndpointNow.text = text
     }
 
     /**
-     * Подпись выхода (с 1.10.34). Выход WARP через Россию — город и что с Telegram (так решил человек
-     * 23.11: «выход: Москва — Telegram может тормозить»), иначе — страна [country], как с 1.10.31.
-     * [summary] — строка проверки («DME · RU · адрес», см. CfTrace.summary). Telegram уже идёт через
-     * второй выход — так и пишем; проверка медиа показала «тормозит» — пишем «тормозит», без «может».
+     * Страна второго выхода для строк «где мы» (с 1.10.40): null — в этой сессии он не поднят (о нём не
+     * пишем), "" — поднят, страна неизвестна. По серверу Proton, иначе по последней проверке своего
+     * сервера (см. ExitCheck.secondCountry).
      */
-    private fun exitLabel(summary: String?, country: String, snap: TunnelStatus?): String {
-        val site = dev.warpscout.core.net.ExitSite.fromSummary(summary)
-        if (!dev.warpscout.core.net.ExitSite.isRussian(site)) return country
-        val city = dev.warpscout.core.net.ExitSite.city(site)
-        val mediaSlow = snap != null && snap.tgMediaAt > 0L && snap.tgMediaAt >= snap.startedAt &&
-            (snap.tgMedia == dev.warpscout.core.net.TelegramMedia.SLOW || snap.tgMedia == dev.warpscout.core.net.TelegramMedia.STALL)
-        return when {
-            // Через второй выход — только когда он и правда поднят: иначе Telegram идёт через WARP.
-            snap != null && snap.tgSecond && snap.second == TunnelStatus.SECOND_UP -> getString(R.string.exit_ru_tg_second, city)
-            mediaSlow -> getString(R.string.exit_ru_tg_slow, city)
-            else -> getString(R.string.exit_ru_warn, city)
-        }
-    }
+    private fun secondExitCountry(snap: TunnelStatus?): String? = runCatching {
+        ExitCheck.secondCountry(
+            snap != null && snap.up && snap.second == TunnelStatus.SECOND_UP,
+            snap?.secondPeer.orEmpty(),
+            ExitCheck.decode(prefs.secondCheck)
+        )
+    }.getOrNull()
 
     /** Вопрос про Telegram, уже показанный окном на этом экране (по времени вопроса). */
     private var tgAskShownAt = 0L
@@ -4204,6 +4197,9 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     /** Журнал, для которого уже построены подсказки: чтобы не пересобирать их на каждом тике. */
     private var lastDiagDump: String? = null
 
+    /** Страна второго выхода в строке «Точка входа / Выход» на прошлом тике (null — его не было). */
+    private var lastSecondNote: String? = null
+
     private val tunnelPollerTask = object : Runnable {
         override fun run() {
             updateTunnelDiagnostics()
@@ -4222,6 +4218,15 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             } else if (marksNow != lastMarksRendered) {
                 // Дозор узнал новое о точках — отметки в списке должны это показать сразу.
                 renderShortlist()
+            }
+            // Второй выход поднимается через секунды после туннеля и может сменить сервер: строка
+            // «Точка входа / Выход / Второй выход» (расширенный вид) обновляется, как только это случилось.
+            runCatching {
+                val secondNow = secondExitCountry(TunnelStatusBus.snapshot(this@MainActivity))
+                if (secondNow != lastSecondNote) {
+                    lastSecondNote = secondNow
+                    if (uiReady()) updateEndpointNote()
+                }
             }
             // Пока туннель не поднят — часто (видно этапы подъёма), когда работает — редко.
             tunnelHandler.postDelayed(this, if (tunnel.isUp) 3000L else 700L)
@@ -4776,18 +4781,24 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             )
         )
 
-        // Где мы: вид сети, точка входа и (если проверка связи прошла) страна выхода. С 1.10.31 —
-        // «выход: RU», а не площадка Cloudflare: «выход HEL» читалось как Финляндия, хотя сайты
-        // видят российский адрес.
+        // Где мы: вид сети, точка входа, страна выхода WARP (если проверка связи прошла) и страна второго
+        // выхода (если он поднят): «мобильная · вход 8.35.211.3:864 · выход RU · второй выход NL». Так
+        // попросил человек 23.11: «просто мобильная, какой вход, какой выход, какой выход у второго;
+        // если второго нет — просто не пиши». Страной, а не площадкой Cloudflare: «выход HEL» читалось
+        // как Финляндия; город и предупреждение про Telegram — только в журнале.
         val endpoint = if (up) TunnelDebug.endpoint.trim().ifBlank { snap?.endpoint.orEmpty() } else ""
         val net = netKindNow().ifBlank { "сеть" }
         val exitSummary = snap?.takeIf { linkFresh && it.linkWeb == TunnelStatus.LINK_OK }?.linkExit
         val country = dev.warpscout.core.net.CfTrace.countryOf(exitSummary)
-        val where = when {
-            endpoint.isBlank() -> ""
-            // С 1.10.34 выход через Россию — городом и с предупреждением про Telegram (см. exitLabel).
-            country.isNotBlank() -> getString(R.string.simple_where_region, net, endpoint, exitLabel(exitSummary, country, snap))
-            else -> getString(R.string.simple_where, net, endpoint)
+        val where = if (endpoint.isBlank()) {
+            ""
+        } else {
+            val parts = arrayListOf(getString(R.string.simple_where, net, endpoint))
+            if (country.isNotBlank()) parts += getString(R.string.where_exit, country)
+            secondExitCountry(snap)?.let { second ->
+                parts += if (second.isBlank()) getString(R.string.where_second_plain) else getString(R.string.where_second, second)
+            }
+            parts.joinToString(" · ")
         }
         s.simpleWhere.text = where
         s.simpleWhere.visibility = if (where.isBlank()) View.INVISIBLE else View.VISIBLE
@@ -5709,7 +5720,8 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                             is Updater.Check.Rebuild -> offerUpdate(
                                 r.release,
                                 getString(R.string.update_rebuild_title, r.release.version),
-                                getString(R.string.update_rebuild_msg, BuildConfig.BUILD_REV, r.remoteRev, sizeText(r.release.size))
+                                getString(R.string.update_rebuild_msg, BuildConfig.BUILD_REV, r.remoteRev, sizeText(r.release.size)),
+                                rev = r.remoteRev
                             )
                         }
                     }.onFailure { t ->
@@ -5737,9 +5749,14 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     /** Размеры совпадают; 0 — неизвестен (запасной путь без API, записи до 1.10.40) — тогда не сравниваем. */
     private fun sameSize(a: Long, b: Long): Boolean = a <= 0L || b <= 0L || a == b
 
-    private fun offerUpdate(release: Updater.Release, title: String, message: String) {
+    /**
+     * [rev] — коммит свежей сборки той же версии (тег перенесён на доправку). Имя файла у неё прежнее, и
+     * по одному имени скачанный раньше файл — это та сборка, что уже стоит: такой файл не предлагаем, а
+     * качаем заново. Запомненная загрузка подходит, только если скачана для этого же коммита.
+     */
+    private fun offerUpdate(release: Updater.Release, title: String, message: String, rev: String? = null) {
         // Этот же файл WarpScout уже скачал сам (с 1.10.40) и он лежит в «Загрузках» — второй раз не качаем.
-        directReadyName(release)?.let { name ->
+        directReadyName(release, rev)?.let { name ->
             TunnelDebug.stage("обновления: $name уже в «Загрузках» — ставится нажатием на файл")
             showUpdateReady(release, name)
             return
@@ -5749,7 +5766,8 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         // каждое нажатие, пока загрузка ждала сеть или очередь (жалоба на 1.10.38).
         val sp = updatePrefs()
         val known = sp.getLong("dlId", -1L).takeIf {
-            it >= 0L && sp.getString("dlName", null) == release.apkName && sameSize(sp.getLong("dlSize", 0L), release.size)
+            it >= 0L && sp.getString("dlName", null) == release.apkName && sameSize(sp.getLong("dlSize", 0L), release.size) &&
+                (rev == null || sp.getString("dlRev", null) == rev)
         }
         val state = known?.let { id -> runCatching { Updater.query(this, id) }.getOrNull() }
         if (known != null && state?.status == android.app.DownloadManager.STATUS_SUCCESSFUL && Updater.fileExists(this, known)) {
@@ -5762,21 +5780,22 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             state.status != android.app.DownloadManager.STATUS_SUCCESSFUL &&
             state.status != android.app.DownloadManager.STATUS_FAILED
         ) {
-            if (!UpdateFlow.watch(this, known, release)) UpdateFlow.busyText(this)?.let { updateNote(it) }
+            if (!UpdateFlow.watch(this, known, release, rev)) UpdateFlow.busyText(this)?.let { updateNote(it) }
             return
         }
         android.app.AlertDialog.Builder(this)
             .setTitle(title)
             .setMessage(message)
-            .setPositiveButton(R.string.update_download) { _, _ -> downloadUpdate(release) }
+            .setPositiveButton(R.string.update_download) { _, _ -> downloadUpdate(release, rev) }
             .setNegativeButton(R.string.update_later, null)
             .show()
     }
 
     /** Свой скачанный файл этой версии ещё лежит в «Загрузках» (с 1.10.40): его имя, иначе null. */
-    private fun directReadyName(release: Updater.Release): String? = runCatching {
+    private fun directReadyName(release: Updater.Release, rev: String?): String? = runCatching {
         val sp = updatePrefs()
         if (sp.getString("directFor", null) != release.apkName) return@runCatching null
+        if (rev != null && sp.getString("directRev", null) != rev) return@runCatching null
         val size = sp.getLong("directSize", -1L)
         if (size <= 0L || !sameSize(size, release.size)) return@runCatching null
         val uri = Uri.parse(sp.getString("directUri", null) ?: return@runCatching null)
@@ -5790,7 +5809,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
      * нажатием — своего разрешения на установку у WarpScout нет (см. Updater). На Android 8–9
      * «Загрузкам» нужно разрешение на запись в память, которого у нас нет, — там качает браузер.
      */
-    private fun downloadUpdate(release: Updater.Release) {
+    private fun downloadUpdate(release: Updater.Release, rev: String? = null) {
         UpdateFlow.busyText(this)?.let { text ->
             updateNote(text)
             return
@@ -5799,7 +5818,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             openUpdateInBrowser(release)
             return
         }
-        if (!UpdateFlow.start(this, release)) UpdateFlow.busyText(this)?.let { updateNote(it) }
+        if (!UpdateFlow.start(this, release, rev)) UpdateFlow.busyText(this)?.let { updateNote(it) }
     }
 
     private fun openUpdateInBrowser(release: Updater.Release) {

@@ -190,6 +190,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("обновления: GitHub через туннель, вставшая загрузка, докачка (1.10.40)") {
             updateDownloadChecks()
         }
+        section("строка «где мы»: страна второго выхода (1.10.40)") {
+            whereLineChecks()
+        }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
                 liveNetwork()
@@ -866,6 +869,24 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         expect("докачка: размер неизвестен (*) — начало плюс кусок", d.totalFrom(206, 500L, "bytes 1000-1499/*", 1000L), 1500L)
         expect("докачка: 200 — размер по длине", d.totalFrom(200, 1500L, null, 0L), 1500L)
         expect("докачка: длины нет — размер неизвестен", d.totalFrom(200, -1L, null, 0L), -1L)
+    }
+
+    /**
+     * Строка «где мы» под кнопкой (с 1.10.40): «мобильная · вход … · выход RU · второй выход NL».
+     * Второй выход — только когда поднят; страна — по серверу Proton, иначе по проверке своего сервера.
+     */
+    private fun whereLineChecks() {
+        val nl = ExitCheck.Result("NL", "149.34.244.177", 1L, 900)
+        val mx = ExitCheck.Result("MX", "84.20.27.49", 1L)
+        expect("где мы: второй выход не поднят — о нём не пишем", ExitCheck.secondCountry(false, "NL-FREE#121", nl), null)
+        expect("где мы: сервер Proton — страна по имени", ExitCheck.secondCountry(true, "NL-FREE#121", null), "NL")
+        expect("где мы: сменился сервер Proton — страна нового, не прежней проверки", ExitCheck.secondCountry(true, "PL-FREE#3", nl), "PL")
+        expect("где мы: свой сервер — страна по проверке", ExitCheck.secondCountry(true, "", mx), "MX")
+        expect("где мы: свой сервер с выходом в России — так и пишем", ExitCheck.secondCountry(true, "", ExitCheck.Result("RU", "5.6.7.8", 1L)), "RU")
+        expect("где мы: проверка не прошла — страны нет", ExitCheck.secondCountry(true, "", ExitCheck.Result(ExitCheck.FAIL, "нет ответа", 1L)), "")
+        expect("где мы: ушло через WARP — страны нет", ExitCheck.secondCountry(true, "", ExitCheck.Result(ExitCheck.VIA_WARP, "1.2.3.4", 1L)), "")
+        expect("где мы: проверки не было — страны нет", ExitCheck.secondCountry(true, "", null), "")
+        expect("где мы: строка проверки из настроек", ExitCheck.secondCountry(true, "", ExitCheck.decode("NL|149.34.244.177|1700000000000|829")), "NL")
     }
 
     // ------------------------------------------------------------------ helpers

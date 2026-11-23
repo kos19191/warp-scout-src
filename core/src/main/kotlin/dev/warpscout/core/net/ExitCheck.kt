@@ -52,6 +52,20 @@ object ExitCheck {
 
     private fun isCountry(code: String) = code.length == 2 && code.all { it in 'A'..'Z' }
 
+    /**
+     * Страна второго выхода для строки «где мы» под кнопкой (с 1.10.40): «мобильная · вход … · выход RU
+     * · второй выход NL». null — второй выход в этой сессии не поднят (тогда о нём не пишем: «если
+     * второго нет, просто не пиши», 23.11); "" — поднят, а страна неизвестна. Страна — по имени сервера
+     * Proton [peer] («NL-FREE#121» → NL): оно всегда про тот сервер, что работает сейчас. Свой сервер
+     * ([peer] пустой) — по последней проверке второго выхода [check]: адрес у него один, страна та же.
+     */
+    fun secondCountry(up: Boolean, peer: String, check: Result?): String? {
+        if (!up) return null
+        val byName = peer.trim().substringBefore('-').uppercase()
+        if (isCountry(byName)) return byName
+        return check?.code?.takeIf { isCountry(it) }.orEmpty()
+    }
+
     /** Разобрать строку из настроек (и прежнего формата «DE|адрес|время»). null — проверки не было. */
     fun decode(text: String?): Result? {
         val parts = text.orEmpty().split('|')

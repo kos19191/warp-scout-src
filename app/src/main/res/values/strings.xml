@@ -166,6 +166,7 @@
     <string name="notif_stop">Отключить</string>
     <string name="tunnel_trying">Пробую точку %1$d из %2$d: %3$s…</string>
     <string name="endpoint_now">Точка входа: %1$s\nВыход: %2$s</string>
+    <string name="endpoint_second">Второй выход: %1$s</string>
     <string name="region_unknown">не определён</string>
     <string name="tunnel_reconnect_settings">Настройки изменены — переподключаю туннель</string>
     <string name="tunnel_connecting_busy">Уже подключаюсь — дождись результата</string>
@@ -375,7 +376,10 @@
     <string name="simple_act_data">Проверяю, идут ли данные через %1$s</string>
     <string name="simple_act_try">Точка %1$d из %2$d: %3$s</string>
     <string name="simple_where">%1$s · вход %2$s</string>
-    <string name="simple_where_region">%1$s · вход %2$s · выход: %3$s</string>
+    <!-- 1.10.40: «мобильная · вход … · выход RU · второй выход NL» — части через « · » -->
+    <string name="where_exit">выход %1$s</string>
+    <string name="where_second">второй выход %1$s</string>
+    <string name="where_second_plain">второй выход</string>
     <string name="simple_dash">—</string>
     <string name="simple_link_title">Связь</string>
     <string name="simple_link_ms">%1$d мс</string>
@@ -459,10 +463,6 @@
     <string name="conn_link_fail"> · связи нет — переподключаю</string>
     <string name="conn_link_tg"> · Telegram не отвечает</string>
     <string name="conn_link_tg_media"> · Telegram: связь есть, медиа тормозит</string>
-    <!-- Выход WARP через Россию (с 1.10.34): город площадки и что с Telegram -->
-    <string name="exit_ru_warn">%1$s — Telegram может тормозить</string>
-    <string name="exit_ru_tg_slow">%1$s — Telegram тормозит</string>
-    <string name="exit_ru_tg_second">%1$s — Telegram через второй выход</string>
     <!-- Вопрос «пустить Telegram через второй выход?» (с 1.10.36): уведомление и окно на экране -->
     <string name="tg_ask_channel">Вопросы: Telegram и второй выход</string>
     <string name="tg_ask_title">Telegram тормозит через %1$s</string>

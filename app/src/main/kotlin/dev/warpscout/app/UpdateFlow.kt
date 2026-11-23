@@ -128,9 +128,11 @@ object UpdateFlow {
 
     /**
      * Скачать [release] (Android 10+): системной загрузкой — в «Загрузки», с уведомлением; встанет —
-     * самим. false — уже что-то идёт (экран скажет что, см. [busyText]).
+     * самим. false — уже что-то идёт (экран скажет что, см. [busyText]). [rev] — коммит сборки, когда
+     * это свежая сборка той же версии (тег перенесён): имя файла у неё прежнее, и запомненная загрузка
+     * узнаётся по коммиту, а не по имени — иначе экран предложил бы уже стоящую сборку.
      */
-    fun start(context: Context, release: Updater.Release): Boolean {
+    fun start(context: Context, release: Updater.Release, rev: String? = null): Boolean {
         val app = context.applicationContext
         if (!claim(SYSTEM)) return false
         say(app.getString(R.string.update_state_start))
@@ -145,15 +147,17 @@ object UpdateFlow {
                     null
                 }
                 if (id == null) {
-                    direct(app, release, app.getString(R.string.update_why_no_dm))
+                    direct(app, release, app.getString(R.string.update_why_no_dm), rev)
                 } else {
                     prefs(app).edit()
                         .putLong("dlId", id)
                         .putString("dlName", release.apkName)
                         .putLong("dlSize", release.size)
+                        // null — не пересборка: запись убирается (putString(null) = remove).
+                        .putString("dlRev", rev)
                         .apply()
                     TunnelDebug.stage("обновления: скачиваю ${release.apkName} в «Загрузки» системной загрузкой")
-                    watchLoop(app, id, release)
+                    watchLoop(app, id, release, rev)
                 }
             }.onFailure { t -> crashed(app, t) }
         }.apply { isDaemon = true; name = "warpscout-update-download" }.start()
@@ -164,18 +168,18 @@ object UpdateFlow {
      * Следить за системной загрузкой [id], поставленной раньше — до перезапуска приложения или прошлой
      * версией: идёт — показываем проценты, встала — убираем и качаем сами. false — уже что-то идёт.
      */
-    fun watch(context: Context, id: Long, release: Updater.Release): Boolean {
+    fun watch(context: Context, id: Long, release: Updater.Release, rev: String? = null): Boolean {
         val app = context.applicationContext
         if (!claim(SYSTEM)) return false
         say(app.getString(R.string.update_state_attach))
         TunnelDebug.stage("обновления: ${release.apkName} уже в системной загрузке — слежу; встанет — скачаю сам")
         Thread {
-            runCatching { watchLoop(app, id, release) }.onFailure { t -> crashed(app, t) }
+            runCatching { watchLoop(app, id, release, rev) }.onFailure { t -> crashed(app, t) }
         }.apply { isDaemon = true; name = "warpscout-update-download" }.start()
         return true
     }
 
-    private fun watchLoop(app: Context, id: Long, release: Updater.Release) {
+    private fun watchLoop(app: Context, id: Long, release: Updater.Release, rev: String?) {
         val started = SystemClock.elapsedRealtime()
         val stall = StallWatch(started, FIRST_BYTE_MS, PROGRESS_MS)
         var last: Updater.Download? = null
@@ -225,7 +229,7 @@ object UpdateFlow {
                 if (verified == false) {
                     Updater.remove(app, id)
                     TunnelDebug.stage("обновления: системная загрузка скачала испорченный файл (контрольная сумма не сошлась) — удалил, качаю сам")
-                    direct(app, release, app.getString(R.string.update_why_bad_hash))
+                    direct(app, release, app.getString(R.string.update_why_bad_hash), rev)
                 } else {
                     val name = d?.name?.ifBlank { null } ?: release.apkName
                     TunnelDebug.stage("обновления: $name в «Загрузках» — ставится нажатием на файл")
@@ -243,7 +247,7 @@ object UpdateFlow {
                     "обновления: системная загрузка $why — $got, статус ${d?.status}, причина ${d?.reason}; убираю её и качаю сам"
                 )
                 Updater.remove(app, id)
-                direct(app, release, why)
+                direct(app, release, why, rev)
             }
             else -> {
                 TunnelDebug.stage("обновления: системная загрузка идёт дольше 30 минут — больше не слежу; скачает — Android покажет «Загрузка завершена»")
@@ -277,7 +281,7 @@ object UpdateFlow {
      * GitHub в маршрутах туннеля и при раздельных маршрутах), не вышло — мимо туннеля (туннель поднят,
      * а данные не идут). [why] — что было с системной загрузкой, для экрана и журнала.
      */
-    private fun direct(app: Context, release: Updater.Release, why: String) {
+    private fun direct(app: Context, release: Updater.Release, why: String, rev: String?) {
         synchronized(this) { phase = DIRECT }
         say(app.getString(R.string.update_direct_start, why))
         if (Build.VERSION.SDK_INT < 29) {
@@ -308,6 +312,7 @@ object UpdateFlow {
                     .putString("directName", got.name)
                     .putString("directFor", release.apkName)
                     .putLong("directSize", got.size)
+                    .putString("directRev", rev)
                     .apply()
                 val sum = when (got.verified) {
                     true -> "контрольная сумма сошлась"
