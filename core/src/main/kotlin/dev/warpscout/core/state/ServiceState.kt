@@ -132,6 +132,21 @@ data class TunnelStatus(
      * автопоиск Proton Free): «NL-FREE#12». Пусто — свой сервер из конфига.
      */
     val secondPeer: String = "",
+    /**
+     * Проверка медиа Telegram (с 1.10.34, см. TelegramMedia): небольшая загрузка с серверов Telegram
+     * с отметками времени — видно, идут ли данные ровно, а не только открывается ли соединение.
+     * Значения — TelegramMedia.UNKNOWN / OK / SLOW / STALL / FAIL / NOT_TELEGRAM.
+     */
+    val tgMedia: Int = 0,
+    /** Скорость той загрузки, Кбит/с; −1 — не мерили. */
+    val tgMediaKbps: Int = -1,
+    /** Когда проверяли медиа Telegram; 0 — в этой сессии не проверяли. */
+    val tgMediaAt: Long = 0L,
+    /**
+     * Telegram сейчас идёт через второй выход (с 1.10.34): выход WARP — в России, а второй выход
+     * настроен. Через московскую площадку Cloudflare медиа Telegram режут фильтры (журнал 23.11).
+     */
+    val tgSecond: Boolean = false,
 ) {
 
     val isStarting: Boolean get() = phase == PHASE_STARTING || phase == PHASE_RECONNECTING
@@ -175,6 +190,10 @@ data class TunnelStatus(
         "dataCheckAt" to JsonVal.num(dataCheckAt),
         "second" to JsonVal.num(second),
         "secondPeer" to JsonVal.str(secondPeer),
+        "tgMedia" to JsonVal.num(tgMedia),
+        "tgMediaKbps" to JsonVal.num(tgMediaKbps),
+        "tgMediaAt" to JsonVal.num(tgMediaAt),
+        "tgSecond" to JsonVal.bool(tgSecond),
     ).render()
 
     companion object {
@@ -288,6 +307,11 @@ data class TunnelStatus(
                 dataCheckAt = obj.lng("dataCheckAt"),
                 second = obj.lng("second").toInt(),
                 secondPeer = obj.str("secondPeer").orEmpty(),
+                // Нет полей (снимок от прежней версии) — медиа не проверяли, Telegram через WARP.
+                tgMedia = obj.lng("tgMedia").toInt(),
+                tgMediaKbps = if (obj.fields.containsKey("tgMediaKbps")) obj.lng("tgMediaKbps").toInt() else -1,
+                tgMediaAt = obj.lng("tgMediaAt"),
+                tgSecond = obj.bool("tgSecond") ?: false,
             )
         }
     }
@@ -369,6 +393,16 @@ data class ServiceSettings(
     val routes: String = "",
     /** Те же маршруты словами — строка в журнал при подъёме («сайты из списков: 679 + …»). */
     val routesNote: String = "",
+    /**
+     * Искать точку с выходом за рубежом, если выход WARP на этой сети — в России (с 1.10.34): на
+     * зарядке с погашенным экраном, не чаще раза в сутки на сеть, туннель гаснет примерно на минуту.
+     */
+    val abroadSearch: Boolean = true,
+    /**
+     * Пускать Telegram через второй выход, пока выход WARP — в России (с 1.10.34). Выход за рубежом —
+     * Telegram снова напрямую через WARP (так быстрее).
+     */
+    val tgSecond: Boolean = true,
 ) {
 
     fun toJson(): String = JsonVal.obj(
@@ -392,6 +426,8 @@ data class ServiceSettings(
         "secondPeers" to JsonVal.arr(secondPeers.map { JsonVal.str(it) }),
         "routes" to JsonVal.str(routes),
         "routesNote" to JsonVal.str(routesNote),
+        "abroadSearch" to JsonVal.bool(abroadSearch),
+        "tgSecond" to JsonVal.bool(tgSecond),
     ).render()
 
     companion object {
@@ -431,6 +467,9 @@ data class ServiceSettings(
                 // Нет поля (снимок от прежней версии) — маршруты остаются как в конфиге.
                 routes = obj.str("routes").orEmpty(),
                 routesNote = obj.str("routesNote").orEmpty(),
+                // Нет поля (снимок от прежней версии) — включено, как и по умолчанию.
+                abroadSearch = obj.bool("abroadSearch") ?: true,
+                tgSecond = obj.bool("tgSecond") ?: true,
             )
         }
     }

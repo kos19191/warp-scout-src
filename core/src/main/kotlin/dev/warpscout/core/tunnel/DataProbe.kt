@@ -41,24 +41,41 @@ object DataProbe {
     fun randomPort(random: java.util.Random): Int = 40_000 + random.nextInt(20_000)
 
     /** IPv4/UDP-пакет с DNS-запросом «A cloudflare.com» от [src]:[srcPort] к [dst]:53. */
-    fun dnsQuery(src: ByteArray, srcPort: Int, txId: Int, dst: ByteArray = TARGET): ByteArray {
-        require(src.size == 4 && dst.size == 4) { "нужны IPv4-адреса" }
+    fun dnsQuery(src: ByteArray, srcPort: Int, txId: Int, dst: ByteArray = TARGET): ByteArray =
+        udp4(src, srcPort, dst, TARGET_PORT, question(txId, QNAME, qtype = 1, qclass = 1, recursive = true))
+
+    /** Что спрашиваем о площадке: «id.server» класса CHAOS. */
+    private val SITE_QNAME = listOf("id", "server")
+
+    /**
+     * IPv4/UDP-пакет с запросом «id.server» класса CHAOS, тип TXT (с 1.10.34). Резолвер 1.1.1.1
+     * отвечает на него кодом площадки Cloudflare, которая обработала запрос («DME», «HEL») — так
+     * его и описывает документация Cloudflare для диагностики. Внутри WARP это площадка выхода:
+     * через Москву трафик выходит в российский интернет, под фильтры (журнал 23.11 — медиа Telegram
+     * «через раз и рывками»). Один пакет рядом с проверкой данных — подбор узнаёт площадку каждой
+     * точки бесплатно, без подъёма туннеля.
+     */
+    fun siteQuery(src: ByteArray, srcPort: Int, txId: Int, dst: ByteArray = TARGET): ByteArray =
+        udp4(src, srcPort, dst, TARGET_PORT, question(txId, SITE_QNAME, qtype = 16, qclass = 3, recursive = false))
+
+    /** Тело DNS-запроса с одним вопросом. */
+    private fun question(txId: Int, labels: List<String>, qtype: Int, qclass: Int, recursive: Boolean): ByteArray {
         val dns = java.io.ByteArrayOutputStream()
         dns.write((txId ushr 8) and 0xff)
         dns.write(txId and 0xff)
-        dns.write(0x01)                 // RD: рекурсивный запрос
+        dns.write(if (recursive) 0x01 else 0x00)   // RD: рекурсивный запрос (CHAOS отвечает сам резолвер)
         dns.write(0x00)
         dns.write(0); dns.write(1)      // QDCOUNT = 1
         repeat(6) { dns.write(0) }      // ANCOUNT, NSCOUNT, ARCOUNT = 0
-        for (label in QNAME) {
+        for (label in labels) {
             val bytes = label.toByteArray(Charsets.US_ASCII)
             dns.write(bytes.size)
             dns.write(bytes, 0, bytes.size)
         }
         dns.write(0)
-        dns.write(0); dns.write(1)      // QTYPE = A
-        dns.write(0); dns.write(1)      // QCLASS = IN
-        return udp4(src, srcPort, dst, TARGET_PORT, dns.toByteArray())
+        dns.write((qtype ushr 8) and 0xff); dns.write(qtype and 0xff)
+        dns.write((qclass ushr 8) and 0xff); dns.write(qclass and 0xff)
+        return dns.toByteArray()
     }
 
     /**
@@ -113,6 +130,63 @@ object DataProbe {
         val dnsAt = ihl + 8
         if (u16(packet, dnsAt) != (txId and 0xffff)) return false
         return (packet[dnsAt + 2].toInt() and 0x80) != 0
+    }
+
+    /**
+     * Код площадки из ответа на [siteQuery] («DME»); null — это не ответ на наш запрос, ответ без
+     * записи TXT или в ней не код площадки. Имена в ответе могут быть сжаты (ссылки 0xC0xx) — их
+     * пропускаем, не разворачивая: нужен только первый TXT.
+     */
+    fun siteOf(packet: ByteArray, srcPort: Int, txId: Int, length: Int = packet.size): String? {
+        if (!isReply(packet, srcPort, txId, length)) return null
+        val ihl = (packet[0].toInt() and 0x0f) * 4
+        val dns = ihl + 8
+        // Расшифрованный пакет WireGuard дополнен нулями до кратного 16 — граница по длине из
+        // заголовка IP, иначе нули дополнения читались бы как часть ответа.
+        val total = u16(packet, 2)
+        val end = if (total in (dns + 12)..length) total else length
+        if (end < dns + 12) return null
+        val qd = u16(packet, dns + 4)
+        val an = u16(packet, dns + 6)
+        if (an <= 0) return null
+        var pos = dns + 12
+        repeat(qd) {
+            pos = skipName(packet, pos, end) ?: return null
+            pos += 4                                   // QTYPE, QCLASS
+            if (pos > end) return null
+        }
+        repeat(an) {
+            pos = skipName(packet, pos, end) ?: return null
+            if (pos + 10 > end) return null
+            val type = u16(packet, pos)
+            val rdLen = u16(packet, pos + 8)
+            val rd = pos + 10
+            if (rd + rdLen > end) return null
+            if (type == 16 && rdLen >= 1) {
+                val len = packet[rd].toInt() and 0xff
+                if (len >= 1 && 1 + len <= rdLen) {
+                    val text = String(packet, rd + 1, len, Charsets.US_ASCII)
+                    return dev.warpscout.core.net.ExitSite.normalize(text).ifEmpty { null }
+                }
+                return null
+            }
+            pos = rd + rdLen
+        }
+        return null
+    }
+
+    /** Пропустить имя в DNS-сообщении: метки или ссылку (два байта 0xC0xx). null — имя битое. */
+    private fun skipName(b: ByteArray, start: Int, end: Int): Int? {
+        var pos = start
+        var guard = 0
+        while (pos < end && guard++ < 64) {
+            val len = b[pos].toInt() and 0xff
+            if (len == 0) return pos + 1
+            if ((len and 0xc0) == 0xc0) return if (pos + 2 <= end) pos + 2 else null
+            if ((len and 0xc0) != 0) return null
+            pos += 1 + len
+        }
+        return null
     }
 
     /** Интернет-контрольная сумма (RFC 1071): сумма 16-битных слов с переносом, инвертированная. */

@@ -56,12 +56,33 @@ object Shortlist {
      */
     private fun rank(): Comparator<Candidate> =
         compareByDescending<Candidate> { it.resourcesTotal > 0 }
-            .thenByDescending { it.resourcesOk }
+            .thenByDescending { opened(it) }
+            .thenByDescending { dev.warpscout.core.net.ExitSite.rank(it.site) }
             // Ответ через туннель пришёл — выше тех, у кого данные не проверяли (старые отчёты).
             .thenByDescending { it.stats.dataReplies > 0 }
             // Одинаково открывшиеся — по ступени скорости через туннель (см. SpeedTest.bucket).
             .thenByDescending { dev.warpscout.core.net.SpeedTest.bucket(it.speedKbps) }
             .thenByDescending { it.score }
+
+    /**
+     * Порядок проверенных изнутри — общий для победителя подбора и первой строки тройки: сколько
+     * открылось → где выход → ступень скорости → балл.
+     */
+    fun verifiedOrder(): Comparator<Candidate> =
+        compareByDescending<Candidate> { opened(it) }
+            .thenByDescending { dev.warpscout.core.net.ExitSite.rank(it.site) }
+            .thenByDescending { dev.warpscout.core.net.SpeedTest.bucket(it.speedKbps) }
+            .thenByDescending { it.score }
+
+    /**
+     * Сколько открылось изнутри, и выход за рубежом — как ещё один открывшийся сайт (с 1.10.34).
+     * Через российскую площадку Cloudflare медиа Telegram и часть сайтов режут фильтры (журнал
+     * 23.11), а проверка «открылось» этого почти не видит: соединение с Telegram открывается.
+     * Поэтому при равенстве или разнице в один сайт первой идёт точка с выходом за рубежом, а
+     * точка, через которую открылось заметно больше, остаётся первой и с выходом через Москву.
+     */
+    fun opened(c: Candidate): Int =
+        if (c.resourcesTotal > 0 && dev.warpscout.core.net.ExitSite.isAbroad(c.site)) c.resourcesOk + 1 else c.resourcesOk
 
     private fun key(c: Candidate): String = c.config.endpoint.render() + "|" + c.config.junk.name
 }

@@ -105,13 +105,18 @@ class WgProber(private val settings: NetSettings) {
      * работающим туннелем такой запрос сделал бы новую сессию текущей на сервере, и ответы
      * работающему туннелю шли бы ключами пробы (поэтому дозор и проверка точки по просьбе экрана
      * обходятся рукопожатием).
+     *
+     * [askSite] (с 1.10.34) — вместе с проверкой данных спросить площадку Cloudflare, через которую
+     * выходит точка (см. [DataProbe.siteQuery]): ещё один пакет в той же сессии. Подбор спрашивает,
+     * пока площадка адреса не известна.
      */
     fun probe(
         endpoint: Endpoint,
         account: WarpAccount,
         peerPublic: ByteArray,
         junk: JunkProfile? = null,
-        dataProbe: Boolean = false
+        dataProbe: Boolean = false,
+        askSite: Boolean = false
     ): WgProbeResult {
         val samples = ArrayList<ProbeSample>()
         val replyTypes = mutableListOf<Int>()
@@ -201,23 +206,27 @@ class WgProber(private val settings: NetSettings) {
                     }
                     var dataTried = false
                     var dataMs: Double? = null
+                    var site: String? = null
                     val openedBy = sessionInit
                     val openedWith = sessionReply
                     if (dataProbe && !dataSeen && dataAttempts < 2 && openedBy != null && openedWith != null) {
                         dataAttempts++
                         dataTried = true
-                        dataMs = dataRoundTrip(socket, openedBy, openedWith, account)
+                        val dataReply = dataRoundTrip(socket, openedBy, openedWith, account, askSite)
+                        dataMs = dataReply.ms
+                        site = dataReply.site
                         if (dataMs != null) {
                             dataSeen = true
                             note += " +данные ${dataMs.toLong()} мс"
                         } else {
                             note += " данных нет"
                         }
+                        if (site != null) note += " выход $site"
                     }
                     samples.add(
                         ProbeSample(
                             endpoint, verdict, rtt, attempt, junk?.name ?: "none", note = note,
-                            dataTried = dataTried, dataMs = dataMs
+                            dataTried = dataTried, dataMs = dataMs, site = site
                         )
                     )
                 } catch (e: SocketTimeoutException) {
@@ -446,53 +455,85 @@ class WgProber(private val settings: NetSettings) {
         const val SUSTAIN_DEFAULT_MS = 2_400
     }
 
+    /** Итог проверки данных: время ответа (null — ответа нет) и площадка выхода (null — не узнали). */
+    private class DataReply(val ms: Double?, val site: String?)
+
     /**
      * Данные после рукопожатия: DNS-запрос внутри только что открытой сессии и ответ на него.
-     * Возвращает время ответа (мс) или null — ответа нет. Сокет тот же, что у рукопожатия: сеть
-     * видит один поток, как у настоящего туннеля, — именно такой поток она и режет (или нет).
+     * Сокет тот же, что у рукопожатия: сеть видит один поток, как у настоящего туннеля, — именно
+     * такой поток она и режет (или нет).
+     *
+     * С [askSite] вторым пакетом идёт запрос площадки (см. [DataProbe.siteQuery]): свой порт и номер,
+     * ответы узнаются по ним, в каком бы порядке ни пришли. Ответ на него ждём не дольше 250 мс
+     * после ответа на данные — проба не растягивает подбор, если площадку резолвер не назвал.
      */
     private fun dataRoundTrip(
         socket: DatagramSocket,
         init: Wg.Initiation,
         reply: Wg.ProbeReply,
-        account: WarpAccount
-    ): Double? {
-        val session = reply.session ?: return null
-        val peerIndex = reply.peerSenderIndex ?: return null
-        val src = DataProbe.ipv4Of(account.ipv4) ?: DataProbe.ipv4Of("172.16.0.2") ?: return null
+        account: WarpAccount,
+        askSite: Boolean = false
+    ): DataReply {
+        val session = reply.session ?: return DataReply(null, null)
+        val peerIndex = reply.peerSenderIndex ?: return DataReply(null, null)
+        val src = DataProbe.ipv4Of(account.ipv4) ?: DataProbe.ipv4Of("172.16.0.2") ?: return DataReply(null, null)
         val port = DataProbe.randomPort(Crypto.random)
         val txId = Crypto.random.nextInt(0x10000)
-        val packet = Wg.buildTransport(peerIndex, session, DataProbe.dnsQuery(src, port, txId)).first
+        val (packet, afterFirst) = Wg.buildTransport(peerIndex, session, DataProbe.dnsQuery(src, port, txId))
+        var sitePort = -1
+        var siteTx = -1
+        val sitePacket = if (askSite) {
+            sitePort = DataProbe.randomPort(Crypto.random).let { if (it == port) it + 1 else it }
+            siteTx = Crypto.random.nextInt(0x10000)
+            Wg.buildTransport(peerIndex, afterFirst, DataProbe.siteQuery(src, sitePort, siteTx)).first
+        } else {
+            null
+        }
         // Ответ DNS внутри WARP приходит за время одного круга до Cloudflare: 0,9 с — с запасом,
         // а на точке без данных проба не растягивает подбор на полные секунды таймаута.
         val waitMs = settings.timeoutMs.coerceIn(400, 900)
         val before = runCatching { socket.soTimeout }.getOrDefault(settings.timeoutMs)
         val t0 = System.nanoTime()
         val deadline = t0 + waitMs * 1_000_000L
-        var receiving = session
+        var siteDeadline = Long.MAX_VALUE
+        var ms: Double? = null
+        var site: String? = null
         try {
             socket.send(DatagramPacket(packet, packet.size))
+            if (sitePacket != null) socket.send(DatagramPacket(sitePacket, sitePacket.size))
             val buf = ByteArray(2048)
             while (true) {
-                val leftMs = (deadline - System.nanoTime()) / 1_000_000L
-                if (leftMs <= 0L) return null
+                if (ms != null && (sitePacket == null || site != null)) break
+                val until = if (ms == null) deadline else minOf(deadline, siteDeadline)
+                val leftMs = (until - System.nanoTime()) / 1_000_000L
+                if (leftMs <= 0L) break
                 socket.soTimeout = leftMs.toInt().coerceAtLeast(1)
                 val pkt = DatagramPacket(buf, buf.size)
                 try {
                     socket.receive(pkt)
                 } catch (e: SocketTimeoutException) {
-                    return null
+                    break
                 }
                 val data = pkt.data.copyOfRange(0, pkt.length)
-                val opened = Wg.openTransport(data, init.state.senderIndex, receiving) ?: continue
-                receiving = opened.second
-                if (DataProbe.isReply(opened.first, port, txId)) return (System.nanoTime() - t0) / 1e6
+                // Расшифровываем ключами самой сессии, без счётчика повторов: ответов два, и
+                // пришедший вторым мог уйти от сервера первым — проверка порядка отбросила бы его.
+                val opened = Wg.openTransport(data, init.state.senderIndex, session) ?: continue
+                if (ms == null && DataProbe.isReply(opened.first, port, txId)) {
+                    val got = (System.nanoTime() - t0) / 1e6
+                    ms = got
+                    siteDeadline = System.nanoTime() + (got.toLong() + 80L).coerceIn(80L, 250L) * 1_000_000L
+                    continue
+                }
+                if (sitePacket != null && site == null) {
+                    DataProbe.siteOf(opened.first, sitePort, siteTx)?.let { site = it }
+                }
             }
         } catch (e: Exception) {
-            return null
+            // Сокет закрыли или сеть пропала: что успели узнать, то и итог.
         } finally {
             runCatching { socket.soTimeout = before }
         }
+        return DataReply(ms, site)
     }
 
     /**

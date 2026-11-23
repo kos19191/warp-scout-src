@@ -468,6 +468,8 @@ class MainActivity : AppCompatActivity() {
         binding.switchFeatSpeed.isChecked = prefs.featSpeedAuto
         binding.switchFeatFreeze.isChecked = prefs.featFreezeReconnect
         binding.switchFeatDns.isChecked = prefs.featDnsInTunnel
+        binding.switchFeatAbroad.isChecked = prefs.featAbroadSearch
+        binding.switchFeatTgSecond.isChecked = prefs.featTgSecond
     }
 
     /**
@@ -488,6 +490,8 @@ class MainActivity : AppCompatActivity() {
         bind(binding.switchFeatSpeed, getString(R.string.feat_speed), { prefs.featSpeedAuto }, { prefs.featSpeedAuto = it })
         bind(binding.switchFeatFreeze, getString(R.string.feat_freeze), { prefs.featFreezeReconnect }, { prefs.featFreezeReconnect = it })
         bind(binding.switchFeatDns, getString(R.string.feat_dns), { prefs.featDnsInTunnel }, { prefs.featDnsInTunnel = it })
+        bind(binding.switchFeatAbroad, getString(R.string.feat_abroad), { prefs.featAbroadSearch }, { prefs.featAbroadSearch = it })
+        bind(binding.switchFeatTgSecond, getString(R.string.feat_tg_second), { prefs.featTgSecond }, { prefs.featTgSecond = it })
     }
 
     private fun buildJunkChecks() {
@@ -3810,18 +3814,42 @@ class MainActivity : AppCompatActivity() {
     private fun updateEndpointNote() {
         val now = prefs.lastEndpoint.ifBlank { runCatching { currentConfig()?.endpoint?.render() }.getOrNull().orEmpty() }
         // Выход по проверке связи сервиса — самый свежий: он проверен запросом через туннель.
-        val serviceExit = runCatching {
-            TunnelStatusBus.snapshot(this).takeIf { it.up && it.linkWeb == TunnelStatus.LINK_OK }?.linkExit
-        }.getOrNull().orEmpty()
+        val snap = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
+        val serviceExit = snap?.takeIf { it.up && it.linkWeb == TunnelStatus.LINK_OK }?.linkExit.orEmpty()
         // С 1.10.31 — только страна («выход: RU»): площадка Cloudflare (HEL, DME) читалась как страна.
-        val region = listOf(serviceExit, exitRegion, prefs.lastExitRegion)
-            .map { dev.warpscout.core.net.CfTrace.countryOf(it) }
-            .firstOrNull { it.isNotBlank() } ?: getString(R.string.region_unknown)
+        // С 1.10.34 выход через Россию называется городом с предупреждением (см. exitLabel) — но только
+        // по свежей проверке этой сессии, не по запомненной строке прошлых дней.
+        val fresh = listOf(serviceExit, exitRegion).firstOrNull { dev.warpscout.core.net.CfTrace.countryOf(it).isNotBlank() }
+        val region = if (fresh != null) {
+            exitLabel(fresh, dev.warpscout.core.net.CfTrace.countryOf(fresh), snap)
+        } else {
+            dev.warpscout.core.net.CfTrace.countryOf(prefs.lastExitRegion).ifBlank { getString(R.string.region_unknown) }
+        }
         binding.textEndpointNow.text = getString(
             R.string.endpoint_now,
             now.ifBlank { "—" },
             region
         )
+    }
+
+    /**
+     * Подпись выхода (с 1.10.34). Выход WARP через Россию — город и что с Telegram (так решил человек
+     * 23.11: «выход: Москва — Telegram может тормозить»), иначе — страна [country], как с 1.10.31.
+     * [summary] — строка проверки («DME · RU · адрес», см. CfTrace.summary). Telegram уже идёт через
+     * второй выход — так и пишем; проверка медиа показала «тормозит» — пишем «тормозит», без «может».
+     */
+    private fun exitLabel(summary: String?, country: String, snap: TunnelStatus?): String {
+        val site = dev.warpscout.core.net.ExitSite.fromSummary(summary)
+        if (!dev.warpscout.core.net.ExitSite.isRussian(site)) return country
+        val city = dev.warpscout.core.net.ExitSite.city(site)
+        val mediaSlow = snap != null && snap.tgMediaAt > 0L && snap.tgMediaAt >= snap.startedAt &&
+            (snap.tgMedia == dev.warpscout.core.net.TelegramMedia.SLOW || snap.tgMedia == dev.warpscout.core.net.TelegramMedia.STALL)
+        return when {
+            // Через второй выход — только когда он и правда поднят: иначе Telegram идёт через WARP.
+            snap != null && snap.tgSecond && snap.second == TunnelStatus.SECOND_UP -> getString(R.string.exit_ru_tg_second, city)
+            mediaSlow -> getString(R.string.exit_ru_tg_slow, city)
+            else -> getString(R.string.exit_ru_warn, city)
+        }
     }
 
     private fun probeExitRegion() {
@@ -3902,6 +3930,10 @@ class MainActivity : AppCompatActivity() {
      * сохранённый конфиг — ровно ту строку, которая сейчас работает.
      */
     private fun learnLiveEndpoint() {
+        // Пока идёт подбор, туннель поднимают его проверки (quiet) — это ещё не выбор точки
+        // (с 1.10.34). Журнал 23.11: «конфиг обновлён на работающую точку» писался посреди подбора,
+        // и следующий подъём пошёл на 8.39.214.6:928, через которую данные не шли.
+        if (engine.running || Availability.processBound(this)) return
         val live = TunnelDebug.endpoint.trim()
         if (live.isEmpty() || ':' !in live) return
         if (prefs.lastEndpoint == live) return
@@ -3963,11 +3995,18 @@ class MainActivity : AppCompatActivity() {
                 // Итог проверки связи — прямо в строке: «работает» без него значило лишь «handshake
                 // прошёл», а данные могли и не ходить (Telegram молчал при «подключено»).
                 val link = snapshot?.takeIf { it.linkAt > 0L && it.linkAt >= it.startedAt }
+                // Проверка медиа Telegram этой сессии (с 1.10.34): соединение есть, а данные идут
+                // медленно или встают — «Telegram: связь есть, медиа тормозит».
+                val tgMediaSlow = snapshot != null && snapshot.tgMediaAt > 0L && snapshot.tgMediaAt >= snapshot.startedAt &&
+                    (snapshot.tgMedia == dev.warpscout.core.net.TelegramMedia.SLOW ||
+                        snapshot.tgMedia == dev.warpscout.core.net.TelegramMedia.STALL)
                 val linkText = when {
                     link == null -> ""
                     link.linkWeb == TunnelStatus.LINK_FAIL -> getString(R.string.conn_link_fail)
                     link.linkWeb == TunnelStatus.LINK_OK && link.linkTg == TunnelStatus.LINK_FAIL ->
                         getString(R.string.conn_link_ok, link.linkMs.coerceAtLeast(0)) + getString(R.string.conn_link_tg)
+                    link.linkWeb == TunnelStatus.LINK_OK && tgMediaSlow ->
+                        getString(R.string.conn_link_ok, link.linkMs.coerceAtLeast(0)) + getString(R.string.conn_link_tg_media)
                     link.linkWeb == TunnelStatus.LINK_OK -> getString(R.string.conn_link_ok, link.linkMs.coerceAtLeast(0))
                     else -> ""
                 }
@@ -4437,12 +4476,12 @@ class MainActivity : AppCompatActivity() {
         // видят российский адрес.
         val endpoint = if (up) TunnelDebug.endpoint.trim().ifBlank { snap?.endpoint.orEmpty() } else ""
         val net = netKindNow().ifBlank { "сеть" }
-        val country = dev.warpscout.core.net.CfTrace.countryOf(
-            snap?.takeIf { linkFresh && it.linkWeb == TunnelStatus.LINK_OK }?.linkExit
-        )
+        val exitSummary = snap?.takeIf { linkFresh && it.linkWeb == TunnelStatus.LINK_OK }?.linkExit
+        val country = dev.warpscout.core.net.CfTrace.countryOf(exitSummary)
         val where = when {
             endpoint.isBlank() -> ""
-            country.isNotBlank() -> getString(R.string.simple_where_region, net, endpoint, country)
+            // С 1.10.34 выход через Россию — городом и с предупреждением про Telegram (см. exitLabel).
+            country.isNotBlank() -> getString(R.string.simple_where_region, net, endpoint, exitLabel(exitSummary, country, snap))
             else -> getString(R.string.simple_where, net, endpoint)
         }
         s.simpleWhere.text = where
@@ -5017,6 +5056,8 @@ class MainActivity : AppCompatActivity() {
                 TuningCache.forget(app)
                 EndpointMemory.forgetAll(app)
                 NoiseMemory.forgetAll(app)
+                // Площадки выхода точек и отметки «искали выход за рубежом» (с 1.10.34).
+                SiteMemory.forgetAll(app)
             }
             step("доступность") { Availability.forgetAll(app) }
             // Конфиг, которым плитка и автозапуск поднимают туннель (TunnelLastConfig сборки tunnel).

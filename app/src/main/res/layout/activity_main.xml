@@ -657,6 +657,19 @@
                     android:layout_height="wrap_content"
                     android:text="@string/feat_dns" />
 
+                <!-- С 1.10.34: выход WARP в России (журнал 23.11 — медиа Telegram рывками) -->
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatAbroad"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_abroad" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatTgSecond"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_tg_second" />
+
                 <!-- ── что туннелируем и как (переехало из вкладки «Туннель») ── -->
 
 

@@ -234,9 +234,21 @@ class Engine(private val context: Context) {
         if (frozenHere.isNotEmpty()) {
             sink.log("на этой сети замерзает шум: ${frozenHere.joinToString(", ")} — подбор его пропустит")
         }
+        // Выход на этой сети в прошлый раз был в России (с 1.10.34, см. SiteMemory): быстрый старт с
+        // московскими точками не принимаем — раз в сутки на сеть подбор смотрит весь пул, ищет выход
+        // за рубежом. Журнал 23.11: через Москву медиа Telegram грузилось «через раз и рывками».
+        val lastSite = if (netKey.isBlank()) "" else SiteMemory.lastSite(context, netKey)
+        val seekAbroad = dev.warpscout.core.net.ExitSite.isRussian(lastSite) && SiteMemory.searchDue(context, netKey)
+        if (seekAbroad) {
+            sink.log(
+                "выход на этой сети был через ${dev.warpscout.core.net.ExitSite.describe(lastSite)} — " +
+                    "ищу точку с выходом за рубежом (не чаще раза в сутки)"
+            )
+        }
         val withCache = withProxy.copy(
             cachedStart = TuningCache.cachedStart(context, withProxy.junkProfiles),
-            excludeJunk = withProxy.excludeJunk + frozenHere
+            excludeJunk = withProxy.excludeJunk + frozenHere,
+            seekAbroad = seekAbroad
         )
         val result = try {
             tuner.run(withCache, sink)
@@ -251,6 +263,17 @@ class Engine(private val context: Context) {
             result.report.candidates.filter { it.stats.dataSustained }
                 .distinctBy { it.junk.name }
                 .forEach { NoiseMemory.note(context, netKey, it.junk.name, NoiseBook.WORKED, it.config.endpoint.render()) }
+        }
+        // Где выходят проверенные точки (с 1.10.34) — в память: по ней перебор ставит выход за
+        // рубежом раньше московского, а туннель решает, пускать ли Telegram через второй выход.
+        if (netKey.isNotBlank() && !sink.isCancelled()) runCatching {
+            val sites = result.report.candidates.mapNotNull { c -> c.site?.let { c.config.endpoint.render() to it } }.toMap()
+            SiteMemory.noteAll(context, netKey, sites)
+            if (seekAbroad) {
+                val found = result.report.candidates.any { it.usable && dev.warpscout.core.net.ExitSite.isAbroad(it.site) }
+                SiteMemory.noteSearch(context, netKey, found)
+                if (!found) sink.log("точек с выходом за рубежом на этой сети не нашлось — следующий поиск через сутки")
+            }
         }
         // Остановленный подбор — это не результат. Раньше недосчитанный прогон шёл дальше как
         // обычный: записывал отчёт и тройку замен из случайного куска пула и по галочке даже
@@ -377,7 +400,8 @@ class Engine(private val context: Context) {
                     network = network,
                     speedKbps = cand.speedKbps,
                     handshakeOnly = handshakeOnly,
-                    dataMs = cand.stats.dataMs?.toInt() ?: -1
+                    dataMs = cand.stats.dataMs?.toInt() ?: -1,
+                    site = cand.site.orEmpty()
                 )
             }.distinctBy { it.endpoint + "|" + it.junk }
             if (entries.isEmpty()) {
@@ -386,7 +410,11 @@ class Engine(private val context: Context) {
             if (entries.isNotEmpty()) {
                 ConfigShortlist.save(context, entries)
                 val where = if (ConfigShortlist.group(network) == ConfigShortlist.GROUP_MOBILE) "мобильной сети" else "Wi-Fi"
-                sink.log("топ-${entries.size} для $where: " + entries.joinToString { it.endpoint })
+                sink.log(
+                    "топ-${entries.size} для $where: " + entries.joinToString { e ->
+                        e.endpoint + (if (e.site.isNotBlank()) " (выход ${e.site})" else "")
+                    }
+                )
                 runCatching { dev.warpscout.app.status.ServiceSettingsStore.syncFromPrefs(context) }
             }
         }.onFailure { t -> sink.log("тройка лучших не сохранилась: " + describe(t)) }

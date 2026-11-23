@@ -26,6 +26,11 @@ import dev.warpscout.core.model.Verdict
  *                     рукопожатие на долю секунды быстрее. А на сети человека чистый WireGuard
  *                     замерзает через секунду, и работает только маскировка (журнал 22.11: с ней
  *                     туннель держался 12 часов, без неё не поднялся ни разу).
+ *  • exit           — где выходит точка (с 1.10.34): за рубежом +200, в России −200, не узнали — 0.
+ *                     Через российскую площадку Cloudflare трафик идёт под фильтры РКН (журнал
+ *                     23.11: все точки вышли через Москву — медиа Telegram «через раз и рывками»).
+ *                     Разница 400 больше разброса задержки и джиттера, но меньше провала данных:
+ *                     точка без данных за рубежом всё равно хуже рабочей московской.
  */
 data class Weights(
     val handshakeOk: Int = 1000,
@@ -49,7 +54,9 @@ data class Weights(
     val dataOk: Int = 300,
     val dataBlocked: Int = 900,
     val plainPenalty: Int = 150,
-    val dataSustained: Int = 200
+    val dataSustained: Int = 200,
+    val exitAbroad: Int = 200,
+    val exitRussia: Int = 200
 )
 
 object Scoring {
@@ -64,7 +71,9 @@ object Scoring {
         resourcesTotal: Int = 0,
         weights: Weights = Weights(),
         /** Вариант без шума (чистый WireGuard): см. [Weights.plainPenalty]. */
-        plain: Boolean = false
+        plain: Boolean = false,
+        /** Площадка выхода («HEL», «DME»; null — не узнали): см. [Weights.exitAbroad]. */
+        site: String? = null
     ): ScoreParts {
         val confirmed = when (stats.bestVerdict) {
             Verdict.HANDSHAKE_OK -> weights.handshakeOk
@@ -99,6 +108,14 @@ object Scoring {
         // который замерзает через секунду. Долгая проверка данных — самый сильный довод «за».
         val masking = (if (plain && stats.replies > 0) -weights.plainPenalty else 0) +
             (if (stats.dataSustained && !stats.dataBlocked) weights.dataSustained else 0)
+        // Где выходит: только для точки, через которую идут данные, — иначе бонус за заграницу
+        // поднимал бы мёртвую точку над рабочей.
+        val exit = when {
+            stats.replies == 0 || stats.dataBlocked -> 0
+            dev.warpscout.core.net.ExitSite.isAbroad(site) -> weights.exitAbroad
+            dev.warpscout.core.net.ExitSite.isRussian(site) -> -weights.exitRussia
+            else -> 0
+        }
         return ScoreParts(
             confirmed = maxOf(0, confirmed),
             latency = latency,
@@ -108,7 +125,8 @@ object Scoring {
             resourceBonus = resource,
             penalty = penalty,
             dataPath = data,
-            masking = masking
+            masking = masking,
+            exit = exit
         )
     }
 }

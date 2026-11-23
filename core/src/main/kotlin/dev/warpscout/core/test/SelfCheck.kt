@@ -162,6 +162,11 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             protonFreeChecks()
             exitCheckChecks()
         }
+        section("выход WARP за рубежом и Telegram (1.10.34)") {
+            exitSiteChecks()
+            siteProbeChecks()
+            telegramMediaChecks()
+        }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
                 liveNetwork()
@@ -177,6 +182,264 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         println("пройдено: $passed, провалено: $failed")
         failures.forEach { println("  ✗ $it") }
         return if (failed == 0) 0 else 1
+    }
+
+    /**
+     * 1.10.34: где выходит WARP. Журнал 23.11: все точки вышли через Москву (DME), и медиа Telegram
+     * стало грузиться рывками; на Wi-Fi до того был Хельсинки. Подбор должен узнавать площадку
+     * каждой точки и ставить выход за рубежом первым, а экран — честно предупреждать.
+     */
+    private fun exitSiteChecks() {
+        val x = dev.warpscout.core.net.ExitSite
+        expect("площадка: код как есть", x.normalize("DME"), "DME")
+        expect("площадка: в кавычках и строчными", x.normalize("\"hel\""), "HEL")
+        expect("площадка: «DME1» — DME", x.normalize("DME1"), "DME")
+        expect("площадка: слово — не код", x.normalize("Moscow"), "")
+        expect("площадка: пусто — пусто", x.normalize(null), "")
+        expect("площадка из строки проверки связи", x.fromSummary("DME · RU · 104.28.244.74"), "DME")
+        expect("площадка: строка со страной — площадки нет", x.fromSummary("RU · 104.28.244.74"), "")
+        check("площадка: Москва и Петербург — в России", x.isRussian("DME") && x.isRussian("LED") && x.isRussian("svx"))
+        check("площадка: Хельсинки — за рубежом", x.isAbroad("HEL") && !x.isRussian("HEL"))
+        check("площадка: неизвестно — ни то, ни другое", !x.isAbroad("") && !x.isRussian(null))
+        expect("площадка: город для экрана", x.city("DME"), "Москва")
+        expect("площадка: незнакомый код — сам код", x.city("XYZ"), "XYZ")
+        expect("площадка: журнал", x.describe("HEL"), "HEL · Хельсинки")
+        expect("площадка: журнал без кода", x.describe(""), "неизвестно")
+        expect(
+            "площадка: за рубежом → неизвестно → в России, порядок внутри групп сохранён",
+            x.abroadFirst(listOf("DME", "", "HEL", "LED", "FRA")) { it }.joinToString(","),
+            "HEL,FRA,,DME,LED"
+        )
+
+        val now = 1_800_000_000_000L
+        var marks = emptyList<dev.warpscout.core.net.ExitSite.Mark>()
+        marks = x.put(marks, dev.warpscout.core.net.ExitSite.Mark("Wi-Fi·192.168.1.1", "8.34.70.3:854", "HEL", now - 1000))
+        marks = x.put(marks, dev.warpscout.core.net.ExitSite.Mark("Wi-Fi·192.168.1.1", "8.34.70.3:854", "DME", now))
+        expect("память площадок: свежая запись заменяет прежнюю", x.siteOf(marks, "Wi-Fi·192.168.1.1", "8.34.70.3:854", now), "DME")
+        expect("память площадок: одна запись на точку", marks.size, 1)
+        expect("память площадок: другая сеть — не знаем", x.siteOf(marks, "мобильная·25020", "8.34.70.3:854", now), "")
+        expect(
+            "память площадок: через четыре дня запись устарела",
+            x.siteOf(marks, "Wi-Fi·192.168.1.1", "8.34.70.3:854", now + 4L * 24 * 3_600_000L),
+            ""
+        )
+        expect("память площадок: переживает файл", x.parse(x.render(marks)), marks)
+        check("поиск выхода: на сети ещё не искали — пора", x.searchDue(marks, "Wi-Fi·192.168.1.1", now))
+        val searched = x.put(marks, dev.warpscout.core.net.ExitSite.Mark("Wi-Fi·192.168.1.1", x.SEARCH, x.NONE, now))
+        check("поиск выхода: только что искали — не пора", !x.searchDue(searched, "Wi-Fi·192.168.1.1", now + 3_600_000L))
+        check("поиск выхода: через сутки — снова пора", x.searchDue(searched, "Wi-Fi·192.168.1.1", now + 25L * 3_600_000L))
+        check("поиск выхода: на другой сети — своя очередь", x.searchDue(searched, "мобильная·25020", now))
+        expect("поиск выхода: запись поиска — не площадка точки", x.siteOf(searched, "Wi-Fi·192.168.1.1", x.SEARCH, now), "")
+        var many = emptyList<dev.warpscout.core.net.ExitSite.Mark>()
+        for (i in 0 until dev.warpscout.core.net.ExitSite.MAX_MARKS + 20) {
+            many = x.put(many, dev.warpscout.core.net.ExitSite.Mark("n", "1.1.1.$i:500", "HEL", now))
+        }
+        check(
+            "память площадок: давние уходят по пределу",
+            many.size == dev.warpscout.core.net.ExitSite.MAX_MARKS && many.first().endpoint == "1.1.1.20:500"
+        )
+
+        // Балл: выход за рубежом выше, в России ниже; точке без ответа бонус не положен.
+        val ep = Endpoint("8.34.70.3", 854)
+        val st = EndpointStats(ep, listOf(ProbeSample(ep, Verdict.HANDSHAKE_OK, 40.0, 1, "tls-fixed", dataTried = true, dataMs = 60.0)), Verdict.HANDSHAKE_OK, 1, 1)
+        val none = Scoring.evaluate(st, true).total
+        expect("балл: выход за рубежом — +200", Scoring.evaluate(st, true, site = "HEL").total - none, 200)
+        expect("балл: выход в России — −200", Scoring.evaluate(st, true, site = "DME").total - none, -200)
+        val deadSt = EndpointStats(ep, emptyList(), Verdict.UDP_SILENT, 0, 2)
+        expect("балл: молчащей точке заграница не помогает", Scoring.evaluate(deadSt, false, site = "HEL").exit, 0)
+
+        // Очередь: при равных или почти равных сайтах первой — точка с выходом за рубежом.
+        fun cand(host: String, ok: Int, site: String?): Candidate {
+            val cfg = WarpConfig(
+                name = "тест",
+                account = WarpAccount("a=", "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=", "172.16.0.2", "2606::1"),
+                endpoint = Endpoint(host, 2408),
+                junk = JunkLibrary.tlsFixed(),
+                allowedIps = "0.0.0.0/0, ::/0"
+            )
+            val es = EndpointStats(cfg.endpoint, emptyList(), Verdict.HANDSHAKE_OK, 1, 1)
+            return Candidate(cfg, es, Scoring.evaluate(es, true, ok, 6, site = site), emptyList(), ok, 6, 20_000, site = site)
+        }
+        expect(
+            "очередь: поровну открылось — первой выход за рубежом",
+            Shortlist.pick(listOf(cand("8.39.214.6", 5, "DME"), cand("8.34.70.3", 5, "HEL")), limit = 1).single().config.endpoint.host,
+            "8.34.70.3"
+        )
+        expect(
+            "очередь: за рубежом на сайт меньше — всё равно первой",
+            Shortlist.pick(listOf(cand("8.39.214.6", 6, "DME"), cand("8.34.70.3", 5, "HEL")), limit = 1).single().config.endpoint.host,
+            "8.34.70.3"
+        )
+        expect(
+            "очередь: через Москву открылось заметно больше — Москва первой",
+            Shortlist.pick(listOf(cand("8.39.214.6", 6, "DME"), cand("8.34.70.3", 3, "HEL")), limit = 1).single().config.endpoint.host,
+            "8.39.214.6"
+        )
+        expect(
+            "очередь: площадку не узнали — выше Москвы, ниже заграницы",
+            Shortlist.pick(listOf(cand("8.39.214.6", 5, "DME"), cand("8.6.112.7", 5, null), cand("8.34.70.3", 5, "HEL")))
+                .joinToString(",") { it.config.endpoint.host },
+            "8.34.70.3,8.6.112.7,8.39.214.6"
+        )
+        val verified = listOf(cand("8.39.214.6", 5, "DME"), cand("8.34.70.3", 5, "HEL")).sortedWith(Shortlist.verifiedOrder())
+        expect("подбор: победитель — тот же, что первая строка тройки", verified.first().config.endpoint.host, "8.34.70.3")
+
+        // Снимки между процессами: новые поля и прежний формат.
+        val tg = TunnelStatus(tgMedia = dev.warpscout.core.net.TelegramMedia.SLOW, tgMediaKbps = 420, tgMediaAt = 5L, tgSecond = true)
+        expect("снимок: проверка медиа Telegram переживает JSON", TunnelStatus.fromJson(tg.toJson()), tg)
+        val old = TunnelStatus.fromJson("{}")
+        check("снимок: старый формат — медиа не проверяли, Telegram через WARP", old?.tgMedia == 0 && old.tgMediaKbps == -1 && !old.tgSecond)
+        val off = ServiceSettings(abroadSearch = false, tgSecond = false)
+        expect("настройки сервиса: переключатели 1.10.34 переживают JSON", ServiceSettings.fromJson(off.toJson()), off)
+        val oldSettings = ServiceSettings.fromJson("{}")
+        check("настройки сервиса: старый снимок — обе функции включены", oldSettings?.abroadSearch == true && oldSettings.tgSecond)
+    }
+
+    /** 1.10.34: запрос площадки внутри сессии — «id.server» класса CHAOS к 1.1.1.1. */
+    private fun siteProbeChecks() {
+        val probe = dev.warpscout.core.tunnel.DataProbe
+        val src = probe.ipv4Of("172.16.0.2") ?: ByteArray(4)
+        val q = probe.siteQuery(src, 40003, 0x2468)
+        expect("площадка: запрос — 55 байт", q.size, 55)
+        expect("площадка: сумма IP-заголовка сходится", probe.checksum(q, 0, 20, 0L), 0)
+        expect(
+            "площадка: тип TXT, класс CHAOS",
+            q.copyOfRange(q.size - 4, q.size).joinToString(",") { (it.toInt() and 0xff).toString() },
+            "0,16,0,3"
+        )
+        val r = fakeSiteReply(q, "DME")
+        expect("площадка: ответ разобран", r?.let { probe.siteOf(it, 40003, 0x2468) }, "DME")
+        val padded = fakeSiteReply(q, "HEL", pad = 13)
+        expect("площадка: нули дополнения WireGuard не мешают", padded?.let { probe.siteOf(it, 40003, 0x2468) }, "HEL")
+        check("площадка: чужой номер — не наш ответ", r != null && probe.siteOf(r, 40003, 0x2469) == null)
+        val plainQ = probe.dnsQuery(src, 40004, 0x1357)
+        val plainR = fakeDnsReply(plainQ)
+        check("площадка: ответ без записей — площадки нет", plainR != null && probe.siteOf(plainR, 40004, 0x1357) == null)
+        check("площадка: ответ на площадку — не ответ на пробу данных", r != null && !probe.isReply(r, 40004, 0x2468))
+
+        // Вживую через петлю: сервер отвечает и на данные, и на площадку.
+        val clientPriv = ByteArray(32) { (it * 5 + 1).toByte() }
+        val serverPriv = ByteArray(32) { (it * 13 + 7).toByte() }
+        val serverPub = Crypto.publicOf(serverPriv)
+        val account = WarpAccount(Crypto.base64(clientPriv), Crypto.base64(serverPub))
+        val prober = WgProber(NetSettings(attempts = 2, timeoutMs = 800, betweenAttemptsMs = 0))
+        val server = LoopbackServer(serverPriv, answerData = { fakeSiteReply(it, "HEL") }).start()
+        try {
+            val withSite = prober.probe(Endpoint("127.0.0.1", server.port), account, serverPub, null, dataProbe = true, askSite = true)
+            check(
+                "проба: данные и площадка в одной сессии",
+                withSite.stats.dataReplies > 0 && withSite.stats.site == "HEL",
+                withSite.stats.samples.joinToString { it.note }
+            )
+            val noSite = prober.probe(Endpoint("127.0.0.1", server.port), account, serverPub, null, dataProbe = true)
+            check("проба: без просьбы площадку не спрашивает", noSite.stats.dataReplies > 0 && noSite.stats.site == null)
+        } finally {
+            server.stop()
+        }
+        // Резолвер площадку не назвал (обычный DNS-ответ) — данные всё равно засчитаны.
+        val mute = LoopbackServer(serverPriv, answerData = { fakeDnsReply(it) }).start()
+        try {
+            val t0 = System.currentTimeMillis()
+            val res = prober.probe(Endpoint("127.0.0.1", mute.port), account, serverPub, null, dataProbe = true, askSite = true)
+            val took = System.currentTimeMillis() - t0
+            check("проба: площадку не назвали — данные засчитаны", res.stats.dataReplies > 0 && res.stats.site == null)
+            check("проба: ожидание площадки не растягивает пробу", took < 2_500L, "заняло $took мс")
+        } finally {
+            mute.stop()
+        }
+    }
+
+    /** 1.10.34: честная проверка Telegram — данные идут ровно, а не только открывается соединение. */
+    private fun telegramMediaChecks() {
+        val t = dev.warpscout.core.net.TelegramMedia
+        check("Telegram: сервер telegram.org — в сетях Telegram", t.isTelegramIp("149.154.167.99"))
+        check("Telegram: сервер медиа — в сетях Telegram", t.isTelegramIp("91.108.56.130"))
+        check("Telegram: соседняя сеть — не Telegram", !t.isTelegramIp("149.154.176.1"))
+        check("Telegram: чужой адрес — не Telegram", !t.isTelegramIp("8.8.8.8") && !t.isTelegramIp("мусор"))
+        expect("Telegram: ни байта — не пошло", t.verdict(0, 0, 0, false), t.FAIL)
+        expect("Telegram: 256 КБ за секунду ровно — норма", t.verdict(262_144, 1_000, 120, true), t.OK)
+        expect("Telegram: 256 КБ за 4 с — тормозит", t.verdict(262_144, 4_000, 200, true), t.SLOW)
+        expect("Telegram: пошло и встало — встаёт", t.verdict(48_000, 5_000, 3_000, false), t.STALL)
+        expect("Telegram: быстро, но с паузой в 1,5 с — рывками", t.verdict(262_144, 1_800, 1_500, true), t.SLOW)
+        check("Telegram: подпись говорит, что тормозит", t.describe(t.SLOW, 420, 200).contains("тормозит"))
+        check("Telegram: сетей v4 — восемь", t.NETS_V4.size == 8)
+        check("Telegram: имя в сертификате — точное", t.nameMatches("telegram.org", "TELEGRAM.org."))
+        check("Telegram: «*.» — один уровень", t.nameMatches("*.telegram.org", "web.telegram.org") &&
+            !t.nameMatches("*.telegram.org", "a.b.telegram.org") && !t.nameMatches("*.telegram.org", "telegram.org"))
+        check("Telegram: чужое имя — нет", !t.nameMatches("telegram.org.evil.com", "telegram.org") && !t.nameMatches("", "telegram.org"))
+        telegramFetchChecks()
+    }
+
+    /**
+     * Загрузка проверки Telegram на локальном сервере (простой HTTP вместо TLS): заголовок Range,
+     * перенаправления, «встало», «оборвали», короткий ответ, чужой адрес — без сети.
+     */
+    private fun telegramFetchChecks() {
+        val t = dev.warpscout.core.net.TelegramMedia
+        val plain = dev.warpscout.core.net.TelegramMedia.Connector { ip, _, port, timeoutMs ->
+            java.net.Socket().apply { connect(java.net.InetSocketAddress(ip, port), timeoutMs) }
+        }
+        val local: (String) -> List<String> = { listOf("127.0.0.1") }
+        fun body(n: Int) = ByteArray(n) { (it % 251).toByte() }
+        val seenRange = java.util.concurrent.atomic.AtomicReference("")
+        val server = HttpLoopback { path, headers, out ->
+            when (path) {
+                "/full" -> {
+                    seenRange.set(headers["range"].orEmpty())
+                    out.write("HTTP/1.1 206 Partial Content\r\nContent-Length: 262144\r\nConnection: close\r\n\r\n".toByteArray())
+                    out.write(body(262_144))
+                }
+                "/dl" -> out.write("HTTP/1.1 302 Found\r\nLocation: /file\r\nContent-Length: 0\r\n\r\n".toByteArray())
+                "/file" -> {
+                    out.write("HTTP/1.1 200 OK\r\nContent-Length: 65536\r\n\r\n".toByteArray())
+                    out.write(body(65_536))
+                }
+                "/stall" -> {
+                    out.write("HTTP/1.1 206 Partial Content\r\nContent-Length: 262144\r\n\r\n".toByteArray())
+                    out.write(body(40_000))
+                    out.flush()
+                    Thread.sleep(1_200)
+                }
+                "/cut" -> {
+                    out.write("HTTP/1.1 206 Partial Content\r\nContent-Length: 262144\r\n\r\n".toByteArray())
+                    out.write(body(20_000))
+                }
+                "/short" -> {
+                    out.write("HTTP/1.1 200 OK\r\nContent-Length: 2048\r\n\r\n".toByteArray())
+                    out.write(body(2_048))
+                }
+                "/away" -> out.write("HTTP/1.1 301 Moved\r\nLocation: https://elsewhere.test/x\r\n\r\n".toByteArray())
+                else -> out.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".toByteArray())
+            }
+        }
+        try {
+            val base = "http://media.test:${server.port}"
+            fun get(path: String, timeout: Int = 3_000, accept: (String) -> Boolean = { true }, resolve: (String) -> List<String> = local) =
+                t.fetch(base + path, resolve = resolve, connector = plain, accept = accept, readTimeoutMs = timeout)
+            val full = get("/full")
+            check("медиа Telegram: 256 КБ без пауз — норма", full.verdict == t.OK && full.bytes == 262_144L, full.toString())
+            expect("медиа Telegram: просим только начало файла", seenRange.get(), "bytes=0-262143")
+            val moved = get("/dl")
+            check("медиа Telegram: перенаправление проходим сами", moved.verdict == t.OK && moved.bytes == 65_536L, moved.toString())
+            val stall = get("/stall", timeout = 300)
+            check("медиа Telegram: пошло и встало — встаёт", stall.verdict == t.STALL && stall.bytes in 1L..40_000L, stall.toString())
+            val cut = get("/cut")
+            check("медиа Telegram: оборвали посреди — встаёт", cut.verdict == t.STALL && cut.bytes == 20_000L, cut.toString())
+            val short = get("/short")
+            check("медиа Telegram: короткий ответ — не судим", short.verdict == t.UNKNOWN, short.toString())
+            expect("медиа Telegram: нет файла — не пошло", get("/missing").verdict, t.FAIL)
+            check("медиа Telegram: перенаправление на другую схему — не идём", get("/away").verdict == t.UNKNOWN)
+            val before = server.connections.get()
+            val foreign = get("/full", accept = t::isTelegramIp)
+            check(
+                "медиа Telegram: сервер не в сетях Telegram — не проверяем и не соединяемся",
+                foreign.verdict == t.NOT_TELEGRAM && server.connections.get() == before, foreign.toString()
+            )
+            val v6 = get("/full", resolve = { listOf("::1") })
+            check("медиа Telegram: только IPv4 — так ходит сам Telegram", v6.verdict == t.FAIL && v6.note.contains("IPv4"), v6.toString())
+        } finally {
+            server.close()
+        }
     }
 
     // ------------------------------------------------------------------ helpers
@@ -2840,6 +3103,40 @@ object WgResponder {
 }
 
 /**
+ * Ответ резолвера на «id.server» класса CHAOS: тот же вопрос плюс запись TXT с кодом площадки
+ * [site] — имя в ответе сжато ссылкой на вопрос (0xC00C), как отвечают настоящие резолверы.
+ * Обычные запросы — как [fakeDnsReply]. [pad] — нули после пакета, как дополнение WireGuard.
+ */
+private fun fakeSiteReply(query: ByteArray, site: String = "DME", pad: Int = 0): ByteArray? {
+    if (query.size < 28 || ((query[0].toInt() ushr 4) and 0x0f) != 4 || (query[9].toInt() and 0xff) != 17) return null
+    val ihl = (query[0].toInt() and 0x0f) * 4
+    val dns = query.copyOfRange(ihl + 8, query.size)
+    if (dns.size < 16) return null
+    val qclass = ((dns[dns.size - 2].toInt() and 0xff) shl 8) or (dns[dns.size - 1].toInt() and 0xff)
+    if (qclass != 3) return fakeDnsReply(query)
+    val src = query.copyOfRange(12, 16)
+    val dst = query.copyOfRange(16, 20)
+    val sport = ((query[ihl].toInt() and 0xff) shl 8) or (query[ihl + 1].toInt() and 0xff)
+    val out = java.io.ByteArrayOutputStream()
+    out.write(dns, 0, 2)                         // номер запроса
+    out.write(0x84); out.write(0x00)             // ответ, авторитетный
+    out.write(0); out.write(1)                   // QDCOUNT
+    out.write(0); out.write(1)                   // ANCOUNT
+    repeat(4) { out.write(0) }
+    out.write(dns, 12, dns.size - 12)            // вопрос как есть
+    out.write(0xC0); out.write(0x0C)             // имя — ссылка на вопрос
+    out.write(0); out.write(16)                  // TXT
+    out.write(0); out.write(3)                   // CH
+    repeat(4) { out.write(0) }                   // TTL
+    val txt = site.toByteArray(Charsets.US_ASCII)
+    out.write(0); out.write(txt.size + 1)
+    out.write(txt.size)
+    out.write(txt, 0, txt.size)
+    val packet = dev.warpscout.core.tunnel.DataProbe.udp4(dst, 53, src, sport, out.toByteArray())
+    return if (pad > 0) packet + ByteArray(pad) else packet
+}
+
+/**
  * Ответ «DNS-сервера» на пробу данных: те же адреса и порты наоборот, флаг «ответ». null — это не
  * DNS-запрос (тогда тестовый сервер пакет выбрасывает).
  */
@@ -3187,6 +3484,56 @@ private class FakeSocks5NeedsAuth {
                         c.getOutputStream().write(byteArrayOf(5, 0xFF.toByte()))
                         c.getOutputStream().flush()
                         Thread.sleep(50)
+                    }
+                    runCatching { c.close() }
+                }
+            }
+        }
+    }
+
+    fun close() {
+        stopped = true
+        runCatching { srv.close() }
+    }
+}
+
+/**
+ * Локальный HTTP-сервер для проверки Telegram (см. telegramFetchChecks): на каждое соединение —
+ * разобрать запрос (путь, заголовки строчными) и отдать, что скажет [handler].
+ */
+private class HttpLoopback(
+    private val handler: (path: String, headers: Map<String, String>, out: java.io.OutputStream) -> Unit
+) {
+    private val srv = java.net.ServerSocket(0, 16, java.net.InetAddress.getByName("127.0.0.1"))
+    val port: Int get() = srv.localPort
+    val connections = java.util.concurrent.atomic.AtomicInteger(0)
+
+    @Volatile
+    private var stopped = false
+
+    init {
+        daemon {
+            while (!stopped) {
+                val c = runCatching { srv.accept() }.getOrNull() ?: break
+                connections.incrementAndGet()
+                daemon {
+                    runCatching {
+                        c.soTimeout = 5_000
+                        val input = c.getInputStream()
+                        val head = StringBuilder()
+                        while (head.length < 16 * 1024 && !head.endsWith("\r\n\r\n")) {
+                            val b = input.read()
+                            if (b < 0) break
+                            head.append(b.toChar())
+                        }
+                        val lines = head.toString().split("\r\n")
+                        val path = lines.firstOrNull().orEmpty().split(' ').getOrNull(1).orEmpty()
+                        val headers = lines.drop(1).filter { ':' in it }.associate {
+                            it.substringBefore(':').trim().lowercase() to it.substringAfter(':').trim()
+                        }
+                        val out = c.getOutputStream()
+                        handler(path, headers, out)
+                        out.flush()
                     }
                     runCatching { c.close() }
                 }

@@ -119,7 +119,13 @@ data class TuningSpec(
      */
     val sustainTop: Int = 4,
     /** Длина долгой пробы, мс. */
-    val sustainMs: Int = WgProber.SUSTAIN_DEFAULT_MS
+    val sustainMs: Int = WgProber.SUSTAIN_DEFAULT_MS,
+    /**
+     * Искать выход за рубежом (с 1.10.34): на этой сети последний выход был в России, а поиска не
+     * было больше суток. Быстрый старт тогда не принимается, если сохранённые точки выходят через
+     * Россию, — иначе подбор раз за разом подтверждал бы московские точки и не смотрел остальные.
+     */
+    val seekAbroad: Boolean = false
 )
 
 /**
@@ -207,14 +213,23 @@ class AutoTuner(
                     .map { it.config.endpoint.render() }
                     .distinct()
                 val confirmed = quick.best != null && cachedConfirmed(quick, cached)
-                if (confirmed && usable.size >= QUICK_MIN_POINTS) return quick
+                // Выход лучшей из сохранённых — в России, а искать заграницу пора (см. seekAbroad):
+                // быстрый старт не принимаем, смотрим весь пул.
+                val quickSite = quick.report.candidates.firstOrNull { it.config.endpoint == quick.best?.endpoint }?.site
+                val wantAbroad = spec.seekAbroad && dev.warpscout.core.net.ExitSite.isRussian(quickSite)
+                if (confirmed && usable.size >= QUICK_MIN_POINTS && !wantAbroad) return quick
                 // Остановили во время быстрого старта — полный подбор не начинаем. Раньше он
                 // начинался именно здесь: быстрая проверка «не подтвердилась» (её прервали), и
                 // «Остановить подбор» запускало полный скан пула вместо остановки.
                 if (progress.isCancelled()) return quick
                 progress.log(
-                    if (confirmed) "сохранённая точка работает, но рабочих точек ${usable.size} — мало для очереди, полный подбор"
-                    else "сохранённая конфигурация не подтвердилась — полный подбор"
+                    when {
+                        confirmed && wantAbroad ->
+                            "сохранённые точки работают, но выходят через ${dev.warpscout.core.net.ExitSite.describe(quickSite)} — " +
+                                "ищу выход за рубежом полным подбором"
+                        confirmed -> "сохранённая точка работает, но рабочих точек ${usable.size} — мало для очереди, полный подбор"
+                        else -> "сохранённая конфигурация не подтвердилась — полный подбор"
+                    }
                 )
                 // Прежние точки полный подбор проверит подробно первыми (если они ответят).
                 val prior = (listOf(cached.endpoint) + cached.queue).distinct()
@@ -329,9 +344,15 @@ class AutoTuner(
 
     // Ответившие точки прежней очереди проверяются подробно в любом случае — первыми.
     val prior = spec.priority.mapTo(HashSet()) { it.render() }
-    val refineCandidates = (alive.filter { it.endpoint.render() in prior } + (if (alive.size >= 2) alive else ranked))
+    val pool = if (alive.size >= 2) alive else ranked
+    val refineLimit = maxOf(3, spec.refineTop)
+    // С 1.10.34 половина мест — лучшему адресу каждой подсети: площадка выхода зависит от подсети
+    // (журнал 22.11 на Wi-Fi: 162.159.192.x — HEL, 188.114.97.1 — FRA), а десять самых быстрых
+    // адресов часто оказывались из двух-трёх подсетей с одним и тем же выходом через Москву.
+    val bySubnet = pool.distinctBy { subnetOf(it.endpoint) }.take(refineLimit / 2)
+    val refineCandidates = (alive.filter { it.endpoint.render() in prior } + bySubnet + pool)
         .distinctBy { it.endpoint.render() }
-        .take(maxOf(3, spec.refineTop))
+        .take(refineLimit)
 
     // --- фаза 2: подробно, по профилям шума ---------------------------------------
     // Шум, который на этой сети замерзает (знает приложение по прошлым подборам и подключениям),
@@ -346,10 +367,20 @@ class AutoTuner(
     val perProfile = LinkedHashMap<Endpoint, MutableMap<String, EndpointStats>>()
     val totalWork = refineCandidates.size * activeProfiles.size
     var done = 0
+    // Площадка выхода — одна на адрес (зависит от адреса и сети, а не от шума): спрашиваем, пока не
+    // узнали, и не больше трёх раз на адрес — если резолвер её не называет, проба не тратит время.
+    val siteByHost = HashMap<String, String>()
+    val siteTries = HashMap<String, Int>()
     for (stats in refineCandidates) {
         for (profile in activeProfiles) {
             if (progress.isCancelled()) break
-            val refined = wgProber.probe(stats.endpoint, account, peerPublic, profile, dataProbe = spec.dataProbe).stats
+            val host = stats.endpoint.host
+            val ask = spec.dataProbe && host !in siteByHost && (siteTries[host] ?: 0) < 3
+            val refined = wgProber.probe(
+                stats.endpoint, account, peerPublic, profile, dataProbe = spec.dataProbe, askSite = ask
+            ).stats
+            if (ask && refined.dataReplies > 0) siteTries[host] = (siteTries[host] ?: 0) + 1
+            refined.site?.let { siteByHost[host] = it }
             perProfile.getOrPut(stats.endpoint) { LinkedHashMap() }[profile.name] = refined
             done++
             val dataMark = when {
@@ -371,6 +402,17 @@ class AutoTuner(
             progress.log(line)
         }
     }
+    if (siteByHost.isNotEmpty()) {
+        // Где выходят точки: по этой строке видно, есть ли на этой сети выход не через Россию.
+        val counts = siteByHost.values.groupingBy { it }.eachCount().entries
+            .sortedWith(compareByDescending<Map.Entry<String, Int>> { dev.warpscout.core.net.ExitSite.rank(it.key) }.thenByDescending { it.value })
+        val allRussian = siteByHost.values.all { dev.warpscout.core.net.ExitSite.isRussian(it) }
+        val line = "Выход WARP по точкам: " + counts.joinToString(", ") {
+            "${dev.warpscout.core.net.ExitSite.describe(it.key)} — ${it.value}"
+        } + (if (allRussian) " — все в России: там медиа Telegram и часть сайтов режут фильтры" else "")
+        notes += line
+        progress.log(line)
+    }
 
     // --- фаза 3: MASQUE/TLS, если подсеть задана ------------------------------------
     val tlsResults: Map<Endpoint, ProbeSample> = if (!progress.isCancelled() &&
@@ -390,13 +432,15 @@ class AutoTuner(
             val effectiveStats = if (tlsSample != null && tlsSample.verdict == Verdict.TLS_OK) {
                 EndpointStats(endpoint, stats.samples + tlsSample, Verdict.TLS_OK, stats.replies, stats.attempts)
             } else stats
-            val parts = Scoring.evaluate(effectiveStats, survived, 0, 0, weights, plain = profile.isEmpty)
+            val site = siteByHost[endpoint.host]
+            val parts = Scoring.evaluate(effectiveStats, survived, 0, 0, weights, plain = profile.isEmpty, site = site)
             candidates.add(
                 Candidate(
                     config = buildConfig(spec, account, endpoint, profile, parts.total),
                     stats = effectiveStats,
                     parts = parts,
-                    junkProbes = stats.samples
+                    junkProbes = stats.samples,
+                    site = site
                 )
             )
         }
@@ -449,9 +493,12 @@ class AutoTuner(
             val speed = if (results.isEmpty()) -1 else runCatching { tv.lastSpeedKbps() }.getOrDefault(-1)
             progress.log(
                 "  ${cand.config.endpoint.render()} · ${cand.junk.name} → ${ok}/${spec.resources.size} ресурсов" +
-                    (if (speed > 0) " · ${dev.warpscout.core.net.SpeedTest.human(speed)}" else "")
+                    (if (speed > 0) " · ${dev.warpscout.core.net.SpeedTest.human(speed)}" else "") +
+                    (cand.site?.let { " · выход ${dev.warpscout.core.net.ExitSite.describe(it)}" } ?: "")
             )
-            val parts = Scoring.evaluate(cand.stats, cand.stats.replies > 0, ok, spec.resources.size, weights, plain = cand.junk.isEmpty)
+            val parts = Scoring.evaluate(
+                cand.stats, cand.stats.replies > 0, ok, spec.resources.size, weights, plain = cand.junk.isEmpty, site = cand.site
+            )
             verified.add(
                 cand.copy(
                     parts = parts,
@@ -516,13 +563,16 @@ class AutoTuner(
                 continue
             }
             val stats = cand.stats.copy(samples = cand.stats.samples + sample)
-            val parts = Scoring.evaluate(stats, stats.replies > 0, 0, 0, weights, plain = cand.junk.isEmpty)
+            val parts = Scoring.evaluate(stats, stats.replies > 0, 0, 0, weights, plain = cand.junk.isEmpty, site = cand.site)
             val idx = candidates.indexOf(cand)
             if (idx >= 0) candidates[idx] = cand.copy(stats = stats, parts = parts)
             val ok = sample.dataSustained
             val counter = if (ok) sustainedBy else frozenBy
             counter[cand.junk.name] = (counter[cand.junk.name] ?: 0) + 1
-            progress.log("  ${if (ok) "✓" else "✗"} $label — ${sample.note}")
+            progress.log(
+                "  ${if (ok) "✓" else "✗"} $label — ${sample.note}" +
+                    (cand.site?.let { " · выход ${dev.warpscout.core.net.ExitSite.describe(it)}" } ?: "")
+            )
         }
         progress.progress(targets.size, targets.size, "проверка на заморозку")
         val sustained = sustainedBy.values.sum()
@@ -573,13 +623,11 @@ class AutoTuner(
     }
 
     /**
-     * Порядок проверенных изнутри: сколько открылось → ступень скорости через туннель → балл.
-     * Один и тот же для списка и победителя, иначе «лучший» и первая строка топ-3 расходились бы.
+     * Порядок проверенных изнутри: сколько открылось (выход за рубежом — как ещё один открывшийся
+     * сайт, с 1.10.34) → где выход → ступень скорости через туннель → балл. Один и тот же для списка
+     * и победителя (см. [Shortlist]), иначе «лучший» и первая строка топ-3 расходились бы.
      */
-    private fun verifiedOrder(): Comparator<Candidate> =
-        compareByDescending<Candidate> { it.resourcesOk }
-            .thenByDescending { dev.warpscout.core.net.SpeedTest.bucket(it.speedKbps) }
-            .thenByDescending { it.score }
+    private fun verifiedOrder(): Comparator<Candidate> = Shortlist.verifiedOrder()
 
     /** Когда приватного ключа нет: только «закрыт/открыт» и TLS. Честно помечаем низкую уверенность. */
     private fun runHeuristicOnly(
@@ -676,8 +724,23 @@ class AutoTuner(
                 best.stats.dataMs?.let { append(" · данные через туннель ${it.toLong()} мс") }
                 if (best.resourcesTotal > 0) append(" · изнутри открылось ${best.resourcesOk}/${best.resourcesTotal}")
                 if (best.speedKbps > 0) append(" · ${dev.warpscout.core.net.SpeedTest.human(best.speedKbps)}")
+                best.site?.let { append(" · выход ${dev.warpscout.core.net.ExitSite.describe(it)}") }
             }
         )
+        // Лучший выходит через Россию — честно говорим, есть ли другие варианты на этой сети.
+        if (best != null && dev.warpscout.core.net.ExitSite.isRussian(best.site)) {
+            val abroad = pool.filter { dev.warpscout.core.net.ExitSite.isAbroad(it.site) }
+                .map { it.config.endpoint.render() }.distinct()
+            progress.log(
+                if (abroad.isEmpty()) {
+                    "Точек с выходом за рубежом на этой сети не нашлось — выход через " +
+                        "${dev.warpscout.core.net.ExitSite.city(best.site)}: медиа Telegram может тормозить"
+                } else {
+                    "С выходом за рубежом есть ${abroad.take(3).joinToString(", ")}, но через них открылось меньше — " +
+                        "выбрал выход через ${dev.warpscout.core.net.ExitSite.city(best.site)}"
+                }
+            )
+        }
         // Явно говорим, что профили шума сравнивались: это и есть ответ на «какой метод эффективнее».
         val profilesSeen = candidates.map { it.junk.name }.distinct()
         if (profilesSeen.size > 1) {
@@ -688,6 +751,13 @@ class AutoTuner(
         }
         return TuningResult(report, best?.config, text, account.source)
     }
+}
+
+/** Подсеть адреса для разнообразия подбора: «8.34.70.3» → «8.34.70»; не IPv4 — сам адрес. */
+private fun subnetOf(endpoint: Endpoint): String {
+    val host = endpoint.host
+    val parts = host.split('.')
+    return if (parts.size == 4 && parts.all { p -> p.isNotEmpty() && p.all { it.isDigit() } }) parts.take(3).joinToString(".") else host
 }
 
 private fun EndpointSpec.name(): String =

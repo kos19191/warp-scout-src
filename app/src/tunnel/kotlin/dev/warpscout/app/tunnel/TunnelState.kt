@@ -204,6 +204,36 @@ object TunnelState {
     var linkExit: String = ""
         private set
 
+    /**
+     * Проверка медиа Telegram (с 1.10.34, см. `TunnelStatus.tgMedia`): пишется одним вызовом
+     * [setTgMedia] — вывод и скорость от одной загрузки.
+     */
+    @Volatile
+    var tgMedia: Int = 0
+        private set
+    @Volatile
+    var tgMediaKbps: Int = -1
+        private set
+    @Volatile
+    var tgMediaAt: Long = 0L
+        private set
+
+    fun setTgMedia(at: Long, verdict: Int, kbps: Int) {
+        tgMediaAt = at
+        tgMedia = verdict
+        tgMediaKbps = kbps
+        publishNow(urgent = true)
+    }
+
+    /** Telegram сейчас идёт через второй выход (выход WARP — в России; с 1.10.34). */
+    @Volatile
+    var tgSecond: Boolean = false
+        set(v) {
+            if (field == v) return
+            field = v
+            publishNow(urgent = true)
+        }
+
     fun setLink(at: Long, web: Int, webMs: Int, tg: Int, tgMs: Int, exit: String) {
         linkAt = at
         linkWeb = web
@@ -274,6 +304,7 @@ object TunnelState {
 
     /** Новая сессия — прежний итог проверки связи к ней не относится. */
     fun clearLink() {
+        if (tgMediaAt != 0L || tgMedia != 0) setTgMedia(0L, 0, -1)
         if (linkAt == 0L && linkWeb == TunnelStatus.LINK_UNKNOWN && linkTg == TunnelStatus.LINK_UNKNOWN) return
         setLink(0L, TunnelStatus.LINK_UNKNOWN, -1, TunnelStatus.LINK_UNKNOWN, -1, "")
     }
@@ -319,6 +350,10 @@ object TunnelState {
         dataCheckAt = dataCheckAt,
         second = second,
         secondPeer = secondPeer,
+        tgMedia = tgMedia,
+        tgMediaKbps = tgMediaKbps,
+        tgMediaAt = tgMediaAt,
+        tgSecond = tgSecond,
         bytesUp = TunnelDebug.bytesUp,
         bytesDown = TunnelDebug.bytesDown,
         handshakeAttempts = TunnelDebug.handshakeAttempts,
@@ -355,6 +390,8 @@ object TunnelState {
             dataCheckAt = snapshot.dataCheckAt
             second = snapshot.second
             secondPeer = snapshot.secondPeer
+            setTgMedia(snapshot.tgMediaAt, snapshot.tgMedia, snapshot.tgMediaKbps)
+            tgSecond = snapshot.tgSecond
         } finally {
             mirroring = false
         }

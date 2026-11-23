@@ -77,7 +77,13 @@ data class ProbeSample(
      */
     val dataFrozen: Boolean = false,
     /** Данные идут и через полторы секунды после начала: поздние запросы тоже получили ответ. */
-    val dataSustained: Boolean = false
+    val dataSustained: Boolean = false,
+    /**
+     * Площадка Cloudflare, через которую выходит эта точка («DME», «HEL»; с 1.10.34) — ответ
+     * 1.1.1.1 на «id.server» внутри сессии (см. DataProbe.siteQuery); null — не спрашивали или
+     * ответа нет. Через Москву трафик выходит под российские фильтры (журнал 23.11: медиа Telegram).
+     */
+    val site: String? = null
 )
 
 /** Агрегированная статистика по конечной точке. */
@@ -111,6 +117,9 @@ data class EndpointStats(
 
     /** Долгая проверка показала: данные идут и через полторы секунды после начала. */
     val dataSustained: Boolean get() = samples.any { it.dataSustained }
+
+    /** Площадка выхода по пробам (см. [ProbeSample.site]); null — не узнали. */
+    val site: String? get() = samples.firstNotNullOfOrNull { it.site }
 
     /**
      * Рукопожатие было, а данные не пошли: ровно «вверх есть, вниз 0». С 1.10.30 сюда же — «пошли и
@@ -268,9 +277,15 @@ data class ScoreParts(
      * первых секунд. С 1.10.30: «без шума» выигрывал подбор за подбором на одном пинге, а на сети
      * человека он замерзает через секунду — работала только маскировка (журнал 22.11).
      */
-    val masking: Int = 0
+    val masking: Int = 0,
+    /**
+     * Где выходит точка (с 1.10.34): плюс — за рубежом, минус — в России, ноль — не узнали. Через
+     * российскую площадку Cloudflare трафик идёт под фильтры РКН: журнал 23.11 — все точки вышли
+     * через Москву, и медиа Telegram стало грузиться «через раз и рывками».
+     */
+    val exit: Int = 0
 ) {
-    val total: Int get() = confirmed + latency + stability + jitter + junkSurvival + resourceBonus - penalty + dataPath + masking
+    val total: Int get() = confirmed + latency + stability + jitter + junkSurvival + resourceBonus - penalty + dataPath + masking + exit
     fun asMap(): Map<String, Int> = linkedMapOf(
         "confirmed" to confirmed,
         "latency" to latency,
@@ -280,7 +295,8 @@ data class ScoreParts(
         "resource_bonus" to resourceBonus,
         "penalty" to -penalty,
         "data_path" to dataPath,
-        "masking" to masking
+        "masking" to masking,
+        "exit" to exit
     )
 }
 
@@ -306,7 +322,13 @@ data class Candidate(
      * Что открылось изнутри туннеля этого кандидата — построчно (с 1.10.30). Раньше от проверки
      * оставалось только «открылось 7 из 9», и список «Доступность» показывать было нечего.
      */
-    val resourceResults: List<ResourceResult> = emptyList()
+    val resourceResults: List<ResourceResult> = emptyList(),
+    /**
+     * Площадка Cloudflare, через которую выходит точка (с 1.10.34): «HEL», «DME»; null — не узнали.
+     * Узнаётся один раз на адрес в подробной проверке (площадка зависит от адреса и сети, а не от
+     * шума) и отдаётся всем вариантам этого адреса.
+     */
+    val site: String? = null
 ) {
     val score: Int get() = parts.total
     val junk: dev.warpscout.core.model.JunkProfile get() = config.junk

@@ -15,6 +15,7 @@ import dev.warpscout.app.ConfigShortlist
 import dev.warpscout.app.EndpointMemory
 import dev.warpscout.app.NoiseMemory
 import dev.warpscout.app.R
+import dev.warpscout.app.SiteMemory
 import dev.warpscout.app.TunnelDebug
 import dev.warpscout.core.config.SplitRoutes
 import dev.warpscout.core.config.WgConf
@@ -29,8 +30,10 @@ import dev.warpscout.core.model.Verdict
 import dev.warpscout.core.model.WarpConfig
 import dev.warpscout.core.net.EndpointPool
 import dev.warpscout.core.net.EndpointSpec
+import dev.warpscout.core.net.ExitSite
 import dev.warpscout.core.net.NetSettings
 import dev.warpscout.core.net.SpeedTest
+import dev.warpscout.core.net.TelegramMedia
 import dev.warpscout.core.net.UdpSocketFactory
 import dev.warpscout.core.net.WarpDefaults
 import dev.warpscout.core.net.WgProber
@@ -214,7 +217,11 @@ class WarpVpnService : VpnService() {
         // Тихий подбор для Wi-Fi проверяем здесь: строка статистики пишется раз в ~5 минут и при
         // погашенном экране. Сама проверка — в своём потоке: этот поток — таймер data plane.
         if (screenOffAt > 0L && !quietScanRunning) {
-            Thread({ runCatching { maybeQuietScan() } }, "warpscout-quiet-check").apply { isDaemon = true }.start()
+            Thread({
+                runCatching { maybeQuietScan() }
+                // Поиск выхода за рубежом (с 1.10.34) — если тихий подбор не начался.
+                if (!quietScanRunning) runCatching { maybeAbroadSearch() }
+            }, "warpscout-quiet-check").apply { isDaemon = true }.start()
         }
         return "$base, $env$tail"
     }
@@ -1014,12 +1021,27 @@ class WarpVpnService : VpnService() {
         // первого по порядку, дальше перебирает поток второго выхода (см. ниже).
         val secondList = secondCandidates(secondConfig())
         val secondCfg = secondList.firstOrNull()?.second
-        val router = secondCfg?.let { ExitRouter.of(ExitRouter.parse(serviceSettings().secondCidrs)) }
+        // Telegram — через второй выход, если эта точка на этой сети выходила через Россию (с 1.10.34,
+        // см. applyTelegramRoute): узнаём по памяти площадок ещё до подъёма, чтобы Telegram не
+        // начинал через московский фильтр. Проверка связи после подъёма уточнит и переключит на лету.
+        val tgSite = if (secondCfg != null && !quietSession) telegramSiteFor(cfg) else ""
+        val tunRoutes = runCatching { ExitRouter.of(SplitRoutes.prefixesOf(cfg.allowedIps)) }.getOrNull()
+        val router = secondCfg?.let { ExitRouter.of(secondExitCidrs(tgSite.isNotEmpty(), tunRoutes)) }
             ?.takeIf { !it.isEmpty } ?: ExitRouter.EMPTY
         val multiExit = secondCfg != null && !router.isEmpty
+        tgViaSecond = multiExit && tgSite.isNotEmpty()
+        TunnelState.tgSecond = tgViaSecond
+        tgNoSecondSaid = false
+        siteSaid = ""
         // Говорим и про выключенный второй выход: иначе «две цепочки рукопожатий в журнале»
         // невозможно объяснить, не заглядывая в настройки.
         TunnelDebug.stage(if (multiExit) "второй выход включён" else "второй выход выключен")
+        if (tgViaSecond) {
+            TunnelDebug.stage(
+                "Telegram — через второй выход: на этой сети точка выходила через ${ExitSite.describe(tgSite)}, " +
+                    "там медиа Telegram режут фильтры"
+            )
+        }
 
         val builder = builderFor(cfg)
         if (multiExit && !isFullTunnel(cfg)) {
@@ -1664,19 +1686,28 @@ class WarpVpnService : VpnService() {
         // счётчик сбрасывался только при переподъёме самим сервисом: после ручного
         // «Подключить» он оставался исчерпанным, и сервис больше не менял точку сам.
         rotationsSinceUp = 0
-        // Память «на такой сети работает такая точка»: следующая смена сети начнётся
-        // сразу с неё, без неудачной попытки на адресе из другой сети.
-        runCatching {
-            EndpointMemory.remember(this, memoryNetKind(), cfg.endpoint.render())
+        // Проверочный подъём подбора (quiet) — ещё не выбор точки (с 1.10.34). Журнал 23.11: такие
+        // подъёмы записывались как «работающая точка», и после подбора туннель пошёл на
+        // 8.39.214.6:928 (через неё данные не шли, 0/8), а не на победителя 8.34.70.3:8854.
+        if (!quietSession) {
+            // Память «на такой сети работает такая точка»: следующая смена сети начнётся
+            // сразу с неё, без неудачной попытки на адресе из другой сети.
+            runCatching {
+                EndpointMemory.remember(this, memoryNetKind(), cfg.endpoint.render())
+            }
+            // Ровно этот текст и поднимется после перезагрузки, обновления или перезапуска
+            // системой: точка в нём та, что работает сейчас (см. TunnelLastConfig).
+            runCatching { TunnelLastConfig.save(this, text) }
         }
-        // Ровно этот текст и поднимется после перезагрузки, обновления или перезапуска
-        // системой: точка в нём та, что работает сейчас (см. TunnelLastConfig).
-        runCatching { TunnelLastConfig.save(this, text) }
-        TunnelDebug.ok("туннель поднят: ${cfg.endpoint.render()}")
+        TunnelDebug.ok(
+            "туннель поднят: ${cfg.endpoint.render()}" +
+                if (quietSession) " (проверка подбора — точку не запоминаю)" else ""
+        )
         TunnelState.status = getString(R.string.notif_active, cfg.endpoint.render())
         postNotification(getString(R.string.notif_active, cfg.endpoint.render()))
-        // Тихая проверка соседних точек: сессию не трогает, очередь держит свежей.
-        startSentry(cfg, myEpoch)
+        // Тихая проверка соседних точек: сессию не трогает, очередь держит свежей. Проверке подбора
+        // она не нужна — её сессия живёт секунды.
+        if (!quietSession) startSentry(cfg, myEpoch)
     }
 
     /**
@@ -1801,6 +1832,34 @@ class WarpVpnService : VpnService() {
                 if (!linkAlive(myEpoch)) return@Thread
                 TunnelState.setLink(System.currentTimeMillis(), result.web, result.webMs, result.tg, result.tgMs, result.exit)
                 reportLink(reason, result)
+                // Площадка выхода (с 1.10.34): в память — по ней перебор ставит выход за рубежом
+                // раньше московского; Telegram — через второй выход, пока выход в России.
+                val site = if (result.web == TunnelStatus.LINK_OK) ExitSite.fromSummary(result.exit) else ""
+                if (site.isNotEmpty()) {
+                    TunnelState.endpoint.takeIf { it.isNotBlank() }?.let { ep ->
+                        runCatching { SiteMemory.note(this, memoryNetKind(), ep, site, live = !quietSession) }
+                    }
+                    if (!quietSession) {
+                        runCatching { applyTelegramRoute(site) }
+                        // Строка в журнал — когда площадка сменилась, а не на каждую проверку связи
+                        // (она идёт при каждом открытии экрана).
+                        if (site != siteSaid) {
+                            siteSaid = site
+                            if (ExitSite.isRussian(site)) {
+                                TunnelDebug.stage(
+                                    "выход WARP через ${ExitSite.describe(site)}: там медиа Telegram и часть сайтов режут фильтры" +
+                                        (if (tgViaSecond) " — Telegram идёт через второй выход" else "")
+                                )
+                            }
+                        }
+                    }
+                }
+                if (!quietSession && result.web == TunnelStatus.LINK_OK && result.tg == TunnelStatus.LINK_OK &&
+                    linkAlive(myEpoch) && tgMediaDue(site)
+                ) {
+                    runCatching { checkTelegramMedia(myEpoch, site) }
+                }
+                if (!linkAlive(myEpoch)) return@Thread
                 val settings = serviceSettings()
                 if (result.web == TunnelStatus.LINK_FAIL && reconnectOnFail && wanted && linkAlive(myEpoch) && quietSession) {
                     // Проверочный подъём подбора точку не меняет: «связи нет» — это и есть ответ
@@ -1890,6 +1949,165 @@ class WarpVpnService : VpnService() {
         return LinkResult(web, webMs, exit, tg, tgMs, webNote)
     }
 
+    // ------------------------------------------------------------ Telegram при выходе через Россию
+    //
+    // Журнал 23.11: с 07:39 все точки выходили через московскую площадку Cloudflare (DME), и медиа
+    // Telegram грузилось «через раз и рывками», а проверка связи писала «Telegram ✓»: соединение
+    // открывалось, резали уже поток. Человек выбрал (23.11): пока выход WARP в России, Telegram идёт
+    // через второй выход; выход за рубежом — снова напрямую через WARP (так быстрее). И проверка
+    // Telegram должна смотреть, идут ли данные, а не только открывается ли соединение.
+
+    /** Telegram сейчас идёт через второй выход: подсети Telegram — в таблице второго выхода. */
+    @Volatile
+    private var tgViaSecond = false
+
+    /** В этой сессии уже сказали «второй выход не настроен — Telegram через Москву». */
+    @Volatile
+    private var tgNoSecondSaid = false
+
+    /** Площадка, о которой в этой сессии уже написали в журнал. */
+    @Volatile
+    private var siteSaid = ""
+
+    /** Когда и на какой площадке последний раз проверяли медиа Telegram. */
+    @Volatile
+    private var tgMediaCheckedAt = 0L
+
+    @Volatile
+    private var tgMediaCheckedSite = ""
+
+    /** Медиа проверяем не чаще раза в 30 минут (256 КБ на проверку) — или сразу, если сменилась площадка. */
+    private val TG_MEDIA_GAP_MS = 30 * 60_000L
+
+    /**
+     * Подсети второго выхода из настроек плюс, если [withTelegram], подсети Telegram — те, что и так
+     * идут в туннель по маршрутам [routes] (null — весь трафик). Выбор в «Туннелировании» не меняем:
+     * если Telegram идёт мимо туннеля, площадка WARP его не касается.
+     */
+    private fun secondExitCidrs(withTelegram: Boolean, routes: ExitRouter? = currentRoutes()): List<String> {
+        val base = ExitRouter.parse(serviceSettings().secondCidrs)
+        if (!withTelegram) return base
+        val tg = TelegramMedia.NETS_V4.filter { routedIp(routes, it.substringBefore('/')) }
+        return (base + tg).distinct()
+    }
+
+    /**
+     * Площадка в России, через которую эта точка выходила на этой сети (по памяти), — если Telegram
+     * надо пускать через второй выход; пусто — не надо (выход за рубежом, не знаем или выключено).
+     */
+    private fun telegramSiteFor(cfg: WarpConfig): String = runCatching {
+        if (!serviceSettings().tgSecond || !isWarpPeer(cfg)) return@runCatching ""
+        val site = SiteMemory.siteOf(this, memoryNetKind(), cfg.endpoint.render())
+        if (ExitSite.isRussian(site)) site else ""
+    }.getOrDefault("")
+
+    /**
+     * Пускать ли Telegram через второй выход — по площадке, которую только что показала проверка
+     * связи. Таблица меняется на лету, как при обновлении адресов второго выхода (handleSecondRoutes):
+     * туннель не переподключается.
+     */
+    private fun applyTelegramRoute(site: String) {
+        val settings = serviceSettings()
+        val want = settings.tgSecond && ExitSite.isRussian(site)
+        if (want == tgViaSecond) return
+        val splitter = dispatcher
+        if (splitter == null) {
+            // Второго выхода в этой сессии нет: не настроен или без своих адресов.
+            if (want && !tgNoSecondSaid) {
+                tgNoSecondSaid = true
+                TunnelDebug.stage(
+                    if (secondConfig() == null) {
+                        "выход WARP через ${ExitSite.describe(site)} — Telegram пустить в обход нечем: второй выход не настроен"
+                    } else {
+                        "выход WARP через ${ExitSite.describe(site)} — Telegram пойдёт через второй выход со следующего подключения"
+                    }
+                )
+            }
+            return
+        }
+        val router = ExitRouter.of(secondExitCidrs(want))
+        if (router.isEmpty) return
+        splitter.router = router
+        tgViaSecond = want
+        TunnelState.tgSecond = want
+        val secondUp = TunnelState.second == TunnelStatus.SECOND_UP
+        TunnelDebug.stage(
+            if (want) {
+                "выход WARP через ${ExitSite.describe(site)} — Telegram переключён на второй выход (на лету)" +
+                    if (secondUp) "" else "; пока второй выход не поднят, Telegram идёт через WARP"
+            } else {
+                "выход WARP за рубежом (${ExitSite.describe(site)}) — Telegram снова напрямую через WARP"
+            }
+        )
+        // Площадка сменилась — медиа проверим заново уже по новому пути.
+        tgMediaCheckedAt = 0L
+    }
+
+    /**
+     * Пора ли проверять медиа Telegram: давно не проверяли или сменилась площадка. При погашенном
+     * экране — нет: Telegram сейчас никто не смотрит, а трафик и радио это стоит.
+     */
+    private fun tgMediaDue(site: String): Boolean {
+        if (!isScreenOn()) return false
+        val now = System.currentTimeMillis()
+        if (tgMediaCheckedAt <= 0L) return true
+        if (site.isNotEmpty() && site != tgMediaCheckedSite) return true
+        return now - tgMediaCheckedAt !in 0 until TG_MEDIA_GAP_MS
+    }
+
+    /** Проверка медиа Telegram (см. TelegramMedia): вывод — в снимок и в журнал. */
+    private fun checkTelegramMedia(myEpoch: Int, site: String) {
+        val routes = currentRoutes()
+        val tgRouted = TelegramMedia.NETS_V4.any { cidr -> routedIp(routes, cidr.substringBefore('/')) }
+        if (!tgRouted) return
+        tgMediaCheckedAt = System.currentTimeMillis()
+        tgMediaCheckedSite = site
+        val r = runTelegramMedia()
+        if (!linkAlive(myEpoch)) return
+        TunnelState.setTgMedia(System.currentTimeMillis(), r.verdict, r.kbps)
+        val via = if (tgViaSecond && TunnelState.second == TunnelStatus.SECOND_UP) " (через второй выход)" else ""
+        val line = "проверка Telegram: " + TelegramMedia.describe(r.verdict, r.kbps, r.maxGapMs) + via +
+            (if (r.note.isNotBlank()) " — ${r.note}" else "")
+        when (r.verdict) {
+            TelegramMedia.OK -> TunnelDebug.ok(line)
+            TelegramMedia.SLOW, TelegramMedia.STALL -> TunnelDebug.error(line, tgMediaHint(site))
+            else -> TunnelDebug.stage(line)
+        }
+    }
+
+    /** Что делать, если медиа Telegram тормозит: зависит от площадки и от того, где сейчас Telegram. */
+    private fun tgMediaHint(site: String): String {
+        val settings = serviceSettings()
+        if (!ExitSite.isRussian(site)) {
+            return "связь с Telegram есть, медиа тормозит, а выход WARP — не в России: попробуй другую точку"
+        }
+        val city = ExitSite.city(site)
+        if (tgViaSecond && TunnelState.second == TunnelStatus.SECOND_UP) {
+            return "выход WARP через $city, Telegram уже идёт через второй выход — медленный сам второй выход"
+        }
+        if (tgViaSecond) return "выход WARP через $city: второй выход сейчас не работает — Telegram идёт через WARP"
+        val fix = when {
+            !settings.tgSecond -> "включи «Telegram через второй выход» в «Автоматике»"
+            secondConfig() == null -> "включи второй выход — Telegram пойдёт через него, пока выход в России"
+            else -> "Telegram пойдёт через второй выход со следующего подключения"
+        }
+        val wait = if (settings.abroadSearch) {
+            "; точку с выходом за рубежом приложение поищет само — на зарядке с погашенным экраном"
+        } else {
+            ""
+        }
+        return "выход WARP через $city: $fix$wait"
+    }
+
+    /**
+     * Загрузка начала APK Telegram с telegram.org через туннель (см. TelegramMedia.fetch): по IPv4,
+     * как ходит сам Telegram, с проверкой, что сервер — в сетях Telegram. Сокет обычный, без protect:
+     * идёт через туннель, а подсети Telegram — через второй выход, если они сейчас там.
+     */
+    private fun runTelegramMedia(): TelegramMedia.Fetch = TelegramMedia.fetch(
+        resolve = { host -> java.net.InetAddress.getAllByName(host).mapNotNull { it.hostAddress } }
+    )
+
     /** GET с коротким телом (trace — пара сотен байт). Без кешей и перенаправлений. */
     private fun httpGetSmall(url: String, timeoutMs: Int): String {
         val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
@@ -1925,7 +2143,9 @@ class WarpVpnService : VpnService() {
             else -> "интернет ✗ нет ответа" + (if (r.webNote.isNotBlank()) " (${r.webNote})" else "")
         }
         val tg = when (r.tg) {
-            TunnelStatus.LINK_OK -> "Telegram ✓ ${r.tgMs} мс"
+            // Это соединение с сервером Telegram, а не загрузка медиа (журнал 23.11: «Telegram ✓» при
+            // медиа «рывками»). Медиа проверяет отдельная загрузка — строка «проверка Telegram: …».
+            TunnelStatus.LINK_OK -> "Telegram: соединение ✓ ${r.tgMs} мс"
             TunnelStatus.LINK_BYPASS -> "Telegram — мимо туннеля"
             else -> "Telegram ✗ сервер не отвечает"
         }
@@ -2167,7 +2387,7 @@ class WarpVpnService : VpnService() {
             TunnelDebug.stage("адреса второго выхода обновлены — применятся при следующем подключении")
             return
         }
-        val router = runCatching { ExitRouter.of(ExitRouter.parse(serviceSettings().secondCidrs)) }.getOrNull()
+        val router = runCatching { ExitRouter.of(secondExitCidrs(tgViaSecond)) }.getOrNull()
         if (router == null || router.isEmpty) return
         splitter.router = router
         val split = lastConfigText?.let { text -> runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull() }
@@ -2773,6 +2993,11 @@ class WarpVpnService : VpnService() {
             tun = null
         }
         runCatching { d?.stop() }
+        // Диспетчера нет — Telegram через второй выход больше не идёт (с 1.10.34).
+        if (tgViaSecond) {
+            tgViaSecond = false
+            TunnelState.tgSecond = false
+        }
         runCatching { p2?.stop() }
         runCatching { s2?.close() }
         if (p2 != null) {
@@ -3374,8 +3599,11 @@ class WarpVpnService : VpnService() {
     @Volatile
     private var rescueNet: String = ""
 
-    /** Найденная точка: адрес, профиль шума и время ответа через туннель. */
-    private data class RescuePoint(val endpoint: Endpoint, val junk: JunkProfile, val dataMs: Double)
+    /**
+     * Найденная точка: адрес, профиль шума, время ответа через туннель и площадка выхода (с 1.10.34;
+     * null — резолвер её не назвал).
+     */
+    private data class RescuePoint(val endpoint: Endpoint, val junk: JunkProfile, val dataMs: Double, val site: String? = null)
 
     /**
      * Запустить подбор, если пора. true — подбор пошёл (дальше он решает сам), false — не время или
@@ -3434,7 +3662,7 @@ class WarpVpnService : VpnService() {
      * с профилями шума и проверкой данных. Туннеля в это время нет, поэтому проба данных никому не
      * мешает. Итог — до трёх точек с данными, быстрые первыми.
      */
-    private fun runRescue(cfg: WarpConfig, peer: ByteArray, gen: Int): List<RescuePoint> {
+    private fun runRescue(cfg: WarpConfig, peer: ByteArray, gen: Int, seekAbroad: Boolean = false): List<RescuePoint> {
         fun live() = gen == waitGen.get() && wanted && !destroyed
         val prober = WgProber(
             NetSettings(
@@ -3450,7 +3678,8 @@ class WarpVpnService : VpnService() {
         // Известные точки (очередь, память, дозор) — вместе с пулом: вдруг какая-то ожила. Пул —
         // свежая выборка по всем подсетям (seed от времени), а не тот же срез, что не сработал.
         val known = orderedCandidates().mapNotNull { parseEndpoint(it) }
-        val pool = (known + EndpointPool.build(EndpointSpec(maxEndpoints = 96, seed = started)))
+        // Поиск выхода за рубежом смотрит пул шире: площадка зависит от подсети, и нужны разные подсети.
+        val pool = (known + EndpointPool.build(EndpointSpec(maxEndpoints = if (seekAbroad) 160 else 96, seed = started)))
             .distinct()
             .filter { it.family == AddrFamily.IPV4 }
         val coarse = prober.scan(pool, cfg.account, peer, junk = null, isCancelled = { !live() })
@@ -3460,19 +3689,44 @@ class WarpVpnService : VpnService() {
             .sortedBy { it.minRtt ?: Double.MAX_VALUE }
         TunnelDebug.stage("подбор сервиса: на рукопожатие без шума ответили ${alive.size} из ${pool.size} точек")
         // Без шума не ответил никто — сеть режет голый WireGuard: подробно смотрим точки пула с шумом.
-        val targets = (if (alive.isNotEmpty()) alive.map { it.endpoint } else pool).take(RESCUE_REFINE)
+        val ranked = if (alive.isNotEmpty()) alive.map { it.endpoint } else pool
+        // Поиск выхода за рубежом (с 1.10.34): сначала по одной точке из каждой подсети — у одной
+        // подсети одна площадка, и десять быстрых адресов из одной подсети дали бы десять Москв.
+        val targets = if (seekAbroad) {
+            (ranked.distinctBy { subnet24(it.host) } + ranked).distinct().take(RESCUE_REFINE * 2)
+        } else {
+            ranked.take(RESCUE_REFINE)
+        }
         val profiles = rescueProfiles(cfg)
         TunnelDebug.stage("подбор сервиса: шум по порядку — " + profiles.joinToString { JunkLibrary.nameOf(it) })
         val warp = isWarpPeer(cfg)
         val net = memoryNetKind()
         val found = ArrayList<RescuePoint>()
+        // Подсети, о которых уже известно «выход в России», — поиск выхода за рубежом их пропускает.
+        val russianNets = HashSet<String>()
+        val sites = HashMap<String, String>()
+        fun enough(): Boolean = if (seekAbroad) {
+            found.count { ExitSite.isAbroad(it.site) } >= dev.warpscout.core.tune.Shortlist.LIMIT
+        } else {
+            found.size >= dev.warpscout.core.tune.Shortlist.LIMIT
+        }
+        // Поиск выхода за рубежом — не дольше двух минут: туннеля всё это время нет.
+        val deadline = if (seekAbroad) started + ABROAD_MAX_MS else Long.MAX_VALUE
         for (ep in targets) {
-            if (!live() || found.size >= dev.warpscout.core.tune.Shortlist.LIMIT) break
+            if (!live() || enough() || System.currentTimeMillis() > deadline) break
+            if (seekAbroad && subnet24(ep.host) in russianNets) continue
             for (profile in profiles) {
                 if (!live()) break
                 val r = runCatching {
-                    prober.probe(ep, cfg.account, peer, profile.takeIf { !it.isEmpty }, dataProbe = true)
+                    prober.probe(ep, cfg.account, peer, profile.takeIf { !it.isEmpty }, dataProbe = true, askSite = true)
                 }.getOrNull() ?: continue
+                r.stats.site?.let { site ->
+                    sites[ep.render()] = site
+                    if (ExitSite.isRussian(site)) russianNets += subnet24(ep.host)
+                }
+                // Ищем выход за рубежом, а эта точка выходит через Россию: площадка от шума не
+                // зависит — другие профили не пробуем, долгую пробу не тратим.
+                if (seekAbroad && ExitSite.isRussian(r.stats.site)) break
                 val ms = r.stats.dataMs ?: continue
                 // Один ответ ещё ничего не обещает (журнал 22.11: подбор сервиса нашёл три точки без
                 // шума «с данными», и все замерзали через секунду). Долгая проба: данные должны идти
@@ -3486,15 +3740,30 @@ class WarpVpnService : VpnService() {
                     TunnelDebug.stage("подбор сервиса: ${ep.render()} · $name — ${long.note.take(90)}, не беру")
                     continue
                 }
-                found += RescuePoint(ep, profile, ms)
+                found += RescuePoint(ep, profile, ms, r.stats.site)
                 break // одной рабочей комбинации на точку хватает
             }
         }
+        // Где выходят проверенные точки — в память площадок этой сети.
+        if (sites.isNotEmpty()) runCatching { SiteMemory.noteAll(this, net, sites) }
+        val siteLine = if (sites.isEmpty()) "" else {
+            ", выход: " + sites.values.groupingBy { it }.eachCount().entries
+                .sortedByDescending { ExitSite.rank(it.key) }
+                .joinToString(", ") { "${ExitSite.describe(it.key)} — ${it.value}" }
+        }
         TunnelDebug.stage(
             "подбор сервиса: точек с данными — ${found.size}, " +
-                "за ${(System.currentTimeMillis() - started) / 1000} с"
+                "за ${(System.currentTimeMillis() - started) / 1000} с" + siteLine
         )
-        return found.sortedBy { it.dataMs }
+        // Выход за рубежом — первыми, дальше быстрые (с 1.10.34).
+        return found.sortedWith(compareByDescending<RescuePoint> { ExitSite.rank(it.site) }.thenBy { it.dataMs })
+            .let { list -> if (seekAbroad) list.take(dev.warpscout.core.tune.Shortlist.LIMIT) else list }
+    }
+
+    /** Подсеть /24 адреса IPv4 («8.34.70»); не IPv4 — сам адрес. */
+    private fun subnet24(host: String): String {
+        val parts = host.split('.')
+        return if (parts.size == 4) parts.take(3).joinToString(".") else host
     }
 
     /**
@@ -3528,7 +3797,7 @@ class WarpVpnService : VpnService() {
      * Подбор сервиса нашёл точки: записываем их тройкой этой сети (её видно в «Лучших конфигах» и в
      * «Резервной»), ставим в перебор сразу за текущей и поднимаем туннель на лучшей.
      */
-    private fun applyRescue(found: List<RescuePoint>, cfg: WarpConfig, baseText: String) {
+    private fun applyRescue(found: List<RescuePoint>, cfg: WarpConfig, baseText: String, keepOld: Boolean = false) {
         val kind = memoryNetKind()
         val mobile = dev.warpscout.app.NetIdentity.isMobile(kind)
         val now = System.currentTimeMillis()
@@ -3545,7 +3814,8 @@ class WarpVpnService : VpnService() {
             return
         }
         runCatching {
-            ConfigShortlist.save(this, ready.map { (pt, text) ->
+            val group = if (mobile) ConfigShortlist.GROUP_MOBILE else ConfigShortlist.GROUP_WIFI
+            val fresh = ready.map { (pt, text) ->
                 ConfigShortlist.Entry(
                     endpoint = pt.endpoint.render(),
                     junk = pt.junk.name,
@@ -3554,16 +3824,26 @@ class WarpVpnService : VpnService() {
                     resourcesTotal = 0,
                     configText = text,
                     savedAt = now,
-                    network = if (mobile) ConfigShortlist.GROUP_MOBILE else ConfigShortlist.GROUP_WIFI,
-                    dataMs = pt.dataMs.toInt()
+                    network = group,
+                    dataMs = pt.dataMs.toInt(),
+                    site = pt.site.orEmpty()
                 )
-            })
+            }
+            // Поиск выхода за рубежом (keepOld): найденные — первыми, прежняя тройка — запасными за
+            // ними. Она проверена подбором целиком, и терять её ради непроверенных сайтами точек незачем.
+            val old = if (keepOld) {
+                ConfigShortlist.forGroup(this, group).filter { e -> fresh.none { it.endpoint == e.endpoint } }
+            } else {
+                emptyList()
+            }
+            ConfigShortlist.save(this, (fresh + old).take(ConfigShortlist.MAX))
         }
         rescueQueue = ready.map { it.first.endpoint.render() }
         rescueNet = kind
         TunnelDebug.ok(
             "подбор сервиса нашёл новую очередь: " + ready.joinToString { (pt, _) ->
-                "${pt.endpoint.render()} (шум ${pt.junk.name}, данные ${pt.dataMs.toLong()} мс)"
+                "${pt.endpoint.render()} (шум ${pt.junk.name}, данные ${pt.dataMs.toLong()} мс" +
+                    (pt.site?.let { ", выход ${ExitSite.describe(it)}" } ?: "") + ")"
             }
         )
         val best = ready.first()
@@ -3703,6 +3983,113 @@ class WarpVpnService : VpnService() {
         if (!quietScanRunning) return
         quietAborted = true
         waitGen.incrementAndGet()
+    }
+
+    // ------------------------------------------------------------ поиск выхода за рубежом (с 1.10.34)
+    //
+    // Журнал 23.11: Wi-Fi и LTE выходили через Москву (DME) — медиа Telegram «через раз и рывками».
+    // Площадку выбирает маршрут оператора, но разные подсети Cloudflare приходят на разные площадки.
+    // Человек выбрал (23.11): если выход на этой сети — в России, искать точку с выходом за рубежом
+    // самому, но только на зарядке с погашенным экраном и не чаще раза в сутки на сеть. Туннель
+    // гаснет примерно на минуту и возвращается сам; включили экран — сразу. Выключается в
+    // «Автоматике» (ServiceSettings.abroadSearch).
+
+    /** Дольше поиск не идёт: туннеля всё это время нет. */
+    private val ABROAD_MAX_MS = 120_000L
+
+    /** Пора ли искать выход за рубежом. Зовётся со строкой статистики (раз в ~5 минут). */
+    private fun maybeAbroadSearch() {
+        if (destroyed || !wanted || stopped.get() || !TunnelState.up || quietScanRunning || rescueBusy.get()) return
+        if (quietSession) return
+        val offAt = screenOffAt
+        val now = System.currentTimeMillis()
+        if (offAt <= 0L || isScreenOn() || now - offAt < QUIET_IDLE_MS) return
+        if (!serviceSettings().abroadSearch) return
+        val site = ExitSite.fromSummary(TunnelState.linkExit)
+        if (!ExitSite.isRussian(site)) return
+        val (_, charging) = batteryState()
+        if (!charging) return
+        val kind = memoryNetKind()
+        if (kind.isBlank()) return
+        if (!SiteMemory.searchDue(this, kind)) return
+        startAbroadSearch(site, kind, now - offAt)
+    }
+
+    private fun startAbroadSearch(site: String, kind: String, idleMs: Long) {
+        val text = lastConfigText ?: return
+        val cfg = runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull() ?: return
+        if (!isWarpPeer(cfg)) return
+        val peer = runCatching { Crypto.unBase64(cfg.account.peerPublicB64) }.getOrNull()
+            ?.takeIf { it.size == 32 } ?: return
+        if (!rescueBusy.compareAndSet(false, true)) return
+        quietScanRunning = true
+        quietAborted = false
+        // Отметка поиска — до начала (пока «не нашлось»): раз в сутки на сеть, даже если поиск
+        // прервут экраном, сменой сети или система закроет сервис посреди поиска.
+        runCatching { SiteMemory.noteSearch(this, kind, false) }
+        TunnelDebug.stage(
+            "поиск выхода за рубежом: выход WARP через ${ExitSite.describe(site)}, телефон на зарядке, экран выключен " +
+                "${idleMs / 60_000} мин — ищу точку с выходом за рубежом (туннель вернётся сам, а включишь экран — сразу)"
+        )
+        // Сессию гасим, как перед тихим подбором: проба тем же ключом рядом с работающей сессией
+        // отбирает её у туннеля.
+        epoch.incrementAndGet()
+        stopped.set(true)
+        TunnelState.up = false
+        starting = false
+        TunnelState.busy = false
+        closeAll()
+        stopped.set(false)
+        val gen = waitGen.incrementAndGet()
+        TunnelState.phase = TunnelStatus.PHASE_RECONNECTING
+        TunnelState.status = "ищу точку с выходом за рубежом — туннель вернётся сам"
+        postNotification(TunnelState.status)
+        Thread({
+            var found: List<RescuePoint> = emptyList()
+            var failed = false
+            try {
+                found = runRescue(cfg, peer, gen, seekAbroad = true)
+            } catch (e: Throwable) {
+                failed = true
+                runCatching {
+                    TunnelDebug.stage("поиск выхода за рубежом не удался: ${e.javaClass.simpleName} ${e.message.orEmpty().take(80)}")
+                }
+            } finally {
+                rescueBusy.set(false)
+                quietScanRunning = false
+            }
+            if (destroyed || !wanted) return@Thread
+            val abroad = found.filter { ExitSite.isAbroad(it.site) }
+            when {
+                quietAborted -> {
+                    TunnelDebug.stage("поиск выхода за рубежом прерван: экран включён — возвращаю туннель, следующий поиск через сутки")
+                    restartAfterNetworkChange("экран включён во время поиска", R.string.status_reconnect_net)
+                }
+                // Поиск отменило другое событие (смена сети, «Включить», «Выключить»): подъёмом там
+                // уже занялись — сами не вмешиваемся.
+                gen != waitGen.get() -> Unit
+                abroad.isEmpty() -> {
+                    TunnelDebug.stage(
+                        if (failed) {
+                            "поиск выхода за рубежом не удался — возвращаю прежнюю точку, следующий поиск через сутки"
+                        } else {
+                            "поиск выхода за рубежом: точек с выходом за рубежом на этой сети не нашлось — " +
+                                "возвращаю прежнюю, следующий поиск через сутки"
+                        }
+                    )
+                    restartAfterNetworkChange("поиск выхода окончен", R.string.status_reconnect_net)
+                }
+                else -> {
+                    runCatching { SiteMemory.noteSearch(this, kind, true) }
+                    TunnelDebug.ok(
+                        "поиск выхода за рубежом: нашлось ${abroad.size} — " +
+                            abroad.joinToString { "${it.endpoint.render()} (${ExitSite.describe(it.site)})" }
+                    )
+                    // Найденные — первыми в тройке этой сети, прежняя тройка — запасными за ними.
+                    applyRescue(abroad, cfg, text, keepOld = true)
+                }
+            }
+        }, "warpscout-abroad").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }.start()
     }
 
     /** Цикл удался: промолчавшие в нём точки — в конец перебора (рядом нашлась живая, сеть ни при чём). */
@@ -3883,15 +4270,22 @@ class WarpVpnService : VpnService() {
         // Точки, которые сервис только что подобрал сам (см. applyRescue): проверены данными минуту
         // назад — раньше старой очереди и резервной из неё.
         val rescued = if (rescueNet == kind) rescueQueue else emptyList()
-        val all = buildList {
+        val head = buildList {
             if (current != null) add(current)
             addAll(rescued)
             if (backup != null) add(backup)
+        }
+        val tail = buildList {
             if (remembered != null) add(remembered)
             addAll(fresh)
             addAll(netList)
             addAll(queue)
-        }.distinct()
+        }.distinct().filter { it !in head }
+        // С 1.10.34 среди остальных точек — сначала те, что на этой сети выходили за рубежом, потом
+        // неизвестные, московские — последними (см. SiteMemory). Резервная, выбранная человеком, и
+        // только что подобранные остаются впереди: это решения, а не догадки.
+        val sites = runCatching { SiteMemory.sitesFor(this, kind) }.getOrDefault(emptyMap())
+        val all = (head + ExitSite.abroadFirst(tail) { sites[it] }).distinct()
         val (dead, alive) = all.partition { it != current && sentryDead(kind, it, now) }
         return alive + dead
     }

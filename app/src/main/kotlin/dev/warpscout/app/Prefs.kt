@@ -506,6 +506,25 @@ class Prefs(private val context: Context) {
             pushToService()
         }
 
+    /**
+     * Искать точку с выходом за рубежом, если выход WARP на этой сети — в России (с 1.10.34): на
+     * зарядке с погашенным экраном, не чаще раза в сутки на сеть, туннель гаснет примерно на минуту.
+     */
+    var featAbroadSearch: Boolean
+        get() = sp.getBoolean("featAbroadSearch", true)
+        set(v) {
+            sp.edit().putBoolean("featAbroadSearch", v).apply()
+            pushToService()
+        }
+
+    /** Пускать Telegram через второй выход, пока выход WARP — в России (с 1.10.34). */
+    var featTgSecond: Boolean
+        get() = sp.getBoolean("featTgSecond", true)
+        set(v) {
+            sp.edit().putBoolean("featTgSecond", v).apply()
+            pushToService()
+        }
+
     /** Перед переключением на выбранную точку спрашивать её пробой (рабочий туннель не трогая). */
     var featProbeBeforeSwitch: Boolean
         get() = sp.getBoolean("featProbeBeforeSwitch", true)
@@ -811,6 +830,8 @@ class Prefs(private val context: Context) {
             // и точке из подбора, и сохранённому для автоподъёма.
             routes = runCatching { allowedIps() }.getOrDefault(""),
             routesNote = runCatching { routesNote() }.getOrDefault(""),
+            abroadSearch = featAbroadSearch,
+            tgSecond = featTgSecond,
         )
     }
 

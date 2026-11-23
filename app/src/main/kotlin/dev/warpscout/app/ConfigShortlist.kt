@@ -66,7 +66,12 @@ object ConfigShortlist {
          * За сколько пришёл ответ через туннель этой точки при подборе, мс; -1 — данные не
          * проверяли (записи старых версий). С 1.10.29 в тройку попадают только точки с данными.
          */
-        val dataMs: Int = -1
+        val dataMs: Int = -1,
+        /**
+         * Площадка Cloudflare, через которую точка выходила при подборе («HEL», «DME»; с 1.10.34);
+         * пусто — не узнали. Через московскую площадку медиа Telegram режут фильтры (журнал 23.11).
+         */
+        val site: String = ""
     )
 
     /**
@@ -163,6 +168,7 @@ object ConfigShortlist {
                 append("speed=").append(e.speedKbps).append('\n')
                 append("hsOnly=").append(if (e.handshakeOnly) 1 else 0).append('\n')
                 append("data=").append(e.dataMs).append('\n')
+                if (e.site.isNotBlank()) append("site=").append(e.site).append('\n')
                 append("conf=").append(encode(e.configText)).append('\n')
             }
         }
@@ -204,7 +210,8 @@ object ConfigShortlist {
             network = map["network"].orEmpty(),
             speedKbps = map["speed"]?.toIntOrNull() ?: -1,
             handshakeOnly = map["hsOnly"] == "1",
-            dataMs = map["data"]?.toIntOrNull() ?: -1
+            dataMs = map["data"]?.toIntOrNull() ?: -1,
+            site = map["site"].orEmpty()
         )
     }
 
