@@ -361,9 +361,10 @@ class MainActivity : AppCompatActivity() {
         binding.editServer.setText(prefs.pinnedEndpoint)
         // Прежний ручной список CIDR (режим «вручную») становится «моими сайтами» (с 1.10.31).
         prefs.migrateManualRoutes()
-        // Маршруты по спискам собраны прежней версией — считаем, что по нынешним отметкам: иначе
-        // первое же «Сохранить и применить» после обновления пересобирало бы их без причины.
-        if (prefs.listsBuiltSig.isBlank() && prefs.allowedIpsText.isNotBlank()) prefs.listsBuiltSig = listsSignature()
+        // Маршруты по спискам, собранные прежней версией, актуальными больше не помечаем (с 1.10.33):
+        // подпись включает версию правил сборки, и при следующем «Сохранить и применить» они
+        // соберутся заново. До 1.10.33 здесь помечали — и сети Google для видео YouTube из 1.10.31
+        // до телефона не дошли (журнал 23.11: те же 683 маршрута с 1.10.30 до 1.10.32).
         binding.editTunnelSites.setText(prefs.tunnelSites)
         binding.switchSecondViaWarp.isChecked = prefs.secondViaWarp
         runCatching { buildSecondSources() }
@@ -769,12 +770,15 @@ class MainActivity : AppCompatActivity() {
             }
             val sitesRoutes = routeCount(prefs.tunnelSitesCidrs)
             val listRoutes = routeCount(prefs.allowedIpsText)
+            // Сколько маршрутов получит туннель: к собранным добавляются сети Google для видео
+            // YouTube (с 1.10.33), а без IPv6 v6-маршруты не выпускаются.
+            val liveRoutes = runCatching { routeCount(prefs.allowedIps()) }.getOrDefault(0)
             val routes = when (prefs.routesMode) {
                 1 -> getString(R.string.tunnel_sum_routes_preset)
                 2 -> if (listRoutes == 0) getString(R.string.tunnel_sum_routes_all)
-                else getString(R.string.tunnel_sum_routes_lists, listRoutes)
+                else getString(R.string.tunnel_sum_routes_lists, if (liveRoutes > 0) liveRoutes else listRoutes)
                 3 -> if (sitesRoutes == 0) getString(R.string.tunnel_sum_routes_all)
-                else getString(R.string.tunnel_sum_routes_sites, sitesRoutes)
+                else getString(R.string.tunnel_sum_routes_sites, if (liveRoutes > 0) liveRoutes else sitesRoutes)
                 else -> getString(R.string.tunnel_sum_routes_all)
             }
             val text = buildString {
@@ -867,9 +871,8 @@ class MainActivity : AppCompatActivity() {
         return cidrs.size
     }
 
-    /** Какие списки отмечены — по подписи видно, что выбор поменялся после сборки маршрутов. */
-    private fun listsSignature(): String =
-        (prefs.allowBlockIds.sorted() + listOf("|") + prefs.allowDirectIds.sorted()).joinToString(",")
+    /** Подпись отмеченных списков и правил сборки (см. Prefs.listsSignature). */
+    private fun listsSignature(): String = prefs.listsSignature()
 
     /** Маршруты по спискам (сеть: не из UI-потока): недостающие списки скачиваются сами. */
     private fun buildListsSync(): String {
@@ -3766,8 +3769,18 @@ class MainActivity : AppCompatActivity() {
         // DNS у всех кандидатов — выбранный сейчас: тексты из подбора и сохранённый конфиг несут
         // DNS того времени, и смена DNS в настройках иначе до туннеля не доходила.
         val dns = runCatching { prefs.dnsServers() }.getOrDefault(emptyList())
+        // Маршруты — тоже нынешние (с 1.10.33): точка из топа несла маршруты времени подбора, и в
+        // журнале 23.11 «переключение из топа» поднимало туннель с 56 маршрутами «всё, кроме
+        // российских сетей», хотя выбраны были списки. То же сервис делает и сам (см.
+        // WarpVpnService.routesFromSettings) — для автоподъёма, где этого кода нет.
+        val routes = runCatching { dev.warpscout.core.config.SplitRoutes.prefixesOf(prefs.allowedIps()) }
+            .getOrDefault(emptyList())
         return (listOfNotNull(first) + ordered).take(MAX_ENDPOINT_TRIES)
             .map { cfg -> if (dns.isNotEmpty() && cfg.dns != dns) cfg.copy(dns = dns) else cfg }
+            .map { cfg ->
+                if (routes.isEmpty() || dev.warpscout.core.config.SplitRoutes.prefixesOf(cfg.allowedIps) == routes) cfg
+                else cfg.copy(allowedIps = routes.joinToString(", "))
+            }
     }
 
     /**

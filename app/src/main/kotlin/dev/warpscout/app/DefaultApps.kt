@@ -68,6 +68,17 @@ object DefaultApps {
         ),
     )
 
+    /**
+     * YouTube или его клиент — по пакету (с 1.10.33): если такое приложение выбрано, к маршрутам
+     * «только часть сайтов» добавляются сети Google, откуда идёт видео (см. Prefs.youtubeTunneled).
+     * Название здесь не проверяем: маршруты собираются часто и без списка установленных приложений.
+     */
+    fun isYoutube(pkg: String): Boolean {
+        val yt = FAMILIES.firstOrNull { it.title == "YouTube" } ?: return false
+        return pkg in yt.packages || yt.packages.any { pkg.startsWith("$it.") } ||
+            pkg.contains("youtube", ignoreCase = true)
+    }
+
     /** К какому сервису относится приложение; null — ни к какому. */
     fun familyOf(pkg: String, label: String, system: Boolean): Family? {
         FAMILIES.firstOrNull { f -> pkg in f.packages || f.packages.any { pkg.startsWith("$it.") } }?.let { return it }

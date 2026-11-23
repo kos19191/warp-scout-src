@@ -153,6 +153,55 @@ object SplitRoutes {
         return (prefixes + add).distinct().joinToString(", ")
     }
 
+    /**
+     * Каких подсетей из [extra] нет в маршрутах (с 1.10.33). Нужна, чтобы к уже собранным маршрутам
+     * добавить сети, без которых сервис из списка не работает (видео YouTube, см.
+     * `AllowLists.EXTRA_PREFIXES`): маршруты, собранные прежней версией, их не содержали.
+     *
+     * Пустые маршруты и полный туннель (по семействам: 0.0.0.0/0, ::/0) — ничего не добавляем, там и
+     * так идёт всё. IPv4-сеть, которую уже накрывает более широкий префикс, — тоже.
+     */
+    fun missing(allowedIps: String, extra: List<String>): List<String> {
+        val prefixes = prefixesOf(allowedIps)
+        if (prefixes.isEmpty()) return emptyList()
+        val norm = prefixes.map { it.replace(" ", "").lowercase() }.toHashSet()
+        val v4All = "0.0.0.0/0" in norm
+        val v6All = "::/0" in norm
+        // IPv4-префиксы маршрутов — разобранными один раз: маршрутов сотни, а зовут это при каждой
+        // сборке конфига и сводки на экране.
+        val v4Nets = prefixes.mapNotNull { q ->
+            if (q.contains(':')) return@mapNotNull null
+            val bits = q.substringAfter('/', "").trim().toIntOrNull()?.takeIf { it in 0..32 } ?: return@mapNotNull null
+            val base = v4ToInt(q.substringBefore('/').trim()) ?: return@mapNotNull null
+            base to bits
+        }
+        val out = ArrayList<String>()
+        for (raw in extra) {
+            val p = raw.replace(" ", "").lowercase()
+            if (!p.contains('/') || p in norm || p in out) continue
+            if (p.contains(':')) {
+                if (v6All) continue
+            } else {
+                if (v4All) continue
+                val bits = p.substringAfter('/').toIntOrNull()?.takeIf { it in 0..32 } ?: continue
+                val addr = v4ToInt(p.substringBefore('/')) ?: continue
+                val covered = v4Nets.any { (base, qBits) ->
+                    qBits <= bits && (qBits == 0 || (base and (-1 shl (32 - qBits))) == (addr and (-1 shl (32 - qBits))))
+                }
+                if (covered) continue
+            }
+            out += p
+        }
+        return out
+    }
+
+    /** Маршруты и недостающие подсети из [extra] (см. [missing]); добавить нечего — строка как была. */
+    fun withExtra(allowedIps: String, extra: List<String>): String {
+        val add = missing(allowedIps, extra)
+        if (add.isEmpty()) return allowedIps
+        return (prefixesOf(allowedIps) + add).joinToString(", ")
+    }
+
     /** «a.b.c.d» → число; null — не IPv4. */
     private fun v4ToInt(ip: String): Int? {
         val parts = ip.split('.')

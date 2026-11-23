@@ -69,7 +69,11 @@ class Prefs(private val context: Context) {
 
     var enableIpv6: Boolean
         get() = sp.getBoolean("ipv6", true)
-        set(v) = sp.edit().putBoolean("ipv6", v).apply()
+        set(v) {
+            sp.edit().putBoolean("ipv6", v).apply()
+            // Маршруты сервис берёт из снимка (с 1.10.33) — снимок следует за настройкой.
+            pushToService()
+        }
 
     var checkResources: Boolean
         get() = sp.getBoolean("resources", true)
@@ -276,12 +280,20 @@ class Prefs(private val context: Context) {
     /** 0 = весь трафик, 1 = встроенный whitelist-пресет, 2 = по спискам allow-domains, 3 = вручную. */
     var routesMode: Int
         get() = sp.getInt("routesMode", 0)
-        set(v) = sp.edit().putInt("routesMode", v.coerceIn(0, 3)).apply()
+        set(v) {
+            sp.edit().putInt("routesMode", v.coerceIn(0, 3)).apply()
+            // Маршруты сервис берёт из снимка (с 1.10.33) — снимок следует за настройкой.
+            pushToService()
+        }
 
     /** Готовый AllowedIPs: сгенерированный из списков или вписанный руками (режимы 2 и 3). */
     var allowedIpsText: String
         get() = sp.getString("allowedIps", "").orEmpty()
-        set(v) = sp.edit().putString("allowedIps", v.trim()).apply()
+        set(v) {
+            sp.edit().putString("allowedIps", v.trim()).apply()
+            // Маршруты сервис берёт из снимка (с 1.10.33) — снимок следует за настройкой.
+            pushToService()
+        }
 
     /**
      * «Сайты» вкладки «Туннелирование» (с 1.10.31): домены, адреса и подсети — как вписаны.
@@ -289,12 +301,20 @@ class Prefs(private val context: Context) {
      */
     var tunnelSites: String
         get() = sp.getString("tunnelSites", "").orEmpty()
-        set(v) = sp.edit().putString("tunnelSites", v).apply()
+        set(v) {
+            sp.edit().putString("tunnelSites", v).apply()
+            // Маршруты сервис берёт из снимка (с 1.10.33) — снимок следует за настройкой.
+            pushToService()
+        }
 
     /** Адреса этих сайтов (CIDR через запятую), развёрнутые через DoH. */
     var tunnelSitesCidrs: String
         get() = sp.getString("tunnelSitesCidrs", "").orEmpty()
-        set(v) = sp.edit().putString("tunnelSitesCidrs", v.trim()).apply()
+        set(v) {
+            sp.edit().putString("tunnelSitesCidrs", v.trim()).apply()
+            // Маршруты сервис берёт из снимка (с 1.10.33) — снимок следует за настройкой.
+            pushToService()
+        }
 
     /** Текст поля на момент сборки: поле правили — адреса пора собрать заново. */
     var tunnelSitesSig: String
@@ -313,6 +333,16 @@ class Prefs(private val context: Context) {
     var listsBuiltSig: String
         get() = sp.getString("listsBuiltSig", "").orEmpty()
         set(v) = sp.edit().putString("listsBuiltSig", v).apply()
+
+    /**
+     * Какие списки отмечены и по каким правилам собраны маршруты — по подписи видно, что выбор
+     * или правила поменялись после сборки ([listsBuiltSig] — подпись на момент сборки). Версия
+     * правил — с 1.10.33: сети Google для видео YouTube из 1.10.31 не дошли до телефона, потому что
+     * маршруты пересобирались только при смене отметок.
+     */
+    fun listsSignature(): String =
+        "v${dev.warpscout.core.lists.AllowListPlanner.VERSION};" +
+            (allowBlockIds.sorted() + listOf("|") + allowDirectIds.sorted()).joinToString(",")
 
     /** Категории allow-domains: что туннелируем и что сознательно оставляем снаружи. */
     /**
@@ -349,7 +379,11 @@ class Prefs(private val context: Context) {
 
     var allowBlockIds: Set<String>
         get() = sp.getStringSet("allowBlock", null) ?: dev.warpscout.core.lists.AllowLists.DEFAULT_BLOCK_IDS.toSet()
-        set(v) = sp.edit().putStringSet("allowBlock", v).apply()
+        set(v) {
+            sp.edit().putStringSet("allowBlock", v).apply()
+            // Список YouTube решает, добавлять ли сети Google для видео (с 1.10.33, см. youtubeTunneled).
+            pushToService()
+        }
 
     var allowDirectIds: Set<String>
         get() = sp.getStringSet("allowDirect", null)
@@ -618,6 +652,19 @@ class Prefs(private val context: Context) {
     }
 
     fun allowedIps(): String {
+        val (raw, video) = routeParts()
+        return onlyUsable(if (video.isEmpty()) raw else raw + ", " + video.joinToString(", "))
+    }
+
+    /**
+     * Маршруты по режиму «Туннелирования» и сети Google для видео YouTube, которых в них нет.
+     *
+     * Сети Google (с 1.10.33) добавляются здесь, при подключении, а не только при сборке маршрутов:
+     * маршруты, собранные прежней версией, их не содержали, а пересобираются они только по
+     * «Сохранить и применить». Журнал 23.11: в режиме «сайты из списков» страница и превью YouTube
+     * грузились, а видео шло мимо туннеля — по LTE, где его замедляет оператор, — и вставало.
+     */
+    private fun routeParts(): Pair<String, List<String>> {
         val plan = allowedIpsText
         val raw = when (routesMode) {
             1 -> dev.warpscout.core.presets.RoutePresets.BYPASS_WHITELIST_CSV
@@ -628,12 +675,58 @@ class Prefs(private val context: Context) {
             3 -> tunnelSitesCidrs.ifBlank { migrateManualRoutes(); tunnelSitesCidrs }.ifBlank { "0.0.0.0/0, ::/0" }
             else -> "0.0.0.0/0, ::/0"
         }
-        if (enableIpv6) return raw
-        // Без IPv6-адреса в туннеле маршрут ::/0 — чёрная дыра: браузер радостно выбирает IPv6
-        // и половина сайтов «не открывается», хотя туннель поднят. Поэтому при выключенном IPv6
-        // v6-маршруты не выпускаем вовсе.
-        val v4 = raw.split(',').map { it.trim() }.filter { it.isNotEmpty() && !it.contains(':') }
+        val video = if ((routesMode == 2 || routesMode == 3) && youtubeTunneled()) {
+            dev.warpscout.core.config.SplitRoutes.missing(raw, dev.warpscout.core.lists.AllowLists.YOUTUBE_VIDEO_NETS)
+        } else {
+            emptyList()
+        }
+        return raw to video
+    }
+
+    /**
+     * Без IPv6-адреса в туннеле маршрут ::/0 — чёрная дыра: браузер радостно выбирает IPv6 и
+     * половина сайтов «не открывается», хотя туннель поднят. Поэтому при выключенном IPv6
+     * v6-маршруты не выпускаем вовсе.
+     */
+    private fun onlyUsable(routes: String): String {
+        if (enableIpv6) return routes
+        val v4 = routes.split(',').map { it.trim() }.filter { it.isNotEmpty() && !it.contains(':') }
         return if (v4.isEmpty()) "0.0.0.0/0" else v4.joinToString(", ")
+    }
+
+    /**
+     * Идёт ли YouTube через туннель при маршрутах «только часть сайтов» (с 1.10.33): отмечен список
+     * YouTube, среди выбранных приложений есть YouTube или его клиент, или он есть в «моих сайтах».
+     * Тогда к маршрутам добавляются сети Google, откуда идёт видео: адреса видеосерверов выдаются
+     * под каждое видео, и заранее в список их не внести.
+     */
+    fun youtubeTunneled(): Boolean {
+        val lists = dev.warpscout.core.lists.AllowLists
+        if (routesMode == 2) {
+            // Пустой выбор списков сборка понимает как набор по умолчанию (см. ConfigComposer.buildPlan).
+            val block = allowBlockIds.filter { lists.byId.containsKey(it) }.ifEmpty { lists.DEFAULT_BLOCK_IDS }
+            if ("youtube" in block) return true
+        }
+        if (appsMode == APPS_ONLY && appsSelected.any { DefaultApps.isYoutube(it) }) return true
+        if (routesMode == 3 && YOUTUBE_SITE.containsMatchIn(tunnelSites)) return true
+        return false
+    }
+
+    /**
+     * Маршруты словами — строка в журнал сервиса при каждом подъёме (с 1.10.33): по ней видно, в
+     * каком режиме поднялся туннель и добавились ли сети Google для видео YouTube.
+     */
+    fun routesNote(): String {
+        val (raw, video) = routeParts()
+        val name = routesModeName()
+        val full = dev.warpscout.core.config.SplitRoutes.prefixesOf(raw).any { it == "0.0.0.0/0" }
+        val base = when {
+            routesMode == 0 -> name
+            full && (routesMode == 2 || routesMode == 3) -> "$name — адреса ещё не собраны, пока весь трафик"
+            else -> name + ": " + dev.warpscout.core.config.SplitRoutes.prefixesOf(onlyUsable(raw)).size
+        }
+        val added = video.count { enableIpv6 || !it.contains(':') }
+        return if (added > 0) "$base + сети Google для видео YouTube: $added" else base
     }
 
     /**
@@ -668,8 +761,20 @@ class Prefs(private val context: Context) {
      * который переписывается здесь при каждом изменении.
      */
     private fun pushToService() {
-        dev.warpscout.app.status.ServiceSettingsStore.write(context, serviceSettings())
+        // Снимок собирается из настроек, и сборка маршрутов сама может записать настройку (перенос
+        // ручного списка, см. migrateManualRoutes) — повторный вход пропускаем: внешний вызов
+        // запишет снимок уже с перенесёнными значениями.
+        if (pushing) return
+        pushing = true
+        try {
+            dev.warpscout.app.status.ServiceSettingsStore.write(context, serviceSettings())
+        } finally {
+            pushing = false
+        }
     }
+
+    /** Идёт запись снимка для сервиса (см. pushToService). */
+    private var pushing = false
 
     /**
      * Снимок для сервиса — в одном месте. Раньше он собирался здесь и ещё раз в
@@ -702,6 +807,10 @@ class Prefs(private val context: Context) {
             secondViaWarp = secondViaWarp,
             // Proton Free: серверы по порядку перебора; пусто — один сервер из конфига.
             secondPeers = runCatching { SecondProton.candidates(context, this) }.getOrDefault(emptyList()),
+            // Маршруты «Туннелирования» (с 1.10.33): сервис ставит их любому конфигу при подъёме —
+            // и точке из подбора, и сохранённому для автоподъёма.
+            routes = runCatching { allowedIps() }.getOrDefault(""),
+            routesNote = runCatching { routesNote() }.getOrDefault(""),
         )
     }
 
@@ -757,5 +866,8 @@ class Prefs(private val context: Context) {
         const val THEME_DARK = 2
 
         const val MIRROR_NOTE = "Ключи берутся из публичного генератора (warp-api.cfd); вводить PrivateKey не нужно."
+
+        /** YouTube среди «моих сайтов» (с 1.10.33, см. youtubeTunneled). */
+        private val YOUTUBE_SITE = Regex("(?i)youtube|youtu\\.be|googlevideo|ytimg")
     }
 }

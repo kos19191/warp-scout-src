@@ -1180,6 +1180,10 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         expect("настройки сервиса: старый снимок — мобильной резервной нет", oldSettings?.backupMobile, "")
         expect("настройки сервиса: старый снимок — автоподъём включён", oldSettings?.autoStart, true)
         expect("настройки сервиса: старый снимок — DNS через туннель", oldSettings?.dnsInTunnel, true)
+        // 1.10.33: маршруты «Туннелирования» — в снимке; сервис ставит их любому конфигу.
+        val withRoutes = ServiceSettings(routes = "91.108.4.0/22, 192.178.0.0/15, 2a00:1450::/32", routesNote = "сайты из списков: 2 + сети Google для видео YouTube: 1")
+        expect("настройки сервиса: маршруты без потерь", ServiceSettings.fromJson(withRoutes.toJson()), withRoutes)
+        expect("настройки сервиса: старый снимок — маршрутов нет (как в конфиге)", oldSettings?.routes, "")
 
         // Подбор: из одинаково открывшихся выше та, через которую быстрее качается.
         fun fast(host: String, kbps: Int): Candidate {
@@ -2119,6 +2123,37 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             "142.250.0.0/15" in yt.include && "173.194.0.0/16" in yt.include && "2a00:1450::/32" in yt.include,
             yt.include.take(6).joinToString())
         check("маршруты: чужому списку сети Google не добавляются", plan.include.none { it == "142.250.0.0/15" })
+        // 1.10.33: в 192.178.0.0/15 — около 8 % видеосерверов YouTube, в 1.10.31 её не было.
+        check("маршруты: видео YouTube — и сеть 192.178.0.0/15", "192.178.0.0/15" in yt.include)
+        check("маршруты: сети видео YouTube = сети списка youtube",
+            AllowLists.YOUTUBE_VIDEO_NETS.isNotEmpty() && AllowLists.YOUTUBE_VIDEO_NETS.all { it in yt.include })
+        // Подсети к уже собранным маршрутам (с 1.10.33): маршруты прежних версий сетей Google не содержали.
+        expect(
+            "маршруты: недостающие подсети добавляются, имеющиеся — нет",
+            SplitRoutes.withExtra("1.2.3.4/32, 142.250.0.0/15", listOf("142.250.0.0/15", "192.178.0.0/15", "2a00:1450::/32")),
+            "1.2.3.4/32, 142.250.0.0/15, 192.178.0.0/15, 2a00:1450::/32"
+        )
+        expect(
+            "маршруты: весь трафик — подсети не добавляются",
+            SplitRoutes.withExtra("0.0.0.0/0, ::/0", AllowLists.YOUTUBE_VIDEO_NETS),
+            "0.0.0.0/0, ::/0"
+        )
+        expect(
+            "маршруты: весь IPv4 — добавляются только IPv6-сети",
+            SplitRoutes.missing("0.0.0.0/0", listOf("192.178.0.0/15", "2a00:1450::/32")),
+            listOf("2a00:1450::/32")
+        )
+        expect(
+            "маршруты: сеть внутри более широкой не дублируется",
+            SplitRoutes.missing("142.0.0.0/8, 10.0.0.0/8", listOf("142.250.0.0/15", "172.217.0.0/16")),
+            listOf("172.217.0.0/16")
+        )
+        expect("маршруты: без маршрутов ничего не придумываем", SplitRoutes.withExtra("", AllowLists.YOUTUBE_VIDEO_NETS), "")
+        expect(
+            "маршруты: повтор в списке добавок — один раз",
+            SplitRoutes.missing("1.2.3.4/32", listOf("192.178.0.0/15", "192.178.0.0/15")),
+            listOf("192.178.0.0/15")
+        )
         val full = AllowListPlanner.plan(block, direct, maps, fullTunnel = true)
         expect("маршруты: «весь трафик» = два default-маршрута", full.allowedIps, "0.0.0.0/0, ::/0")
         check("маршруты: пустой кеш не рождает битый конфиг",

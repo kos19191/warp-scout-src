@@ -62,6 +62,10 @@ class TunnelAutoStart : BroadcastReceiver() {
                 TunnelDebug.stage("$reason: туннель был включён, но рабочей конфигурации ещё нет — открой приложение")
                 return
             }
+            // Снимок настроек для сервиса — по нынешним настройкам (с 1.10.33): после обновления в нём
+            // ещё нет полей новой версии, и туннель поднялся бы с маршрутами из сохранённого
+            // конфига — без сетей Google для видео YouTube, до первого открытия экрана.
+            runCatching { dev.warpscout.app.status.ServiceSettingsStore.syncFromPrefs(context) }
             TunnelDebug.stage("$reason: туннель был включён — поднимаю сам")
             WarpVpnService.autoStart(context, reason)
         }.onFailure { t ->

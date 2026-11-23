@@ -11,8 +11,8 @@ android {
         applicationId = "dev.warpscout.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 59
-        versionName = "1.10.32"
+        versionCode = 60
+        versionName = "1.10.33"
         // Номер сборки (короткий хеш коммита из CI). Мелкие доправки пересобирают ту же версию
         // поверх, и только по этой метке в журнале видно, какая именно сборка стоит на телефоне.
         // Локально — «local».

@@ -955,12 +955,22 @@ class WarpVpnService : VpnService() {
             fail("конфиг не разбирается: нет PrivateKey или PublicKey", startId, myEpoch)
             return
         }
+        // Маршруты — нынешние из «Туннелирования» (с 1.10.33), а не те, что лежат в конфиге: точки
+        // из подбора и конфиг для автоподъёма несли маршруты своего времени. Журнал 23.11:
+        // «переключение из топа» и подъём после обновления шли с 56 маршрутами «всё, кроме
+        // российских сетей», хотя выбраны были списки. Проверочный подъём подбора (quiet) не
+        // трогаем: он проверяет ровно тот конфиг, что ему дали, — и замер скорости смотрит на его
+        // маршруты (см. VpnTunnelVerifier).
+        val withRoutes = if (quietSession) null else routesFromSettings(parsed)
+        val routedCfg = withRoutes?.first ?: parsed
+        val routedText = withRoutes?.second ?: text
+        if (withRoutes != null && myEpoch == epoch.get()) lastConfigText = routedText
         // Шум под эту сеть (с 1.10.30): если на ней шум конфига замерзает (см. NoiseMemory), та же
         // точка поднимается с маской, которая здесь работает. Конфиг, который потом сохранится для
         // перезагрузки и пойдёт в перебор, — уже с новым шумом.
-        val noiseFix = noiseForNetwork(parsed)
-        val cfg = noiseFix?.first ?: parsed
-        val runText = noiseFix?.second ?: text
+        val noiseFix = noiseForNetwork(routedCfg)
+        val cfg = noiseFix?.first ?: routedCfg
+        val runText = noiseFix?.second ?: routedText
         if (noiseFix != null && myEpoch == epoch.get()) lastConfigText = runText
         TunnelState.endpoint = cfg.endpoint.render()
         TunnelDebug.stage("сервер ${cfg.endpoint.render()}, шум ${JunkLibrary.nameOf(cfg.junk)}, MTU ${cfg.mtu}")
@@ -1598,6 +1608,23 @@ class WarpVpnService : VpnService() {
     /** Пир — Cloudflare WARP (а не свой сервер WireGuard/AmneziaWG). */
     private fun isWarpPeer(cfg: WarpConfig): Boolean =
         cfg.account.peerPublicB64.trim() == WarpDefaults.WARP_PEER_PUBLIC
+
+    /**
+     * Маршруты из снимка настроек вместо маршрутов конфига (с 1.10.33). null — менять нечего:
+     * снимок от прежней версии (поля нет) или маршруты уже совпадают. Строка «маршруты: …» — при
+     * каждом подъёме: по ней в журнале видно, в каком режиме поднялся туннель.
+     */
+    private fun routesFromSettings(cfg: WarpConfig): Pair<WarpConfig, String>? = runCatching {
+        val s = serviceSettings()
+        val wanted = SplitRoutes.prefixesOf(s.routes)
+        if (wanted.isEmpty()) return@runCatching null
+        if (s.routesNote.isNotBlank()) TunnelDebug.stage("маршруты: ${s.routesNote}")
+        val had = SplitRoutes.prefixesOf(cfg.allowedIps)
+        if (wanted == had) return@runCatching null
+        val next = cfg.copy(allowedIps = wanted.joinToString(", "))
+        TunnelDebug.stage("маршруты — нынешние из «Туннелирования» (${wanted.size}), а не из сохранённого конфига (${had.size})")
+        next to WgConf.render(next)
+    }.getOrNull()
 
     /**
      * Шум под текущую сеть: если шум конфига здесь замерзает (см. NoiseMemory), — конфиг с маской,

@@ -359,6 +359,16 @@ data class ServiceSettings(
      * «имя|адрес|порт|ключ», см. ProtonFree.encode. Пусто — один сервер из конфига, как раньше.
      */
     val secondPeers: List<String> = emptyList(),
+    /**
+     * Маршруты туннеля (AllowedIPs) по нынешнему «Туннелированию» — с 1.10.33. Сервис ставит их
+     * любому конфигу при подъёме: точки из подбора и конфиг для автоподъёма несли маршруты своего
+     * времени, и «переключение из топа» поднимало точку не в том режиме, что выбран (журнал 23.11:
+     * 56 маршрутов «всё, кроме российских сетей» при выбранных списках). Пусто — как в конфиге
+     * (снимок от прежней версии).
+     */
+    val routes: String = "",
+    /** Те же маршруты словами — строка в журнал при подъёме («сайты из списков: 679 + …»). */
+    val routesNote: String = "",
 ) {
 
     fun toJson(): String = JsonVal.obj(
@@ -380,6 +390,8 @@ data class ServiceSettings(
         "dnsInTunnel" to JsonVal.bool(dnsInTunnel),
         "secondViaWarp" to JsonVal.bool(secondViaWarp),
         "secondPeers" to JsonVal.arr(secondPeers.map { JsonVal.str(it) }),
+        "routes" to JsonVal.str(routes),
+        "routesNote" to JsonVal.str(routesNote),
     ).render()
 
     companion object {
@@ -416,6 +428,9 @@ data class ServiceSettings(
                 dnsInTunnel = obj.bool("dnsInTunnel") ?: true,
                 secondViaWarp = obj.bool("secondViaWarp") ?: true,
                 secondPeers = strings(obj, "secondPeers"),
+                // Нет поля (снимок от прежней версии) — маршруты остаются как в конфиге.
+                routes = obj.str("routes").orEmpty(),
+                routesNote = obj.str("routesNote").orEmpty(),
             )
         }
     }

@@ -72,6 +72,9 @@ class TuneWorker(appContext: Context, params: WorkerParameters) : Worker(appCont
                     runCatching {
                         val r = repo.buildPlan(prefs) { sink.log(it) }
                         sink.log("маршруты: ${repo.savePlan(prefs, r.plan)}")
+                        // Собраны по нынешним отметкам и правилам — «Сохранить и применить» не
+                        // станет пересобирать их заново (с 1.10.33 подпись включает версию правил).
+                        prefs.listsBuiltSig = prefs.listsSignature()
                     }
                 }
             }
