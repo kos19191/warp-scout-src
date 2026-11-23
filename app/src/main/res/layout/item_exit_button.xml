@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Кнопка выхода приложения в строке вкладки «Туннелирование» расширенного вида (с 1.10.39):
+  «Само» / «WARP» / «Второй выход». Отдельной разметкой, а не из кода: стиль кнопки так ставится
+  надёжно на всех версиях Android.
+-->
+<com.google.android.material.button.MaterialButton xmlns:android="http://schemas.android.com/apk/res/android"
+    style="@style/Widget.Material3.Button.TextButton"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:layout_marginStart="4dp"
+    android:minWidth="0dp"
+    android:paddingStart="8dp"
+    android:paddingEnd="8dp"
+    android:textAppearance="?attr/textAppearanceLabelMedium" />

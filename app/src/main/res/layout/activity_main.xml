@@ -771,6 +771,32 @@
                     android:text="@string/second_hint"
                     android:textAppearance="?attr/textAppearanceBodySmall" />
 
+                <!-- С 1.10.39: шаги Proton внутри приложения и конфиг из скачанного файла — без
+                     копирования текста. -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnProtonGuide"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/btn_proton_guide" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnSecondFile"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:text="@string/btn_second_file" />
+                </LinearLayout>
+
                 <com.google.android.material.materialswitch.MaterialSwitch
                     android:id="@+id/switchSecondExit"
                     android:layout_width="match_parent"
@@ -1279,6 +1305,15 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:text="@string/apps_show_system" />
+
+                    <!-- С 1.10.39: что значит кнопка выхода в строке (видна, когда есть второй выход). -->
+                    <TextView
+                        android:id="@+id/textAppExitHint"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/app_exit_hint"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:visibility="gone" />
 
                     <LinearLayout
                         android:id="@+id/appsBox"

@@ -101,6 +101,17 @@
             android:layout_height="wrap_content"
             android:orientation="vertical">
 
+            <!-- С 1.10.39: что значит кнопка выхода в строке (видна, когда есть второй выход). -->
+            <TextView
+                android:id="@+id/appsExitHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="4dp"
+                android:text="@string/app_exit_hint"
+                android:textAppearance="?attr/textAppearanceBodySmall"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                android:visibility="gone" />
+
             <com.google.android.material.textfield.TextInputLayout
                 style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                 android:layout_width="match_parent"

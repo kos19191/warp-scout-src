@@ -237,6 +237,13 @@ class TunDispatcher(
     @Volatile
     var router: ExitRouter = router
 
+    /**
+     * Выход по приложениям (с 1.10.39, см. [AppExitTable]): правило приложения перекрывает решение
+     * по адресу. null — правил нет: ровно прежний путь, без вопросов системе.
+     */
+    @Volatile
+    var appExits: AppExitTable? = null
+
     var sentPrimary: Long = 0L
         private set
     var sentSecondary: Long = 0L
@@ -272,9 +279,11 @@ class TunDispatcher(
                 dropped++
                 continue
             }
-            val wanted = router.route(dst)
+            val byAddress = router.route(dst)
+            val wanted = appExits?.decide(packet, n, byAddress) ?: byAddress
             // Если второй выход отказал (сессию не поднял или умер), его подсети не теряются:
             // трафик возвращается в основной туннель — регион будет не тот, зато сайт работает.
+            // Так же и приложения с «Второй выход» (решил человек 23.11): идут через WARP.
             val lane = when {
                 wanted !in lanes.indices -> 0
                 lanes[wanted].isClosed() -> 0

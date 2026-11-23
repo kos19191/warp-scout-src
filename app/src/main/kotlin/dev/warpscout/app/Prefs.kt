@@ -382,6 +382,29 @@ class Prefs(private val context: Context) {
             pushToService()
         }
 
+    /**
+     * Выход по приложениям (с 1.10.39, см. AppExit): пакет → «Всегда WARP» или «Второй выход».
+     * Приложения без записи — «Само», по адресам. Хранится строками «пакет|правило».
+     */
+    var appExits: Map<String, Int>
+        get() = dev.warpscout.core.tunnel.AppExit.decodeAll(sp.getStringSet("appExits", emptySet()).orEmpty())
+        set(v) {
+            sp.edit().putStringSet("appExits", dev.warpscout.core.tunnel.AppExit.encodeAll(v).toSet()).apply()
+            pushToService()
+        }
+
+    /**
+     * Правила, которые действуют сейчас: второй выход включён и Android 10+ (раньше система не
+     * говорит VPN, чьё соединение). Выключили второй выход — правила хранятся, но не действуют: иначе
+     * приложение со «Вторым выходом» шло бы через туннель, а кнопки в его строке не видно.
+     */
+    fun appExitsActive(): Map<String, Int> =
+        if (secondExitOn && android.os.Build.VERSION.SDK_INT >= 29) appExits else emptyMap()
+
+    /** Приложения с выходом «Второй выход» — целиком через второй выход. */
+    fun secondExitApps(): Set<String> =
+        appExitsActive().filterValues { it == dev.warpscout.core.tunnel.AppExit.SECOND }.keys
+
     var allowBlockIds: Set<String>
         get() = sp.getStringSet("allowBlock", null) ?: dev.warpscout.core.lists.AllowLists.DEFAULT_BLOCK_IDS.toSet()
         set(v) {
@@ -694,9 +717,14 @@ class Prefs(private val context: Context) {
     // в маршруты сам. Приложения без известного сервиса при неполных маршрутах идут только к сайтам —
     // экран об этом предупреждает (так решил человек 23.11).
 
-    /** Списки сервисов выбранных приложений (только в режиме «только выбранные»). */
-    fun appNetsLists(): List<String> =
-        if (appsMode == APPS_ONLY) dev.warpscout.core.lists.AppServices.listsFor(appsSelected) else emptyList()
+    /**
+     * Чьи сети нужны маршрутам: выбранные приложения в режиме «только выбранные» и (с 1.10.39)
+     * приложения с выходом «Второй выход» в любом режиме — они идут через туннель целиком.
+     */
+    fun appsForNets(): Set<String> = (if (appsMode == APPS_ONLY) appsSelected else emptySet()) + secondExitApps()
+
+    /** Списки сервисов этих приложений. */
+    fun appNetsLists(): List<String> = dev.warpscout.core.lists.AppServices.listsFor(appsForNets())
 
     /** Подпись сетей приложений: правила сборки и списки. Изменилась — собрать заново. */
     fun appNetsSignature(): String =
@@ -781,8 +809,8 @@ class Prefs(private val context: Context) {
         // то, с чего галочку уже сняли.
         val lists = if (browser && !listsReady()) "" else allowedIpsText
         // Сети выбранных приложений (с 1.10.35): Telegram, Instagram, YouTube идут целиком, даже
-        // когда сайты выбраны не все.
-        val appNets = if (appsMode == APPS_ONLY && appNetsReady()) appNetsText else ""
+        // когда сайты выбраны не все. С 1.10.39 — и приложений с выходом «Второй выход».
+        val appNets = if (appNetsLists().isNotEmpty() && appNetsReady()) appNetsText else ""
         return dev.warpscout.core.config.TunnelRoutes.compose(
             mode = routesMode,
             browser = browser,
@@ -935,6 +963,9 @@ class Prefs(private val context: Context) {
             routesNote = runCatching { routesNote() }.getOrDefault(""),
             abroadSearch = featAbroadSearch,
             tgSecond = featTgSecond,
+            // Выход по приложениям (с 1.10.39): сервис читает его при подъёме туннеля. Только
+            // действующие правила — при выключенном втором выходе их нет.
+            appExits = dev.warpscout.core.tunnel.AppExit.encodeAll(appExitsActive()),
         )
     }
 

@@ -2,10 +2,13 @@
 <!--
   Строка списка приложений в шторке «Приложения»: иконка, имя (и пакет мелко), отметка. Нажатие —
   по всей строке; сама отметка нажатий не перехватывает, иначе ListView не получил бы щелчок.
+  С 1.10.39 — кнопка выхода приложения («Само» / «WARP» / «Второй выход»). Она нажимается сама по
+  себе, но фокус не берёт (blocksDescendants): строка с фокусируемой кнопкой перестала бы нажиматься.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
+    android:descendantFocusability="blocksDescendants"
     android:gravity="center_vertical"
     android:minHeight="52dp"
     android:orientation="horizontal"
@@ -43,6 +46,19 @@
             android:textAppearance="?attr/textAppearanceBodySmall"
             android:textColor="?attr/colorOnSurfaceVariant" />
     </LinearLayout>
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/appExit"
+        style="@style/Widget.Material3.Button.TextButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="4dp"
+        android:focusable="false"
+        android:minWidth="0dp"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:textAppearance="?attr/textAppearanceLabelMedium"
+        android:visibility="gone" />
 
     <com.google.android.material.checkbox.MaterialCheckBox
         android:id="@+id/appCheck"

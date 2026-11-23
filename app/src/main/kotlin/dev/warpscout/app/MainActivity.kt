@@ -27,6 +27,7 @@ import dev.warpscout.core.model.ResourceCheck
 import dev.warpscout.core.junk.JunkLibrary
 import dev.warpscout.core.keys.KeySource
 import dev.warpscout.core.lists.AllowListPlanner
+import dev.warpscout.core.lists.AppServices
 import dev.warpscout.core.lists.ProtonFree
 import dev.warpscout.core.lists.SiteList
 import dev.warpscout.core.model.WarpConfig
@@ -38,6 +39,7 @@ import dev.warpscout.core.report.ConfigExport
 import dev.warpscout.core.report.Report
 import dev.warpscout.core.tune.ProgressSink
 import dev.warpscout.core.tune.TuningResult
+import dev.warpscout.core.tunnel.AppExit
 import dev.warpscout.core.tunnel.ExitRouter
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -106,6 +108,27 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pages: List<View>
     private val appChecks = LinkedHashMap<String, MaterialCheckBox>()
     private var appEntries: List<AppEntry> = emptyList()
+
+    /** Кнопки выхода в строках вкладки «Туннелирование» (с 1.10.39): пакет → кнопка. */
+    private val appExitButtons = HashMap<String, com.google.android.material.button.MaterialButton>()
+
+    /** Список вкладки «Туннелирование» построен с кнопками выхода — чтобы перестроить, когда это меняется. */
+    private var appExitsShown = false
+
+    /**
+     * Выбор файла конфига второго выхода (с 1.10.39): файл .conf, скачанный с сайта Proton, — без
+     * копирования текста. Системное окно выбора файла: разрешений не нужно.
+     */
+    private val pickSecondConf = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null && ::binding.isInitialized) {
+            runCatching { loadSecondConf(uri) }.onFailure { t ->
+                TunnelDebug.error("второй выход: файл конфига — " + SafeMode.describe(t))
+                banner(getString(R.string.second_file_fail, SafeMode.describe(t)), error = true)
+            }
+        }
+    }
 
     /** Одна строка списка приложений: только то, что нужно для показа и сохранения. */
     private data class AppEntry(val pkg: String, val label: String, val system: Boolean)
@@ -690,6 +713,14 @@ class MainActivity : AppCompatActivity() {
         binding.appsGroup.setOnCheckedChangeListener { _, checkedId ->
             if (checkedId == View.NO_ID) return@setOnCheckedChangeListener
             prefs.appsMode = appsModeOf(checkedId)
+            // Приложение со своим выходом идёт через туннель в любом режиме (с 1.10.39): отмечаем его
+            // в «только выбранные» и убираем из исключений — чтобы отметки не расходились с делом.
+            runCatching {
+                val rules = prefs.appExitsActive().keys
+                if (rules.isNotEmpty()) prefs.appsSelected = alignWithExits(prefs.appsMode, prefs.appsSelected, rules)
+            }
+            // Строки в «Все приложения» — без отметок, только выход (с 1.10.39): перестраиваем.
+            rebuildAppsList()
             updateAppsState()
             markSettingsDirty(getString(R.string.dirty_apps_mode))
         }
@@ -958,7 +989,9 @@ class MainActivity : AppCompatActivity() {
         val lists = (prefs.routesMode == 2 || browser) &&
             (prefs.allowedIpsText.isBlank() || prefs.listsBuiltSig != listsSignature())
         val partial = browser || prefs.routesMode == 2 || prefs.routesMode == 3
-        val apps = partial && prefs.appsMode == Prefs.APPS_ONLY && !prefs.appNetsReady()
+        // Сети нужны выбранным приложениям («только выбранные») и, с 1.10.39, приложениям с выходом
+        // «Второй выход» в любом режиме — appNetsReady() знает обоих.
+        val apps = partial && !prefs.appNetsReady()
         return RouteNeeds(sites, lists, apps)
     }
 
@@ -1006,7 +1039,7 @@ class MainActivity : AppCompatActivity() {
         prefs.appNetsSig = sig
         prefs.appNetsAt = System.currentTimeMillis()
         TunnelDebug.stage(
-            "сети выбранных приложений (" + dev.warpscout.core.lists.AppServices.titlesFor(prefs.appsSelected).joinToString(", ") +
+            "сети выбранных приложений (" + dev.warpscout.core.lists.AppServices.titlesFor(prefs.appsForNets()).joinToString(", ") +
                 "): ${plan.include.size} маршрутов"
         )
         return true
@@ -1237,23 +1270,48 @@ class MainActivity : AppCompatActivity() {
     private fun rebuildAppsList() {
         binding.appsBox.removeAllViews()
         appChecks.clear()
-        // В режиме «все приложения» список не нужен: не тратим время на getApplicationLabel
-        // для сотни пакетов и не показываем то, что ни на что не влияет.
-        if (prefs.appsMode == Prefs.APPS_ALL) return
+        appExitButtons.clear()
+        // Кнопка выхода в строке (с 1.10.39) — когда есть второй выход и Android 10+.
+        val exitsOn = runCatching { appExitsAvailable() }.getOrDefault(false)
+        appExitsShown = exitsOn
+        binding.textAppExitHint.visibility = if (exitsOn) View.VISIBLE else View.GONE
+        // В режиме «все приложения» отмечать нечего: список нужен только для выхода приложений.
+        // Без второго выхода — не тратим время на getApplicationLabel для сотни пакетов.
+        if (prefs.appsMode == Prefs.APPS_ALL && !exitsOn) return
         val query = binding.editAppSearch.text?.toString()?.trim()?.lowercase().orEmpty()
         val showSystem = binding.checkAppsSystem.isChecked
         val selected = prefs.appsSelected
+        val exits = prefs.appExits
         val matched = appEntries.filter { app ->
             (showSystem || !app.system) &&
                 (query.isEmpty() || app.label.lowercase().contains(query) || app.pkg.contains(query))
         }
         matched.take(APP_ROWS_LIMIT).forEach { app ->
+            val title = if (app.system) getString(R.string.app_row_system, app.label) else app.label
+            if (prefs.appsMode == Prefs.APPS_ALL) {
+                // «Все приложения»: отметок нет — название и выход.
+                val label = android.widget.TextView(this).apply {
+                    text = title
+                    textSize = 15f
+                    minHeight = (48 * resources.displayMetrics.density).toInt()
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                binding.appsBox.addView(exitRow(label, app.pkg, exits[app.pkg] ?: AppExit.AUTO))
+                return@forEach
+            }
             val row = MaterialCheckBox(this).apply {
-                text = if (app.system) getString(R.string.app_row_system, app.label) else app.label
+                text = title
                 tag = app.pkg
                 isChecked = app.pkg in selected
                 setOnClickListener {
                     noteAppTick(app.pkg, isChecked)
+                    // Приложение ушло из туннеля — его выход снова «Само» (с 1.10.39).
+                    val out = (prefs.appsMode == Prefs.APPS_ONLY && !isChecked) ||
+                        (prefs.appsMode == Prefs.APPS_EXCEPT && isChecked)
+                    if (out && app.pkg in prefs.appExits) {
+                        prefs.appExits = prefs.appExits - app.pkg
+                        appExitButtons[app.pkg]?.text = exitLabel(AppExit.AUTO)
+                    }
                     saveAppsSelection()
                 }
                 layoutParams = LinearLayout.LayoutParams(
@@ -1262,7 +1320,7 @@ class MainActivity : AppCompatActivity() {
                 )
             }
             appChecks[app.pkg] = row
-            binding.appsBox.addView(row)
+            binding.appsBox.addView(if (exitsOn) exitRow(row, app.pkg, exits[app.pkg] ?: AppExit.AUTO) else row)
         }
         if (matched.isEmpty()) {
             binding.appsBox.addView(
@@ -1306,7 +1364,10 @@ class MainActivity : AppCompatActivity() {
         // Список нужен только там, где есть что выбирать. В режиме «все приложения» он
         // ничего не переключает, но занимает пол-экрана и выглядит как рабочая настройка —
         // поэтому прячем его целиком: поиск, «системные», сам список.
-        val needsList = prefs.appsMode != Prefs.APPS_ALL
+        // С 1.10.39 список нужен и в «Все приложения», когда есть второй выход: там выбирают выход.
+        val exitsOn = runCatching { appExitsAvailable() }.getOrDefault(false)
+        val needsList = prefs.appsMode != Prefs.APPS_ALL || exitsOn
+        binding.textAppExitHint.visibility = if (exitsOn) View.VISIBLE else View.GONE
         // «Браузер — только к нужным сайтам» имеет смысл, только когда приложения выбраны (с 1.10.35).
         val onlyMode = if (prefs.appsMode == Prefs.APPS_ONLY) View.VISIBLE else View.GONE
         binding.switchBrowserSites.visibility = onlyMode
@@ -1330,8 +1391,22 @@ class MainActivity : AppCompatActivity() {
                 else getString(R.string.apps_except_state, selected.size, summaryOf(selected))
 
             else -> getString(R.string.apps_all_state)
-        }
+        } + exitsStateLine(exitsOn)
         updateTunnelSummary()
+    }
+
+    /** « · свой выход: 2» на карточке «Туннелирование» упрощённого экрана (с 1.10.39). */
+    private fun exitsCardNote(): String {
+        val count = prefs.appExits.size
+        if (count == 0 || !prefs.secondExitOn || Build.VERSION.SDK_INT < 29) return ""
+        return " · " + getString(R.string.simple_tun_exits, count)
+    }
+
+    /** Строка «Выход по выбору: Aurora Store — второй выход, Telegram — WARP» (с 1.10.39). */
+    private fun exitsStateLine(exitsOn: Boolean): String {
+        val rules = prefs.appExits
+        if (!exitsOn || rules.isEmpty()) return ""
+        return "\n" + getString(R.string.apps_exits_state, exitsSummary(rules))
     }
 
     // ------------------------------------------------ доступность (Журнал)
@@ -1722,6 +1797,14 @@ class MainActivity : AppCompatActivity() {
             updateSecondState()
             markSettingsDirty(getString(R.string.dirty_second_exit))
         }
+        // Шаги Proton внутри приложения и конфиг из скачанного файла (с 1.10.39).
+        binding.btnProtonGuide.setOnClickListener {
+            runCatching { showProtonGuide() }.onFailure { t ->
+                TunnelDebug.error("второй выход: шаги Proton — " + SafeMode.describe(t))
+                banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+            }
+        }
+        binding.btnSecondFile.setOnClickListener { openSecondConfPicker() }
         binding.btnSecondResolve.setOnClickListener {
             runCatching { refreshSecondNow() }.onFailure { t ->
                 secondBusy = false
@@ -2873,6 +2956,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateSecondState() {
         if (!uiReady()) return
+        // Второй выход включили или выключили, вставили конфиг — кнопки выхода в строках приложений
+        // появляются или пропадают (с 1.10.39). Перестраиваем, только когда это меняется.
+        runCatching {
+            if (appExitsAvailable() != appExitsShown) {
+                rebuildAppsList()
+                updateAppsState()
+            }
+        }.onFailure { t -> TunnelDebug.error("выход приложений: список не обновился — " + SafeMode.describe(t)) }
         runCatching {
             val server = runCatching {
                 WgConf.toWarpConfig("второй выход", prefs.secondConf)?.endpoint?.render()
@@ -4917,6 +5008,203 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
+    // ------------------------------------------------ выход по приложениям (с 1.10.39)
+    //
+    // Человек 23.11: «дай возможность пропускать через второй канал любые приложения и отключать
+    // второй канал для них». Кнопка в строке приложения — «Само» / «Всегда WARP» / «Второй выход»
+    // (решил человек: в строке, в обоих режимах). Решает сервис, по владельцу соединения (AppExit).
+
+    /**
+     * Выход приложения можно выбирать: Android 10+ (раньше система не говорит VPN, чьё соединение),
+     * второй выход включён и его конфиг читается. Иначе кнопки в строках нет.
+     */
+    private fun appExitsAvailable(): Boolean =
+        Build.VERSION.SDK_INT >= 29 && prefs.secondExitOn &&
+            runCatching { WgConf.toWarpConfig("второй выход", prefs.secondConf) != null }.getOrDefault(false)
+
+    private fun exitLabel(rule: Int): String = getString(
+        when (rule) {
+            AppExit.WARP -> R.string.app_exit_warp
+            AppExit.SECOND -> R.string.app_exit_second
+            else -> R.string.app_exit_auto
+        }
+    )
+
+    /** «Aurora Store — второй выход, Telegram — WARP». */
+    private fun exitsSummary(rules: Map<String, Int>): String = rules.entries
+        .sortedBy { labelOfPackage(it.key).lowercase() }
+        .joinToString(", ") { (pkg, rule) ->
+            getString(if (rule == AppExit.SECOND) R.string.apps_exits_second else R.string.apps_exits_warp, labelOfPackage(pkg))
+        }
+
+    /**
+     * «Второй выход» у приложения, адресов которого мы не знаем, а маршруты туннеля — не «весь
+     * трафик»: Android пускает в туннель только адреса из маршрутов, и такое приложение пойдёт через
+     * второй выход только к ним. У известных приложений свои адреса в маршрутах (AppServices).
+     */
+    private fun exitPartialFor(pkg: String, rule: Int): Boolean {
+        if (rule != AppExit.SECOND || AppServices.serviceOf(pkg) != null) return false
+        val browser = runCatching { prefs.browserSitesWanted() }.getOrDefault(false)
+        return browser || prefs.routesMode == 2 || prefs.routesMode == 3
+    }
+
+    /** Предупредить сразу при выборе (строка тоже подписана). */
+    private fun warnExitPartial(pkg: String, rule: Int) {
+        if (exitPartialFor(pkg, rule)) toast(getString(R.string.app_exit_partial_toast, prefs.routesModeName(), labelOfPackage(pkg)))
+    }
+
+    /** Меню выхода приложения: три варианта, нынешний отмечен. Для Telegram «Само» — с вопросом. */
+    private fun showExitMenu(anchor: View, pkg: String, current: Int, onPick: (Int) -> Unit) {
+        val popup = androidx.appcompat.widget.PopupMenu(this, anchor)
+        val menu = popup.menu
+        // Номера пунктов — правило + 1: пункт с номером 0 у меню значит «без номера».
+        val telegram = AppServices.serviceOf(pkg)?.title == "Telegram"
+        menu.add(0, AppExit.AUTO + 1, 0, getString(if (telegram) R.string.app_exit_menu_auto_tg else R.string.app_exit_menu_auto))
+        menu.add(0, AppExit.WARP + 1, 1, getString(R.string.app_exit_menu_warp))
+        menu.add(0, AppExit.SECOND + 1, 2, getString(R.string.app_exit_menu_second))
+        menu.setGroupCheckable(0, true, true)
+        menu.findItem(current + 1)?.isChecked = true
+        popup.setOnMenuItemClickListener { item ->
+            runCatching { onPick(item.itemId - 1) }.onFailure { t ->
+                TunnelDebug.error("выход приложения: " + SafeMode.describe(t))
+                banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+            }
+            true
+        }
+        popup.show()
+    }
+
+    /**
+     * Отметки под выход приложений: в «только выбранные» — отмечены, в «все, кроме» — не исключены.
+     * Всегда новый набор: шторка очищает свой и заливает этим (тот же объект очистился бы вместе с ним).
+     */
+    private fun alignWithExits(mode: Int, selected: Set<String>, withExit: Set<String>): Set<String> = when (mode) {
+        Prefs.APPS_ONLY -> selected + withExit
+        Prefs.APPS_EXCEPT -> selected - withExit
+        else -> selected.toSet()
+    }
+
+    /** Строка вкладки «Туннелирование» с кнопкой выхода справа. */
+    private fun exitRow(main: View, pkg: String, rule: Int): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        main.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        row.addView(main)
+        val button = layoutInflater.inflate(R.layout.item_exit_button, row, false) as com.google.android.material.button.MaterialButton
+        button.text = exitLabel(rule)
+        button.setOnClickListener { v ->
+            showExitMenu(v, pkg, prefs.appExits[pkg] ?: AppExit.AUTO) { picked -> pickExitAdvanced(pkg, picked) }
+        }
+        appExitButtons[pkg] = button
+        row.addView(button)
+        return row
+    }
+
+    /**
+     * Выход выбран на вкладке «Туннелирование»: сразу в настройки (как отметки там же), применяется
+     * по «Сохранить и применить». «WARP» или «Второй выход» — приложение идёт через туннель.
+     */
+    private fun pickExitAdvanced(pkg: String, rule: Int) {
+        val rules = prefs.appExits.toMutableMap()
+        if (rule == AppExit.AUTO) rules.remove(pkg) else rules[pkg] = rule
+        prefs.appExits = rules
+        if (rule != AppExit.AUTO) {
+            when (prefs.appsMode) {
+                Prefs.APPS_ONLY -> if (pkg !in prefs.appsSelected) {
+                    prefs.appsSelected = prefs.appsSelected + pkg
+                    noteAppTick(pkg, checked = true)
+                    appChecks[pkg]?.isChecked = true
+                }
+
+                // Из исключений убираем молча: «снято руками» (noteAppTick) здесь не к месту — приложение,
+                // наоборот, идёт через туннель.
+                Prefs.APPS_EXCEPT -> if (pkg in prefs.appsSelected) {
+                    prefs.appsSelected = prefs.appsSelected - pkg
+                    appChecks[pkg]?.isChecked = false
+                }
+            }
+            warnExitPartial(pkg, rule)
+        }
+        appExitButtons[pkg]?.text = exitLabel(rule)
+        TunnelDebug.stage("выход приложения: ${labelOfPackage(pkg)} — ${exitLabel(rule)}")
+        updateAppsState()
+        markSettingsDirty(getString(R.string.dirty_app_exits))
+    }
+
+    // ------------------------------------------------ Proton: шаги и конфиг из файла (с 1.10.39)
+
+    /**
+     * Шаги подключения Proton VPN Free прямо в приложении (человек попросил 23.11): что нажать на
+     * сайте Proton и здесь. Кнопки — выбрать скачанный файл и открыть сайт.
+     */
+    private fun showProtonGuide() {
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.proton_guide_title)
+            .setMessage(R.string.proton_guide_text)
+            .setPositiveButton(R.string.proton_guide_pick) { _, _ -> openSecondConfPicker() }
+            .setNeutralButton(R.string.proton_guide_site) { _, _ -> openProtonSite() }
+            .setNegativeButton(R.string.proton_guide_close, null)
+            .show()
+    }
+
+    private fun openProtonSite() {
+        val opened = runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PROTON_DOWNLOADS_URL)))
+        }.isSuccess
+        if (!opened) toast(getString(R.string.proton_site_fail))
+    }
+
+    private fun openSecondConfPicker() {
+        // Тип у .conf в «Загрузках» бывает любой (text/plain, application/octet-stream) — показываем все.
+        runCatching { pickSecondConf.launch(arrayOf("*/*")) }.onFailure { t ->
+            TunnelDebug.error("второй выход: окно выбора файла не открылось — " + SafeMode.describe(t))
+            banner(getString(R.string.second_file_fail, SafeMode.describe(t)), error = true)
+        }
+    }
+
+    /**
+     * Конфиг из выбранного файла: не больше 64 КБ, текстом. Разобрался — встаёт в поле (дальше как
+     * при вставке: Proton узнаётся сам), второй выход включается; применяется по «Сохранить и
+     * применить». Ключ из файла в журнал не пишем — только сервер.
+     */
+    private fun loadSecondConf(uri: Uri) {
+        val limit = 64 * 1024
+        val bytes = contentResolver.openInputStream(uri)?.use { input ->
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(8192)
+            while (out.size() <= limit) {
+                val n = input.read(buf)
+                if (n < 0) break
+                out.write(buf, 0, n)
+            }
+            out.toByteArray()
+        } ?: throw java.io.IOException("файл не открылся")
+        if (bytes.size > limit) {
+            banner(getString(R.string.second_file_big), error = true)
+            return
+        }
+        val text = String(bytes, Charsets.UTF_8).replace("\uFEFF", "").replace("\r\n", "\n").trim()
+        val server = runCatching { WgConf.toWarpConfig("второй выход", text) }.getOrNull()
+        if (server == null) {
+            TunnelDebug.stage("второй выход: в выбранном файле нет конфига WireGuard")
+            banner(getString(R.string.second_file_bad), error = true)
+            return
+        }
+        binding.editSecondConf.setText(text)
+        if (!binding.switchSecondExit.isChecked) binding.switchSecondExit.isChecked = true
+        val proton = ProtonFree.isProton(text)
+        val endpoint = server.endpoint.render()
+        TunnelDebug.stage("второй выход: конфиг из файла (${if (proton) "Proton" else "свой сервер"}, сервер $endpoint)")
+        markSettingsDirty(getString(R.string.dirty_second_exit))
+        banner(getString(if (proton) R.string.second_file_ok_proton else R.string.second_file_ok, endpoint))
+    }
+
     // ------------------------------------------------ приложения (упрощённый экран)
 
     private fun showAppsSheet() {
@@ -4942,19 +5230,30 @@ class MainActivity : AppCompatActivity() {
             routes = prefs.routesMode,
             sites = prefs.tunnelSites,
             block = prefs.allowBlockIds,
+            exits = prefs.appExits,
         )
         var mode = start.appsMode
         val selected = start.apps.toMutableSet()
+        // Выход приложений (с 1.10.39): кнопка в строке, когда есть второй выход и Android 10+.
+        val exits = start.exits.toMutableMap()
+        val exitsOn = runCatching { appExitsAvailable() }.getOrDefault(false)
+        // Выбор выхода в строке; задаётся ниже, когда готов список (строки ссылаются на него раньше).
+        var pickExit: (String, Int) -> Unit = { _, _ -> }
         var apps: List<AppEntry> = appEntries
         val icons = HashMap<String, android.graphics.drawable.Drawable?>()
         var visibleApps: List<AppEntry> = emptyList()
 
         fun visibleList(): List<AppEntry> {
             val q = sheet.appsSearch.text?.toString()?.trim()?.lowercase().orEmpty()
-            // Отмеченные — наверху: их ищут, чтобы снять, и они не должны теряться в сотне строк.
+            // Отмеченные — наверху: их ищут, чтобы снять, и они не должны теряться в сотне строк. В
+            // «Все приложения» отметок нет — наверху те, у кого свой выход (с 1.10.39).
             return apps.filter { app ->
                 q.isEmpty() || app.label.lowercase().contains(q) || app.pkg.lowercase().contains(q)
-            }.sortedWith(compareByDescending<AppEntry> { it.pkg in selected }.thenBy { it.label.lowercase() })
+            }.sortedWith(
+                compareByDescending<AppEntry> {
+                    if (mode == Prefs.APPS_ALL) it.pkg in exits else it.pkg in selected || it.pkg in exits
+                }.thenBy { it.label.lowercase() }
+            )
         }
 
         val adapter = object : android.widget.BaseAdapter() {
@@ -4979,6 +5278,21 @@ class MainActivity : AppCompatActivity() {
                 }
                 row.appPackage.text = if (joined.isEmpty()) app.pkg else getString(R.string.apps_row_companion, app.pkg, joined)
                 row.appCheck.isChecked = app.pkg in selected
+                // В «Все приложения» отмечать нечего — строка только для выхода (с 1.10.39).
+                row.appCheck.visibility = if (mode == Prefs.APPS_ALL) View.GONE else View.VISIBLE
+                val rule = exits[app.pkg] ?: AppExit.AUTO
+                row.appExit.visibility = if (exitsOn) View.VISIBLE else View.GONE
+                if (exitsOn) {
+                    row.appExit.text = exitLabel(rule)
+                    row.appExit.setOnClickListener { v ->
+                        showExitMenu(v, app.pkg, exits[app.pkg] ?: AppExit.AUTO) { picked -> pickExit(app.pkg, picked) }
+                    }
+                    if (exitPartialFor(app.pkg, rule)) {
+                        row.appPackage.text = getString(R.string.app_exit_row_partial, row.appPackage.text)
+                    }
+                } else {
+                    row.appExit.setOnClickListener(null)
+                }
                 // Иконку читаем, только когда строка видна, и запоминаем: их сотни, а видно десяток.
                 val icon = icons.getOrPut(app.pkg) {
                     runCatching { packageManager.getApplicationIcon(app.pkg) }.getOrNull()
@@ -4988,22 +5302,57 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        fun countText(): String = when {
+            apps.isEmpty() -> getString(R.string.sheet_apps_loading)
+            mode == Prefs.APPS_ALL -> getString(R.string.sheet_apps_exits_count, exits.size)
+            else -> getString(R.string.sheet_apps_count, selected.size) + otherProfileNote()
+        }
+
         fun refresh() {
-            val needsList = mode != Prefs.APPS_ALL
+            // С 1.10.39 список нужен и в «Все приложения», когда есть второй выход: там выбирают выход.
+            val needsList = mode != Prefs.APPS_ALL || exitsOn
             sheet.appsListBox.visibility = if (needsList) View.VISIBLE else View.GONE
+            sheet.appsExitHint.visibility = if (exitsOn) View.VISIBLE else View.GONE
             visibleApps = if (needsList) visibleList() else emptyList()
             adapter.notifyDataSetChanged()
-            sheet.appsCount.text = if (apps.isEmpty()) getString(R.string.sheet_apps_loading)
-            else getString(R.string.sheet_apps_count, selected.size) + otherProfileNote()
+            sheet.appsCount.text = countText()
+        }
+
+        // Выбрали выход в строке: «Само» — убрать правило; «WARP» или «Второй выход» — приложение
+        // идёт через туннель (отмечается само в «только выбранные», снимается из исключений).
+        pickExit = { pkg, rule ->
+            if (rule == AppExit.AUTO) {
+                exits.remove(pkg)
+            } else {
+                exits[pkg] = rule
+                when (mode) {
+                    Prefs.APPS_ONLY -> selected.add(pkg)
+                    Prefs.APPS_EXCEPT -> selected.remove(pkg)
+                }
+                warnExitPartial(pkg, rule)
+            }
+            sheet.appsCount.text = countText()
+            adapter.notifyDataSetChanged()
         }
 
         sheet.appsList.adapter = adapter
         // Список прокручивается внутри шторки, а не тянет её вниз.
         runCatching { sheet.appsList.isNestedScrollingEnabled = true }
-        sheet.appsList.setOnItemClickListener { _, _, position, _ ->
+        sheet.appsList.setOnItemClickListener { _, view, position, _ ->
             val app = visibleApps.getOrNull(position) ?: return@setOnItemClickListener
+            if (mode == Prefs.APPS_ALL) {
+                // Отметок в этом режиме нет — строка открывает выбор выхода (с 1.10.39).
+                if (exitsOn) {
+                    val anchor = view.findViewById<View>(R.id.appExit) ?: view
+                    showExitMenu(anchor, app.pkg, exits[app.pkg] ?: AppExit.AUTO) { picked -> pickExit(app.pkg, picked) }
+                }
+                return@setOnItemClickListener
+            }
             if (!selected.add(app.pkg)) selected.remove(app.pkg)
-            sheet.appsCount.text = getString(R.string.sheet_apps_count, selected.size) + otherProfileNote()
+            // Сняли с туннеля («только выбранные») или исключили («все, кроме») — выход снова «Само».
+            val out = (mode == Prefs.APPS_ONLY && app.pkg !in selected) || (mode == Prefs.APPS_EXCEPT && app.pkg in selected)
+            if (out) exits.remove(app.pkg)
+            sheet.appsCount.text = countText()
             adapter.notifyDataSetChanged()
         }
         sheet.appsModeGroup.check(
@@ -5018,6 +5367,12 @@ class MainActivity : AppCompatActivity() {
                 R.id.appsModeOnly -> Prefs.APPS_ONLY
                 R.id.appsModeExcept -> Prefs.APPS_EXCEPT
                 else -> Prefs.APPS_ALL
+            }
+            // Со своим выходом — через туннель в любом режиме (с 1.10.39); сохранится по «Сохранить».
+            if (exitsOn && exits.isNotEmpty() && mode != Prefs.APPS_ALL) {
+                val aligned = alignWithExits(mode, selected, exits.keys)
+                selected.clear()
+                selected.addAll(aligned)
             }
             refresh()
         }
@@ -5093,6 +5448,7 @@ class MainActivity : AppCompatActivity() {
                 routes = routes,
                 sites = sheet.sheetSites.text?.toString().orEmpty(),
                 block = blockChecks.filter { it.value.isChecked }.keys.toSet(),
+                exits = exits.toMap(),
             )
             dialog.dismiss()
             saveTunnelSheet(now, start)
@@ -5115,13 +5471,15 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    /** Выбор в шторке «Туннелирование»: приложения + режим маршрутов + свои сайты + списки. */
+    /** Выбор в шторке «Туннелирование»: приложения + режим маршрутов + свои сайты + списки + выход приложений. */
     private data class TunnelChoice(
         val appsMode: Int,
         val apps: Set<String>,
         val routes: Int,
         val sites: String,
         val block: Set<String>,
+        /** Выход приложений (с 1.10.39): пакет → «Всегда WARP» или «Второй выход». */
+        val exits: Map<String, Int> = emptyMap(),
     )
 
     /**
@@ -5144,12 +5502,14 @@ class MainActivity : AppCompatActivity() {
         prefs.tunnelSites = now.sites
         if (now.block != start.block) prefs.allowBlockIds = now.block
         prefs.routesMode = now.routes
+        if (now.exits != start.exits) prefs.appExits = now.exits
         TunnelDebug.stage(
             "туннелирование (упрощённый экран): " + when (now.appsMode) {
                 Prefs.APPS_ONLY -> "только выбранные приложения (${now.apps.size})"
                 Prefs.APPS_EXCEPT -> "все приложения, кроме ${now.apps.size}"
                 else -> "все приложения"
-            } + " · " + prefs.routesModeName()
+            } + " · " + prefs.routesModeName() +
+                (if (now.exits.isNotEmpty()) " · выход по выбору: " + exitsSummary(now.exits) else "")
         )
         // Вкладка «Туннелирование» расширенного вида должна показывать то же самое: «Сохранить и
         // применить» записывает настройки с экрана, и старый вид затёр бы выбор из шторки. Её
@@ -5196,13 +5556,14 @@ class MainActivity : AppCompatActivity() {
         }
         val sitesCount = SiteList.parse(prefs.tunnelSites).total
         val browserSites = runCatching { prefs.browserSitesActive() }.getOrDefault(false)
-        val sub = if (browserSites) getString(R.string.simple_tun_sites_browser) else when (prefs.routesMode) {
+        val sites = if (browserSites) getString(R.string.simple_tun_sites_browser) else when (prefs.routesMode) {
             1 -> getString(R.string.simple_tun_sites_preset)
             2 -> getString(R.string.simple_tun_sites_lists)
             3 -> if (sitesCount > 0) getString(R.string.simple_tun_sites_mine, sitesCount)
             else getString(R.string.simple_tun_sites_all)
             else -> getString(R.string.simple_tun_sites_all)
         }
+        val sub = sites + exitsCardNote()
         if (s.simpleTunnelValue.text.toString() != value) s.simpleTunnelValue.text = value
         if (s.simpleTunnelSub.text.toString() != sub) s.simpleTunnelSub.text = sub
     }
@@ -5589,6 +5950,9 @@ class MainActivity : AppCompatActivity() {
         /** Что сказать после сброса по умолчанию — экрану, созданному заново (с 1.10.32). */
         @Volatile
         var afterResetNote: String? = null
+
+        /** Страница загрузок аккаунта Proton: там «WireGuard configuration» (с 1.10.39). */
+        const val PROTON_DOWNLOADS_URL = "https://account.protonvpn.com/downloads"
 
         /** Виды итога под кнопкой второго выхода: цвет точки (с 1.10.32). */
         const val RES_OK = 0

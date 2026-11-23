@@ -14,7 +14,7 @@ package dev.warpscout.core.lists
  * Сети известны не у всех: у Telegram, Meta (Instagram, Facebook, WhatsApp), X и Discord в списках
  * есть подсети, у YouTube — сети Google для видео (см. AllowLists.EXTRA_PREFIXES); у ChatGPT, Claude,
  * Gemini и TikTok — только домены, их адреса собираются через DoH; у Grok (с 1.10.38) своего списка
- * нет — его адреса во втором выходе. Приложение без сервиса здесь
+ * нет — его адреса во втором выходе; у Aurora Store (с 1.10.39) — адреса Google Play. Приложение без сервиса здесь
  * ([serviceOf] = null) при неполных маршрутах идёт только к выбранным сайтам — об этом экран
  * предупреждает (так решил человек 23.11).
  *
@@ -99,6 +99,11 @@ object AppServices {
             setOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill", "com.zhiliaoapp.musically.go"),
             listOf("tiktok", "musically"),
         ),
+        // Aurora Store (с 1.10.39): магазин Google Play без Google. Человек ставит через неё Grok и
+        // Claude (в российском Play их нет) и пускает её целиком через второй выход (AppExit) —
+        // тогда Google видит зарубежный адрес. С адресами Google Play она идёт через туннель целиком
+        // и при неполных маршрутах. Подсказок по имени нет: «aurora» — в именах чужих пакетов.
+        Service("Aurora Store", listOf("google-play"), setOf("com.aurora.store")),
     )
 
     /** Сервис приложения по пакету; null — не знаем. */

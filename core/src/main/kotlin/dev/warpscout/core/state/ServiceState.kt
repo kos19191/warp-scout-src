@@ -416,6 +416,11 @@ data class ServiceSettings(
      * спрашивает и не переключает.
      */
     val tgSecond: Boolean = true,
+    /**
+     * Выход по приложениям (с 1.10.39, см. AppExit): строки «пакет|правило», 1 — всегда WARP,
+     * 2 — целиком через второй выход. Приложения без строки — «Само», по адресам.
+     */
+    val appExits: List<String> = emptyList(),
 ) {
 
     fun toJson(): String = JsonVal.obj(
@@ -441,6 +446,7 @@ data class ServiceSettings(
         "routesNote" to JsonVal.str(routesNote),
         "abroadSearch" to JsonVal.bool(abroadSearch),
         "tgSecond" to JsonVal.bool(tgSecond),
+        "appExits" to JsonVal.arr(appExits.map { JsonVal.str(it) }),
     ).render()
 
     companion object {
@@ -483,6 +489,8 @@ data class ServiceSettings(
                 // Нет поля (снимок от прежней версии) — включено, как и по умолчанию.
                 abroadSearch = obj.bool("abroadSearch") ?: true,
                 tgSecond = obj.bool("tgSecond") ?: true,
+                // Нет поля (снимок от прежней версии) — у всех приложений «Само».
+                appExits = strings(obj, "appExits"),
             )
         }
     }

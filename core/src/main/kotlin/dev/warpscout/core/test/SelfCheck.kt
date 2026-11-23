@@ -184,6 +184,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("Grok — через второй выход (1.10.38)") {
             grokChecks()
         }
+        section("выход по приложениям: «Само» / «Всегда WARP» / «Второй выход» (1.10.39)") {
+            appExitChecks()
+        }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
                 liveNetwork()
@@ -623,6 +626,166 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         check("Grok: ngrok — не Grok", a.serviceOf("com.ngrok.app") == null)
         expect("Grok: порядок названий для экрана", a.titlesFor(listOf("ai.x.grok", "com.anthropic.claude")), listOf("Claude", "Grok"))
         check("Grok: спутников нет", a.companionsFor(listOf("ai.x.grok")).isEmpty())
+    }
+
+    /**
+     * 1.10.39: выход по приложениям. Человек: «дай возможность пропускать через второй канал любые
+     * приложения и отключать второй канал для них» — Telegram через второй выход не грузил медиа, а
+     * убрать его оттуда можно было, только выключив второй выход целиком.
+     */
+    private fun appExitChecks() {
+        val e = dev.warpscout.core.tunnel.AppExit
+        // Снимок: «пакет|правило», «Само» не хранится.
+        expect("выход: строка снимка разбирается", e.decode("com.aurora.store|2"), "com.aurora.store" to e.SECOND)
+        check("выход: «Само» в снимке не хранится", e.decode("org.telegram.messenger|0") == null)
+        check("выход: кривая строка — мимо", e.decode("без-правила") == null && e.decode("|2") == null && e.decode("a|9") == null)
+        expect("выход: запись — по имени пакета и без «Само»",
+            e.encodeAll(mapOf("org.telegram.messenger" to e.WARP, "com.aurora.store" to e.SECOND, "x.y" to e.AUTO)),
+            listOf("com.aurora.store|2", "org.telegram.messenger|1"))
+        expect("выход: запись и разбор сходятся", e.decodeAll(e.encodeAll(mapOf("a.b" to e.WARP))), mapOf("a.b" to e.WARP))
+        val settings = ServiceSettings(appExits = listOf("com.aurora.store|2"))
+        expect("настройки сервиса: выход приложений переживает JSON", ServiceSettings.fromJson(settings.toJson())?.appExits, listOf("com.aurora.store|2"))
+        expect("настройки сервиса: старый снимок — у всех «Само»", ServiceSettings.fromJson("{}")?.appExits, emptyList<String>())
+
+        // Соединение из пакета.
+        val syn = tcpSyn4("172.16.0.2", "142.250.1.1", 1360)
+        val k = dev.warpscout.core.tunnel.FlowKey.of(syn)
+        check("соединение: TCP по IPv4 — порты из заголовка", k != null && k.proto == 6 && k.sport == 40000 && k.dport == 443)
+        expect("соединение: адреса для вопроса системе", k?.local?.address?.hostAddress + " → " + k?.remote?.address?.hostAddress,
+            "172.16.0.2 → 142.250.1.1")
+        val udp = udp4("172.16.0.2", 50000, "1.2.3.4", 443, ByteArray(10))
+        val ku = dev.warpscout.core.tunnel.FlowKey.of(udp)
+        check("соединение: UDP по IPv4", ku != null && ku.proto == 17 && ku.sport == 50000 && ku.dport == 443)
+        val k6 = dev.warpscout.core.tunnel.FlowKey.of(tcpSyn6("2606:4700:110::2", "2a00:1450::1"))
+        check("соединение: TCP по IPv6", k6 != null && k6.proto == 6 && k6.sport == 40001 && k6.dport == 443 && k6.src.size == 16)
+        check("соединение: тот же пакет — то же соединение", dev.warpscout.core.tunnel.FlowKey.of(syn.copyOf()) == k &&
+            dev.warpscout.core.tunnel.FlowKey.of(syn.copyOf())?.hashCode() == k?.hashCode())
+        check("соединение: другой порт — другое соединение", ku != dev.warpscout.core.tunnel.FlowKey.of(udp4("172.16.0.2", 50001, "1.2.3.4", 443, ByteArray(10))))
+        val frag = syn.copyOf().also { it[6] = 0; it[7] = 10 }
+        check("соединение: фрагмент без начала — без портов", dev.warpscout.core.tunnel.FlowKey.of(frag) == null)
+        check("соединение: ICMP — не соединение", dev.warpscout.core.tunnel.FlowKey.of(ip4("172.16.0.2", "1.1.1.1", 1, ByteArray(8))) == null)
+        check("соединение: обрывок — null", dev.warpscout.core.tunnel.FlowKey.of(syn.copyOf(10)) == null)
+
+        // Таблица правил: aurora (uid 10100) — «Второй выход», telegram (10200) — «Всегда WARP».
+        val aurora = 10100
+        val telegram = 10200
+        val other = 10300
+        var asked = 0
+        val whose = HashMap<String, Int>()
+        val logged = ArrayList<String>()
+        fun owner(proto: Int, local: java.net.InetSocketAddress, remote: java.net.InetSocketAddress): Int {
+            asked++
+            return whose["${local.port}"] ?: -1
+        }
+        fun pkt(sport: Int, dst: String, dport: Int = 443) = udp4("172.16.0.2", sport, dst, dport, ByteArray(4))
+        val t = dev.warpscout.core.tunnel.AppExitTable(
+            mapOf(aurora to e.SECOND, telegram to e.WARP, other to e.AUTO),
+            owner = ::owner, names = mapOf(aurora to "Aurora Store", telegram to "Telegram"), log = { logged += it }
+        )
+        whose["41000"] = aurora
+        whose["42000"] = telegram
+        whose["43000"] = other
+        val a1 = pkt(41000, "142.250.1.1")
+        expect("правило: «Второй выход» — адрес вёл в WARP, идёт во второй", t.decide(a1, a1.size, 0), 1)
+        expect("правило: владельца спросили один раз", asked, 1)
+        t.decide(a1, a1.size, 0)
+        t.decide(a1, a1.size, 0)
+        expect("правило: дальше соединение помнится — без вопросов", asked, 1)
+        check("правило: в журнал — один раз, с названием", logged.count { it.contains("Aurora Store") && it.contains("второй выход") } == 1)
+        val tg = pkt(42000, "149.154.167.51")
+        expect("правило: «Всегда WARP» — адрес вёл во второй выход, идёт через WARP", t.decide(tg, tg.size, 1), 0)
+        val tgW = pkt(42001, "149.154.167.52")
+        whose["42001"] = telegram
+        val before = asked
+        expect("правило: «Всегда WARP» к адресу WARP — WARP", t.decide(tgW, tgW.size, 0), 0)
+        expect("правило: …систему спросили: «Второй выход» есть у другого приложения", asked, before + 1)
+        val o = pkt(43000, "8.8.4.4")
+        expect("правило: «Само» — по адресу (WARP)", t.decide(o, o.size, 0), 0)
+        val o2 = pkt(43001, "1.2.3.4")
+        whose["43001"] = other
+        expect("правило: «Само» — по адресу (второй выход)", t.decide(o2, o2.size, 1), 1)
+        val dns = pkt(41005, "1.1.1.1", 53)
+        whose["41005"] = aurora
+        val beforeDns = asked
+        expect("правило: DNS — по адресу", t.decide(dns, dns.size, 0), 0)
+        expect("правило: о DNS систему не спрашиваем", asked, beforeDns)
+        val unknown = pkt(44000, "5.6.7.8")
+        expect("правило: владелец не назван — по адресу", t.decide(unknown, unknown.size, 0), 0)
+        check("правило: счётчик неназванных", t.misses == 1L)
+        check("правило: сводка для журнала", t.summary().contains("запросов владельца") && !t.summary().contains("выключено"))
+
+        // Только «Всегда WARP» — к адресам WARP систему не спрашиваем вовсе.
+        var asked2 = 0
+        val warpOnly = dev.warpscout.core.tunnel.AppExitTable(mapOf(telegram to e.WARP), owner = { _, _, _ -> asked2++; telegram })
+        val w1 = pkt(45000, "8.8.8.8")
+        expect("только WARP: адрес WARP — без вопроса", warpOnly.decide(w1, w1.size, 0) to asked2, 0 to 0)
+        expect("только WARP: адрес второго выхода — вопрос и WARP", warpOnly.decide(w1, w1.size, 1) to asked2, 0 to 1)
+        // Пустые правила — ровно прежний путь.
+        val none = dev.warpscout.core.tunnel.AppExitTable(mapOf(other to e.AUTO), owner = { _, _, _ -> error("не должны спрашивать") })
+        check("без правил: таблица пустая", none.isEmpty)
+        expect("без правил: решение по адресу", none.decide(w1, w1.size, 1), 1)
+        // Система падает — по адресу, без исключений наружу.
+        val boom = dev.warpscout.core.tunnel.AppExitTable(mapOf(aurora to e.SECOND), owner = { _, _, _ -> throw SecurityException("нет") })
+        expect("ошибка системы — по адресу", boom.decide(w1, w1.size, 0), 0)
+        // Android не называет никого — после 64 вопросов перестаём спрашивать.
+        var asked3 = 0
+        val logs3 = ArrayList<String>()
+        val mute = dev.warpscout.core.tunnel.AppExitTable(mapOf(aurora to e.SECOND), owner = { _, _, _ -> asked3++; -1 }, log = { logs3 += it })
+        for (i in 0 until 70) {
+            val pk = pkt(46000 + i, "9.9.9.9")
+            mute.decide(pk, pk.size, 0)
+        }
+        check("Android молчит: выключено", mute.disabled)
+        expect("Android молчит: спросили ровно 64 раза", asked3, 64)
+        check("Android молчит: в журнале — почему", logs3.any { it.contains("не работает") })
+        // Вытеснение: таблица на 4 соединения — пятое вытесняет самое старое.
+        var asked4 = 0
+        val small = dev.warpscout.core.tunnel.AppExitTable(mapOf(aurora to e.SECOND), owner = { _, _, _ -> asked4++; aurora }, maxFlows = 4)
+        val first = pkt(47000, "9.9.9.9")
+        small.decide(first, first.size, 0)
+        for (i in 1..4) {
+            val pk = pkt(47000 + i, "9.9.9.9")
+            small.decide(pk, pk.size, 0)
+        }
+        small.decide(first, first.size, 0)
+        expect("вытеснение: старое соединение спрошено заново", asked4, 6)
+
+        // Диспетчер tun: правило приложения перекрывает решение по адресу.
+        val packets = ArrayDeque(listOf(pkt(41000, "142.250.1.1"), pkt(42000, "149.154.167.51"), pkt(43000, "8.8.4.4")))
+        val tun = object : java.io.InputStream() {
+            override fun read(): Int = -1
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                val p = packets.removeFirstOrNull() ?: return -1
+                System.arraycopy(p, 0, b, off, p.size)
+                return p.size
+            }
+        }
+        val lanes = listOf(PacketQueueIn("основной"), PacketQueueIn("второй"))
+        val disp = dev.warpscout.core.tunnel.TunDispatcher(tun, ExitRouter.of(listOf("149.154.160.0/20")), lanes)
+        disp.appExits = t
+        disp.run()
+        expect("диспетчер: Aurora — во второй, Telegram и остальные — в WARP", disp.sentSecondary to disp.sentPrimary, 1L to 2L)
+        val disp2 = dev.warpscout.core.tunnel.TunDispatcher(
+            object : java.io.InputStream() {
+                val q = ArrayDeque(listOf(pkt(42000, "149.154.167.51")))
+                override fun read(): Int = -1
+                override fun read(b: ByteArray, off: Int, len: Int): Int {
+                    val p = q.removeFirstOrNull() ?: return -1
+                    System.arraycopy(p, 0, b, off, p.size)
+                    return p.size
+                }
+            },
+            ExitRouter.of(listOf("149.154.160.0/20")), listOf(PacketQueueIn("основной"), PacketQueueIn("второй"))
+        )
+        disp2.run()
+        expect("диспетчер: без правил Telegram по адресу — во второй", disp2.sentSecondary, 1L)
+
+        // Aurora Store — известное приложение: с адресами Google Play.
+        val a = dev.warpscout.core.lists.AppServices
+        expect("Aurora: известное приложение", a.serviceOf("com.aurora.store")?.title, "Aurora Store")
+        expect("Aurora: её адреса — Google Play", a.listsFor(listOf("com.aurora.store")), listOf("google-play"))
+        check("Aurora: список Google Play есть", AllowLists.byId["google-play"] != null)
+        check("Aurora: чужой пакет со словом aurora — не она", a.serviceOf("com.aurora.weather") == null)
     }
 
     /** Маршруты из частей: сайты для браузера, сети выбранных приложений, прежние режимы. */

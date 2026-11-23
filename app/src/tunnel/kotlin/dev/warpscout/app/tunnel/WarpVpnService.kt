@@ -49,6 +49,8 @@ import dev.warpscout.core.tunnel.PacketQueueIn
 import dev.warpscout.core.tunnel.SharedPacketOut
 import dev.warpscout.core.tunnel.TunDispatcher
 import dev.warpscout.core.tunnel.SocketUdpChannel
+import dev.warpscout.core.tunnel.AppExit
+import dev.warpscout.core.tunnel.AppExitTable
 import dev.warpscout.core.tunnel.AwgChannel
 import dev.warpscout.core.tunnel.ExitNat
 import dev.warpscout.core.tunnel.InnerUdpChannel
@@ -1036,23 +1038,38 @@ class WarpVpnService : VpnService() {
         // «Переключить» меньше суток назад, а точка выходила через Россию (с 1.10.36, см.
         // checkTelegramMedia). Иначе — через WARP, как всё остальное: в Москве Telegram режут не
         // всегда, а второй выход бывает медленнее (23.11: через Мексику было «прямо тяжело»).
+        // Выход по приложениям (с 1.10.39, см. AppExit): выбор человека для Telegram в его строке
+        // («Всегда WARP» или «Второй выход») отменяет и вопрос, и автоматику ниже.
+        val exitRules = appExitRules()
+        tgFixed = telegramFixed(exitRules)
         val tgSite = if (secondCfg != null && !quietSession) telegramSiteFor(cfg) else ""
+        val tgWanted = when (tgFixed) {
+            AppExit.SECOND -> secondCfg != null && !quietSession
+            AppExit.WARP -> false
+            else -> tgSite.isNotEmpty()
+        }
         val tunRoutes = runCatching { ExitRouter.of(SplitRoutes.prefixesOf(cfg.allowedIps)) }.getOrNull()
-        val router = secondCfg?.let { ExitRouter.of(secondExitCidrs(tgSite.isNotEmpty(), tunRoutes)) }
+        val router = secondCfg?.let { ExitRouter.of(secondExitCidrs(tgWanted, tunRoutes)) }
             ?.takeIf { !it.isEmpty } ?: ExitRouter.EMPTY
         val multiExit = secondCfg != null && !router.isEmpty
-        tgViaSecond = multiExit && tgSite.isNotEmpty()
+        tgViaSecond = multiExit && tgWanted
         TunnelState.tgSecond = tgViaSecond
         probeHosts.clear()
         siteSaid = ""
         // Говорим и про выключенный второй выход: иначе «две цепочки рукопожатий в журнале»
         // невозможно объяснить, не заглядывая в настройки.
         TunnelDebug.stage(if (multiExit) "второй выход включён" else "второй выход выключен")
-        if (tgViaSecond) {
+        if (tgViaSecond && tgFixed == AppExit.SECOND) {
+            TunnelDebug.stage("Telegram — через второй выход: так выбрано в «Туннелировании» (вопросов не задаю)")
+        } else if (tgViaSecond) {
             TunnelDebug.stage(
                 "Telegram — через второй выход: на этой сети ты ответил «Переключить» (действует сутки), " +
                     "точка выходила через ${ExitSite.describe(tgSite)}; станет медленнее Москвы — верну через WARP"
             )
+        } else if (tgFixed == AppExit.WARP && multiExit) {
+            TunnelDebug.stage("Telegram — всегда через WARP: так выбрано в «Туннелировании», второй выход для него выключен, вопросов не задаю")
+        } else if (tgFixed == AppExit.SECOND && !quietSession) {
+            TunnelDebug.stage("Telegram: выбран «Второй выход», но второго выхода в этой сессии нет — Telegram идёт через WARP")
         }
 
         val builder = builderFor(cfg)
@@ -1163,8 +1180,16 @@ class WarpVpnService : VpnService() {
             null
         }
         if (splitter != null) {
+            // Выход по приложениям (с 1.10.39): правило приложения перекрывает решение по адресу.
+            splitter.appExits = runCatching { buildAppExits(exitRules) }
+                .onFailure { TunnelDebug.stage("выход по приложениям: не включился (${it.javaClass.simpleName}) — у всех «Само»") }
+                .getOrNull()
             this.dispatcher = splitter
             Thread(splitter, "warpscout-tun-split").apply { isDaemon = true; start() }
+        } else if (exitRules.values.any { it == AppExit.SECOND } && !quietSession) {
+            // Честно: «Второй выход» выбран, а второго выхода в этой сессии нет (решил человек 23.11:
+            // такие приложения идут через WARP, а не остаются без интернета).
+            TunnelDebug.stage("выход по приложениям: второго выхода в этой сессии нет — приложения с «Второй выход» идут через WARP")
         }
 
         val plane = DataPlane(
@@ -1498,6 +1523,13 @@ class WarpVpnService : VpnService() {
                     "второй выход остановлен: прошло $totalUp вверх / $totalDown вниз" +
                         (if (fails >= maxFails) " — серверы не ответили, сайты второго выхода идут через WARP" else "")
                 )
+                // Приложения с «Второй выход» (с 1.10.39) — тоже через WARP, а не без интернета (решил человек 23.11).
+                if (fails >= maxFails && alive()) {
+                    val secondApps = exitRules.count { it.value == AppExit.SECOND }
+                    if (secondApps > 0) {
+                        TunnelDebug.stage("выход по приложениям: второй выход не поднят — приложения с «Второй выход» ($secondApps) идут через WARP")
+                    }
+                }
             }.apply { isDaemon = true; name = "warpscout-vpn-2" }
             val ownsSecond = synchronized(life) {
                 if (alive()) {
@@ -1977,6 +2009,71 @@ class WarpVpnService : VpnService() {
     @Volatile
     private var tgViaSecond = false
 
+    /**
+     * Выбор человека для Telegram в его строке «Туннелирования» (с 1.10.39): AppExit.AUTO — как
+     * раньше (Москва и вопрос), WARP — всегда через WARP, SECOND — всегда через второй выход. Выбран —
+     * не спрашиваем и сами не переключаем: 23.11 Telegram застрял на втором выходе без медиа, и
+     * вернуть его можно было, только выключив второй выход.
+     */
+    @Volatile
+    private var tgFixed = AppExit.AUTO
+
+    /** Выход по приложениям из настроек (с 1.10.39): пакет → «Всегда WARP» / «Второй выход». */
+    private fun appExitRules(): Map<String, Int> =
+        runCatching { AppExit.decodeAll(serviceSettings().appExits) }.getOrDefault(emptyMap())
+
+    /** Выбор для Telegram: одинаковый у всех клиентов Telegram с правилом — он, иначе «Само». */
+    private fun telegramFixed(rules: Map<String, Int>): Int {
+        val chosen = rules.filterKeys { AppServices.serviceOf(it)?.title == "Telegram" }.values.toSet()
+        return if (chosen.size == 1) chosen.first() else AppExit.AUTO
+    }
+
+    /**
+     * Таблица выхода по приложениям на эту сессию (см. AppExitTable): пакеты → uid установленных
+     * приложений. null — правил нет или Android старше 10: владельца соединения система сообщает VPN
+     * только с Android 10 (ConnectivityManager.getConnectionOwnerUid).
+     */
+    private fun buildAppExits(rules: Map<String, Int>): AppExitTable? {
+        if (rules.isEmpty()) return null
+        if (Build.VERSION.SDK_INT < 29) {
+            TunnelDebug.stage("выход по приложениям: нужен Android 10 или новее — у всех приложений «Само»")
+            return null
+        }
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return null
+        val byUid = HashMap<Int, Int>()
+        val names = HashMap<Int, String>()
+        val missing = ArrayList<String>()
+        rules.forEach { (pkg, rule) ->
+            val info = runCatching {
+                @Suppress("DEPRECATION")
+                packageManager.getApplicationInfo(pkg, 0)
+            }.getOrNull()
+            if (info == null) {
+                missing += pkg
+                return@forEach
+            }
+            byUid[info.uid] = AppExit.stronger(byUid[info.uid] ?: AppExit.AUTO, rule)
+            names[info.uid] = runCatching { packageManager.getApplicationLabel(info).toString() }.getOrDefault(pkg)
+        }
+        if (byUid.isEmpty()) {
+            TunnelDebug.stage("выход по приложениям: выбранных приложений нет на телефоне (${missing.joinToString(", ")})")
+            return null
+        }
+        TunnelDebug.stage(
+            "выход по приложениям: " + byUid.entries.joinToString(", ") { (uid, rule) ->
+                "${names[uid]} — " + if (rule == AppExit.SECOND) "второй выход" else "WARP"
+            } + (if (missing.isNotEmpty()) "; нет на телефоне: ${missing.joinToString(", ")}" else "")
+        )
+        return AppExitTable(
+            byUid,
+            owner = { proto, local, remote ->
+                if (Build.VERSION.SDK_INT >= 29) cm.getConnectionOwnerUid(proto, local, remote) else -1
+            },
+            names = names,
+            log = { line -> TunnelDebug.stage(line) },
+        )
+    }
+
     /** Площадка, о которой в этой сессии уже написали в журнал. */
     @Volatile
     private var siteSaid = ""
@@ -2038,6 +2135,8 @@ class WarpVpnService : VpnService() {
      * Возвращает площадку; пусто — Telegram идёт через WARP, дальше решит проверка медиа.
      */
     private fun telegramSiteFor(cfg: WarpConfig): String = runCatching {
+        // Выход Telegram выбран вручную (с 1.10.39) — ответ на вопрос не действует.
+        if (tgFixed != AppExit.AUTO) return@runCatching ""
         if (!serviceSettings().tgSecond || !isWarpPeer(cfg)) return@runCatching ""
         val net = memoryNetKind()
         if (TelegramChoiceMemory.choiceOf(this, net) != TelegramChoice.SECOND) return@runCatching ""
@@ -2070,6 +2169,8 @@ class WarpVpnService : VpnService() {
     private fun applyTelegramRoute(site: String) {
         val abroad = ExitSite.isAbroad(site)
         if (abroad && TunnelState.tgAskAt > 0L) clearTelegramAsk()
+        // Выход Telegram выбран вручную (с 1.10.39): сами его не переключаем.
+        if (tgFixed != AppExit.AUTO) return
         if (!tgViaSecond) return
         val back = when {
             !serviceSettings().tgSecond -> "Telegram: второй выход для Telegram выключен в «Автоматике» — снова напрямую через WARP"
@@ -2103,8 +2204,21 @@ class WarpVpnService : VpnService() {
         tgMediaCheckedAt = System.currentTimeMillis()
         tgMediaCheckedSite = site
         val secondUp = dispatcher != null && TunnelState.second == TunnelStatus.SECOND_UP
-        if (tgViaSecond && secondUp) {
+        if (tgViaSecond && secondUp && tgFixed == AppExit.AUTO) {
             checkBothWays(myEpoch, site)
+            return
+        }
+        if (tgFixed != AppExit.AUTO) {
+            // Выбрано вручную (с 1.10.39): проверяем путь, которым Telegram идёт, — без сравнения и вопросов.
+            val r = runTelegramMedia()
+            if (!linkAlive(myEpoch)) return
+            TunnelState.setTgMedia(System.currentTimeMillis(), r.verdict, r.kbps)
+            val via = when {
+                tgViaSecond && secondUp -> " (через ${secondLabel()} — так выбрано)"
+                tgViaSecond -> " (выбран второй выход, но он сейчас не поднят — через WARP)"
+                else -> " (через WARP — так выбрано)"
+            }
+            reportTelegramMedia(r, via, site)
             return
         }
         val r = runTelegramMedia()
@@ -2169,6 +2283,7 @@ class WarpVpnService : VpnService() {
      * Ответил «Оставить» или вопрос уже ждёт ответа — второй выход не меряем: трафик зря.
      */
     private fun compareWithSecond(myEpoch: Int, site: String, moscow: TelegramMedia.Fetch) {
+        if (tgFixed != AppExit.AUTO) return
         if (!serviceSettings().tgSecond) return
         if (dispatcher == null || TunnelState.second != TunnelStatus.SECOND_UP) return
         val net = memoryNetKind()
@@ -2288,6 +2403,9 @@ class WarpVpnService : VpnService() {
         val running = plane != null && worker?.isAlive == true && TunnelState.up
         val here = running && net == memoryNetKind()
         when {
+            tgFixed != AppExit.AUTO -> TunnelDebug.stage(
+                "Telegram: ответ запомнен, но выход Telegram выбран в «Туннелировании» — по нему и идёт"
+            )
             !switch -> TunnelDebug.stage("Telegram: ответ «Оставить» — идёт через выход WARP, сутки на этой сети не спрашиваю")
             !here -> TunnelDebug.stage("Telegram: ответ «Переключить» запомнен на сутки для этой сети — переключу, когда туннель будет на ней")
             else -> {
@@ -2307,6 +2425,15 @@ class WarpVpnService : VpnService() {
     /** Что делать, если медиа Telegram тормозит: зависит от площадки и от того, где сейчас Telegram. */
     private fun tgMediaHint(site: String): String {
         val settings = serviceSettings()
+        // Выход Telegram выбран вручную (с 1.10.39) — подсказка о том, как его поменять.
+        if (tgFixed == AppExit.WARP) {
+            return "Telegram всегда идёт через WARP — так выбрано в «Туннелировании»; если медиа тормозит, " +
+                "поставь в строке Telegram «Само» или «Второй выход»"
+        }
+        if (tgFixed == AppExit.SECOND) {
+            return "Telegram идёт через второй выход — так выбрано в «Туннелировании»; если медиа тормозит, " +
+                "поставь в строке Telegram «WARP»"
+        }
         if (!ExitSite.isRussian(site)) {
             return "связь с Telegram есть, медиа тормозит, а выход WARP — не в России: попробуй другую точку"
         }
@@ -3100,6 +3227,13 @@ class WarpVpnService : VpnService() {
                     TunnelDebug.stage("приложения: режим «только выбранные», но список пуст — идут все")
                 } else {
                     selected.forEach { runCatching { builder.addAllowedApplication(it) } }
+                    // Приложения со своим выходом (с 1.10.39) идут через туннель, даже если галочку с
+                    // них сняли в другом режиме: выбранный выход значит «через туннель».
+                    val withExit = appExitRules().keys.filter { it != packageName && it !in selected }
+                    val addedExit = withExit.filter { runCatching { builder.addAllowedApplication(it) }.isSuccess }
+                    if (addedExit.isNotEmpty()) {
+                        TunnelDebug.stage("приложения: со своим выходом — ещё ${addedExit.size} (${addedExit.joinToString(", ")})")
+                    }
                     // Спутники выбранных (с 1.10.37, см. AppServices.companionsFor): Gemini на Android —
                     // оболочка, запросы к Google и проверку страны делает приложение Google. Без него
                     // в туннеле Gemini писал «Эта страна не поддерживается» (23.11): запросы шли мимо
@@ -3126,11 +3260,14 @@ class WarpVpnService : VpnService() {
             }
 
             dev.warpscout.core.state.ServiceSettings.APPS_EXCEPT -> {
-                if (selected.isEmpty()) {
+                // Приложение со своим выходом (с 1.10.39) из туннеля не исключаем.
+                val withExit = appExitRules().keys
+                val excluded = selected.filter { it !in withExit }
+                if (excluded.isEmpty()) {
                     TunnelDebug.stage("приложения: все через туннель (исключений нет)")
                 } else {
-                    selected.forEach { runCatching { builder.addDisallowedApplication(it) } }
-                    TunnelDebug.stage("приложения: все, кроме выбранных (${selected.size})")
+                    excluded.forEach { runCatching { builder.addDisallowedApplication(it) } }
+                    TunnelDebug.stage("приложения: все, кроме выбранных (${excluded.size})")
                 }
             }
 
@@ -3293,6 +3430,8 @@ class WarpVpnService : VpnService() {
             tun = null
         }
         runCatching { d?.stop() }
+        // Сколько стоил выход по приложениям в этой сессии (с 1.10.39) — строка в журнал.
+        d?.appExits?.let { table -> if (table.lookups > 0) runCatching { TunnelDebug.stage(table.summary()) } }
         // Диспетчера нет — Telegram через второй выход больше не идёт (с 1.10.34).
         if (tgViaSecond) {
             tgViaSecond = false
