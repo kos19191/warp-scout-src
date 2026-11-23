@@ -215,7 +215,8 @@ class WarpVpnService : VpnService() {
         // Какая сеть была в эти минуты и горел ли экран: на мобильной сети каждое пробуждение
         // модема стоит несравнимо дороже, чем на Wi-Fi, и без этих двух слов журнал не объясняет,
         // почему один и тот же час стоит по-разному.
-        val env = "сеть ${netKind()}, экран ${if (isScreenOn()) "вкл" else "выкл"}" +
+        val radio = tunnelRadio
+        val env = "сеть ${netKind()}${if (radio.isEmpty()) "" else "·$radio"}, экран ${if (isScreenOn()) "вкл" else "выкл"}" +
             batteryText().let { if (it.isEmpty()) "" else ", $it" } +
             energyText().let { if (it.isEmpty()) "" else ", $it" }
         val threads = threadCpuLine()
@@ -352,6 +353,12 @@ class WarpVpnService : VpnService() {
         val prevBytes = modemBytesMark
         modemBytesMark = bytesNow
         if (prevBytes < 0 || bytesNow < prevBytes) return ""
+        // Мобильный интерфейс сменился (rmnet_data0 → rmnet_data1), и сумма счётчиков прыгнула: за
+        // пять минут через модем 2 ГБ не проходят — это не трафик, строку пропускаем.
+        if (bytesNow - prevBytes > 2L * 1024 * 1024 * 1024) {
+            modemPacketsMark = counters?.second ?: -1L
+            return ""
+        }
         val text = StringBuilder("модем ${humanBytes(bytesNow - prevBytes)}")
         val packetsNow = counters?.second ?: -1L
         if (packetsNow >= 0) {
@@ -640,6 +647,16 @@ class WarpVpnService : VpnService() {
     /** Вид сети, на которой мы поднимались: Wi-Fi / мобильная / Ethernet. Для памяти точек. */
     @Volatile
     private var lastNetKind: String = ""
+
+    /**
+     * Тип мобильной связи сети туннеля: «LTE», «H+», «H»… (с 1.10.40, см. NetIdentity.radioOf); пусто —
+     * Wi-Fi или неизвестно. Меняется и без смены сети: телефон переходит LTE → H+ на той же сети.
+     */
+    @Volatile
+    private var tunnelRadio: String = ""
+
+    /** Пояснения про медленную связь, уже написанные на этом типе связи (чтобы не на каждом подъёме). */
+    private val slowRadioSaid = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /** Уже ждём возвращения сети, чтобы поднять туннель самой (см. [scheduleRevive]). */
     @Volatile
@@ -1007,7 +1024,14 @@ class WarpVpnService : VpnService() {
         val protected = runCatching { protect(socket) }.getOrDefault(false)
         if (!protected) {
             runCatching { socket.close() }
-            fail("protect() отказал — туннель не поднят во избежание петли", startId, myEpoch)
+            // Чаще всего у приложения нет разрешения на VPN: после переустановки его дают заново, а
+            // восстановление копии или автозапуск поднимают сервис раньше (журнал 23.11, 19:35).
+            val noPermission = runCatching { android.net.VpnService.prepare(this) != null }.getOrDefault(false)
+            fail(
+                if (noPermission) "нет разрешения на VPN (после переустановки его дают заново) — нажми «Подключить»"
+                else "protect() отказал — туннель не поднят во избежание петли",
+                startId, myEpoch
+            )
             return
         }
         runCatching { socket.connect(InetSocketAddress(cfg.endpoint.host, cfg.endpoint.port)) }
@@ -1021,6 +1045,7 @@ class WarpVpnService : VpnService() {
             if (net != baselineNetwork) TunnelDebug.stage("сеть туннеля: ${describeNetwork(net)}")
             baselineNetwork = net
             rememberNetKind(net)
+            updateRadio(net)
         }
         if (!alive()) {
             // Пока поднимались, пользователь нажал «Отключить» (или пошла следующая попытка).
@@ -1203,9 +1228,14 @@ class WarpVpnService : VpnService() {
             config = cfg,
             // Пять инициаций с интервалом 400 мс: первая же обычно отвечает за доли секунды,
             // а если датаграмм потерялся — следующая уходит не через 1.5 с, а почти сразу.
-            settings = NetSettings(
-                attempts = 5, timeoutMs = 1000, retryEveryMs = 400, junkPacketsBeforeHandshake = 1
-            ),
+            // На медленной связи (H+, H — с 1.10.40) — через 600 мс и ждём ещё 3 с после последней:
+            // 5,4 с вместо 2,6 (столько же, сколько у второго выхода внутри WARP).
+            settings = if (slowRadio()) {
+                noteSlowRadio("рукопожатие жду до 5,4 с, а не 2,6")
+                NetSettings(attempts = 5, timeoutMs = 3000, retryEveryMs = 600, junkPacketsBeforeHandshake = 1)
+            } else {
+                NetSettings(attempts = 5, timeoutMs = 1000, retryEveryMs = 400, junkPacketsBeforeHandshake = 1)
+            },
             // Экран решает, как часто будить радио: с погашенным экраном и без трафика keepalive
             // уходит реже. Сам сервис про экран ничего не решает — только сообщает состояние.
             screenOn = {
@@ -1270,6 +1300,8 @@ class WarpVpnService : VpnService() {
                 when {
                     // Пересогласование сессии — штатное событие раз в две минуты, но именно его
                     // отсутствие раньше выглядело как «туннель есть, интернета нет».
+                    // «rekey не удался» и «rekey не проходит» — не успех: раньше они шли с галочкой.
+                    line.startsWith("rekey не") -> TunnelDebug.stage(line)
                     line.startsWith("rekey") || line.contains("cookie") -> {
                         TunnelDebug.ok(line)
                     }
@@ -1595,7 +1627,8 @@ class WarpVpnService : VpnService() {
         val began = System.currentTimeMillis()
         TunnelState.dataCheckAt = began
         TunnelState.status = "рукопожатие есть — проверяю, идут ли данные"
-        val gate = DataGate()
+        val slow = slowRadio()
+        val gate = if (slow) DataGate.forSlowNetwork() else DataGate()
         try {
             while (current()) {
                 when (gate.step(System.currentTimeMillis() - began, p.probeReplies, p.bytesDown)) {
@@ -1622,7 +1655,10 @@ class WarpVpnService : VpnService() {
             DataGate.Verdict.NO_DATA -> NoiseBook.NO_DATA
         }
         // Свой сервер AmneziaWG в память шума не пишем: менять шум сами мы умеем только для WARP.
-        if (warp) runCatching { NoiseMemory.note(this, net, noise, kind, ep) }
+        // На медленной связи (с 1.10.40) — только «работал»: «встал» на H/H+ — чаще радио и очередь
+        // в соте, чем фильтр, а память у мобильной сети общая с LTE: шум потом обходили бы и там.
+        val blameNoise = warp && (!slow || verdict == DataGate.Verdict.FLOWING)
+        if (blameNoise) runCatching { NoiseMemory.note(this, net, noise, kind, ep) }
         if (verdict == DataGate.Verdict.FLOWING) {
             val ms = p.probeReplyMs.takeIf { it >= 0L } ?: gate.firstMs.coerceAtLeast(0L)
             TunnelDebug.ok(
@@ -1637,18 +1673,19 @@ class WarpVpnService : VpnService() {
             "данные не идут через $ep ($label): пошли и встали — первый ответ за ${gate.firstMs} мс, " +
                 "а через полторы секунды тишина"
         } else {
-            "данные не идут через $ep ($label): рукопожатие есть, а за ${DataGate.WINDOW_MS / 1000.0} с " +
+            "данные не идут через $ep ($label): рукопожатие есть, а за ${gate.windowMs / 1000.0} с " +
                 "ни ответа через туннель, ни одного пакета вниз"
         }
-        if (warp) {
+        if (slow) noteSlowRadio("остановку данных шуму и точке не приписываю — пробую дальше")
+        if (blameNoise) {
             val next = runCatching {
                 NoiseMemory.replacement(this, net, noise, JunkLibrary.serviceOrder().map { it.name })
             }.getOrNull()
             if (next != null) TunnelDebug.stage("на этой сети шум $noise замерзает — следующая попытка с шумом $next")
         }
         // Точку — в мёртвые для этой сети и из памяти «работала здесь», но только с маской: без шума
-        // виноват скорее сам чистый WireGuard, а не точка.
-        if (!plain) markDataDead(ep)
+        // виноват скорее сам чистый WireGuard, а не точка. На медленной связи — нет (см. выше).
+        if (!plain && !slow) markDataDead(ep)
         fail(reason, startId, myEpoch)
         return false
     }
@@ -1658,6 +1695,11 @@ class WarpVpnService : VpnService() {
      * [lastConfigText]). [onlyPlain] — только если он без шума. Свой сервер AmneziaWG не пишем.
      */
     private fun noteRunningNoise(kind: Char, onlyPlain: Boolean) {
+        // На медленной связи (с 1.10.40) замерзание шуму не приписываем — см. dataGate.
+        if (kind != NoiseBook.WORKED && slowRadio()) {
+            noteSlowRadio("остановку данных шуму не приписываю")
+            return
+        }
         runCatching {
             val text = lastConfigText ?: return@runCatching
             val cfg = WgConf.toWarpConfig("WARP", text) ?: return@runCatching
@@ -1869,8 +1911,8 @@ class WarpVpnService : VpnService() {
                 var result = runLinkCheck()
                 if (result.web == TunnelStatus.LINK_FAIL && linkAlive(myEpoch)) {
                     // Одна потеря — ещё не диагноз: первый запрос после подъёма иногда ждёт
-                    // маршрута. Повторяем через 4 секунды и только потом решаем.
-                    Thread.sleep(4_000L)
+                    // маршрута. Повторяем через 4 секунды (на медленной связи — через 6) и только потом решаем.
+                    Thread.sleep(if (slowRadio()) 6_000L else 4_000L)
                     if (!linkAlive(myEpoch)) return@Thread
                     result = runLinkCheck()
                 }
@@ -1919,8 +1961,14 @@ class WarpVpnService : VpnService() {
                     }
                 } else if (result.web != TunnelStatus.LINK_FAIL && autoSpeed && settings.speedAuto && !quietSession) {
                     // Связь есть — заодно проверим, что данные не встают через пару десятков
-                    // килобайт («заморозка»), и покажем примерную скорость.
-                    startSpeedTest(myEpoch, "после подъёма", full = false, delayMs = 400L)
+                    // килобайт («заморозка»), и покажем примерную скорость. На медленной связи (с
+                    // 1.10.40) — нет: полмегабайта на 0,3–1 Мбит/с — это 5–15 с занятого канала ровно
+                    // тогда, когда приложения переподключаются, а «встал» там чаще радио, чем фильтр.
+                    if (slowRadio()) {
+                        noteSlowRadio("замер скорости после подъёма пропускаю — он занял бы весь канал")
+                    } else {
+                        startSpeedTest(myEpoch, "после подъёма", full = false, delayMs = 400L)
+                    }
                 }
             } catch (e: InterruptedException) {
                 // штатная остановка вместе с сервисом
@@ -1959,7 +2007,9 @@ class WarpVpnService : VpnService() {
             webNote = "адрес проверки не в маршрутах туннеля"
         } else {
             val t0 = android.os.SystemClock.elapsedRealtime()
-            val body = runCatching { httpGetSmall(dev.warpscout.core.net.CfTrace.URL_BY_IP, 5_000) }
+            // На медленной связи (H+, H — с 1.10.40) ответ под нагрузкой идёт секундами: ждём 10 с, а не 5.
+            val slow = slowRadio()
+            val body = runCatching { httpGetSmall(dev.warpscout.core.net.CfTrace.URL_BY_IP, if (slow) 10_000 else 5_000) }
             val trace = dev.warpscout.core.net.CfTrace.parse(body.getOrNull())
             if (trace != null) {
                 webMs = (android.os.SystemClock.elapsedRealtime() - t0).toInt()
@@ -1982,7 +2032,7 @@ class WarpVpnService : VpnService() {
             for (host in tgRouted) {
                 val t0 = android.os.SystemClock.elapsedRealtime()
                 val ok = runCatching {
-                    java.net.Socket().use { sock -> sock.connect(InetSocketAddress(host, 443), 3_000) }
+                    java.net.Socket().use { sock -> sock.connect(InetSocketAddress(host, 443), if (slowRadio()) 6_000 else 3_000) }
                 }.isSuccess
                 if (ok) {
                     tg = TunnelStatus.LINK_OK
@@ -2188,6 +2238,8 @@ class WarpVpnService : VpnService() {
      */
     private fun tgMediaDue(site: String): Boolean {
         if (!isScreenOn()) return false
+        // Загрузки по 256 КБ (и вторая — для сравнения) на медленной связи не делаем (с 1.10.40).
+        if (slowRadio()) return false
         val now = System.currentTimeMillis()
         if (tgMediaCheckedAt <= 0L) return true
         if (site.isNotEmpty() && site != tgMediaCheckedSite) return true
@@ -3509,6 +3561,9 @@ class WarpVpnService : VpnService() {
                 val kind = runCatching { dev.warpscout.app.NetIdentity.keyOf(this@WarpVpnService, network, caps) }
                     .getOrDefault(kindOf(caps))
                 if (kind.isNotEmpty()) lastNetKind = kind
+                // Тип связи сети туннеля (с 1.10.40): LTE → H+ → H бывает и без смены сети — тогда в
+                // журнале видно, когда именно связь стала медленной.
+                if (network == baselineNetwork) updateRadio(network, announce = true)
             }
 
             override fun onAvailable(network: android.net.Network) {
@@ -3522,6 +3577,7 @@ class WarpVpnService : VpnService() {
                 val base = baselineNetwork
                 if (base == null) {
                     baselineNetwork = network
+                    updateRadio(network)
                     TunnelDebug.stage("сеть туннеля: ${describeNetwork(network)}")
                     if (networkChanged) {
                         // Сети не было (или сменилась, пока её не было) — поднимаем заново.
@@ -3531,6 +3587,7 @@ class WarpVpnService : VpnService() {
                 }
                 if (network == base) return
                 baselineNetwork = network
+                updateRadio(network)
                 networkChanged = true
                 restartAfterNetworkChange("новая сеть: ${describeNetwork(network)}")
             }
@@ -3701,7 +3758,8 @@ class WarpVpnService : VpnService() {
             caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
             else -> "сеть"
         }
-        "$kind ${network}"
+        val radio = dev.warpscout.app.NetIdentity.radioOf(this, network)
+        if (radio.isEmpty()) "$kind ${network}" else "$kind ${network} · $radio"
     }.getOrDefault("сеть")
 
     /**
@@ -3754,7 +3812,14 @@ class WarpVpnService : VpnService() {
             // Медленный повтор и сам редкий — бюджет быстрых попыток к нему не относится. Раньше
             // он упирался в тот же бюджет: «медленный повтор 8 из 12» тут же получал
             // «приостановлено» и заводил ещё один медленный повтор — к 23:14 их шло по пять сразу.
-            if (!slowAttempt && autoRestartTimes.size >= AUTO_RESTART_LIMIT) {
+            // Смена сети (с 1.10.40) лимит не тратит и им не останавливается: старый сокет после неё
+            // мёртв наверняка, и переподняться нужно в любом случае. Телефон в дороге переходит
+            // LTE ↔ H+ ↔ Wi-Fi, и система каждый раз заводит новую сеть: в журнале 23.11, 13:59–14:01
+            // седьмая смена за 10 минут выключила рабочий туннель на минуты («повторю через 30 с»,
+            // потом 1 и 2 минуты). Неудачный переподъём после смены сети («повтор после неудачи»)
+            // лимит тратит, как раньше, — бесконечного цикла на мёртвой сети не будет.
+            val netEvent = why.startsWith("новая сеть") || why.startsWith("сеть появилась") || why.startsWith("сеть пропала")
+            if (!slowAttempt && !netEvent && autoRestartTimes.size >= AUTO_RESTART_LIMIT) {
                 // Быстрые попытки кончились — но это не повод остаться выключенным навсегда:
                 // медленный режим, одна попытка через растущую паузу (30 с, 1, 2, дальше по 5 мин).
                 slowRetries += 1
@@ -3783,7 +3848,7 @@ class WarpVpnService : VpnService() {
                     cancelWaits()
                 }
                 releaseDead = true
-            } else {
+            } else if (!netEvent) {
                 autoRestartTimes.addLast(now)
             }
         }
@@ -4806,7 +4871,8 @@ class WarpVpnService : VpnService() {
         Thread.sleep(SENTRY_FIRST_MS)
         while (alive()) {
             // Только при живом туннеле и настоящей сети: во время переподъёма пробы бессмысленны.
-            if (TunnelState.up && hasUsableNetwork()) {
+            // На медленной связи (с 1.10.40) не ходит: пробы под нагрузкой метили бы живые точки молчащими.
+            if (TunnelState.up && hasUsableNetwork() && !slowRadio()) {
                 errorPasses = if (sentryPass(cfg, peerPublic, myEpoch) == SENTRY_ERRORS) errorPasses + 1 else 0
                 if (errorPasses >= 3) {
                     sentryOff = true
@@ -5033,6 +5099,42 @@ class WarpVpnService : VpnService() {
             dev.warpscout.app.NetIdentity.keyOf(this, network, cm?.getNetworkCapabilities(network))
         }.getOrDefault("")
         if (kind.isNotEmpty()) lastNetKind = kind
+    }
+
+    /**
+     * Тип связи сети туннеля сейчас (с 1.10.40): известной сети туннеля, иначе — системной сети по
+     * умолчанию (до подъёма точки отсчёта ещё нет).
+     */
+    private fun currentRadio(): String {
+        val known = tunnelRadio
+        if (known.isNotEmpty() || baselineNetwork != null) return known
+        return runCatching { dev.warpscout.app.NetIdentity.radioOf(this, underlyingNetwork()) }.getOrDefault("")
+    }
+
+    /**
+     * Медленная мобильная связь — H+, H, 3G, EDGE (с 1.10.40). На ней задержка под нагрузкой доходит
+     * до секунд: окна рукопожатия и проверки данных шире, тяжёлые проверки после подъёма не идут, а
+     * замерзания шуму не приписываются (журнал 23.11, 15:13–15:56: пинг 1157 мс, замер 1,1 Мбит/с).
+     */
+    private fun slowRadio(): Boolean = dev.warpscout.app.NetIdentity.isSlowRadio(currentRadio())
+
+    /**
+     * Запомнить тип связи сети туннеля. Сменился — пояснения про медленную связь снова пишутся один раз;
+     * [announce] — строка «мобильная связь: LTE → H+» (смена типа на той же сети).
+     */
+    private fun updateRadio(network: android.net.Network?, announce: Boolean = false) {
+        val radio = runCatching { dev.warpscout.app.NetIdentity.radioOf(this, network) }.getOrDefault("")
+        val was = tunnelRadio
+        if (radio == was) return
+        tunnelRadio = radio
+        slowRadioSaid.clear()
+        if (announce && radio.isNotEmpty() && was.isNotEmpty()) TunnelDebug.stage("мобильная связь: $was → $radio")
+    }
+
+    /** Пояснение про медленную связь — один раз на тип связи, а не на каждом подъёме. */
+    private fun noteSlowRadio(what: String) {
+        val radio = currentRadio()
+        if (slowRadioSaid.add("$radio|$what")) TunnelDebug.stage("медленная мобильная связь ($radio): $what")
     }
 
     /** Вид сети для памяти точек: последний известный, иначе — по активной сети. */

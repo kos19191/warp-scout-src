@@ -20,7 +20,8 @@ package dev.warpscout.core.tunnel
 class DataGate(
     private val probeAtMs: LongArray = PROBE_AT_MS,
     private val lateMs: Long = LATE_MS,
-    private val windowMs: Long = WINDOW_MS
+    /** Всё окно проверки, мс: после него без позднего ответа — [Verdict.FROZEN] или [Verdict.NO_DATA]. */
+    val windowMs: Long = WINDOW_MS
 ) {
     enum class Step { SEND_PROBE, WAIT, DONE }
 
@@ -87,5 +88,18 @@ class DataGate(
 
         /** Всё окно проверки: последняя проба плюс время на ответ. */
         const val WINDOW_MS = 4_000L
+
+        /** Медленная связь (H+, H, 3G, EDGE — с 1.10.40): поздние пробы на 3 и 4,5 с, окно 8 с. */
+        val SLOW_PROBE_AT_MS = longArrayOf(0L, 1_500L, 3_000L, 4_500L)
+        const val SLOW_LATE_MS = 2_500L
+        const val SLOW_WINDOW_MS = 8_000L
+
+        /**
+         * Проверка для медленной мобильной связи. На H/H+ под нагрузкой ответ идёт секундами, и
+         * обычное окно (поздняя проба на 2,6 с, конец — 4 с) объявляло «пошли и встали» туннелю, по
+         * которому данные шли, только медленно. Правило то же — «данные идут и после начала», — шкала
+         * вдвое длиннее.
+         */
+        fun forSlowNetwork(): DataGate = DataGate(SLOW_PROBE_AT_MS, SLOW_LATE_MS, SLOW_WINDOW_MS)
     }
 }

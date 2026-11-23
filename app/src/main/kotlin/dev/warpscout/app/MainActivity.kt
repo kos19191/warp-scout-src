@@ -5282,7 +5282,12 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                     }
                 }.onFailure { t ->
                     TunnelDebug.error("бекап: «$fileName» не прочитался — " + SafeMode.describe(t))
-                    banner(getString(R.string.backup_file_fail, SafeMode.describe(t)), error = true)
+                    if (t is SecurityException) {
+                        runCatching { offerOtherPicker(fileName) }
+                            .onFailure { banner(getString(R.string.backup_file_fail, SafeMode.describe(t)), error = true) }
+                    } else {
+                        banner(getString(R.string.backup_file_fail, SafeMode.describe(t)), error = true)
+                    }
                 }
             }
         }.apply { isDaemon = true; name = "warpscout-backup-read" }.start()
@@ -5315,6 +5320,33 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         val details = Backup.describe(text)
         TunnelDebug.stage("бекап: выбран файл «$fileName»" + (details?.let { " ($it)" } ?: ""))
         confirmRestore(fileName, details, pickOther = false) { Backup.restoreText(this, text) }
+    }
+
+    /**
+     * Samsung не дал прочитать выбранный файл (журнал 23.11, 19:31 и 19:32: «SecurityException:
+     * com.samsung.android.providers.media has no access to content://media/…»). Так бывает с файлами,
+     * открытыми через «Загрузки» или «Недавние»: окно отдаёт ссылку медиатеки, а она файл не читает.
+     * Тот же файл через «Мои файлы» или «Внутреннюю память» открывается — в журнале с третьей попытки.
+     */
+    private fun offerOtherPicker(fileName: String) {
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(R.string.backup_denied_title)
+            .setMessage(getString(R.string.backup_denied_message, fileName))
+            .setNegativeButton(android.R.string.cancel, null)
+            .setNeutralButton(R.string.backup_pick_again) { _, _ -> runCatching { openBackupPicker() } }
+        if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) {
+            // «Мои файлы» отдаёт файл через свой провайдер, без медиатеки. Проверять заранее, есть ли
+            // оно, нельзя без запроса списка приложений, — пробуем открыть, не вышло — обычное окно.
+            dialog.setPositiveButton(R.string.backup_pick_myfiles) { _, _ ->
+                val myFiles = Intent(Intent.ACTION_GET_CONTENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                    setPackage("com.sec.android.app.myfiles")
+                }
+                runCatching { pickBackup.launch(myFiles) }.onFailure { runCatching { openBackupPicker() } }
+            }
+        }
+        dialog.show()
     }
 
     /** Имя выбранного файла, как его показывает система. */

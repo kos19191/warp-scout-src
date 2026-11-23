@@ -201,6 +201,10 @@
     <string name="backup_picker_fail">Окно выбора файла не открылось</string>
     <string name="backup_file_fail">Файл копии не прочитался: %1$s</string>
     <string name="backup_file_big">Файл больше 4 МБ — это не бекап WarpScout</string>
+    <string name="backup_denied_title">Samsung не дал прочитать файл</string>
+    <string name="backup_denied_message">«%1$s» открыт через «Загрузки» или «Недавние» — оттуда Samsung отдаёт не все файлы. Откройте его через «Мои файлы» или в окне выбора: ☰ → «Внутренняя память» → Download.</string>
+    <string name="backup_pick_myfiles">Мои файлы</string>
+    <string name="backup_pick_again">Выбрать снова</string>
     <string name="backup_file_bad">«%1$s» — не бекап WarpScout. Нужен файл warpscout-….bak, сохранённый кнопкой «Сохранить резервную копию»</string>
     <string name="backup_restore_title">Восстановить настройки?</string>
     <string name="backup_restore_message">Текущие настройки будут заменены содержимым %1$s. Туннель после этого лучше переподключить.</string>

@@ -248,6 +248,18 @@ class DataPlane(
     /** Сколько раз подряд не удалось пересогласовать сессию (rekey). */
     private var rekeyFailures = 0
 
+    /** Про «rekey не проходит, а данные идут» уже написали — до следующего удачного rekey молчим. */
+    private var slowRekeySaid = false
+
+    /**
+     * Будильник таймера (с 1.10.40). Таймер спит до ближайшего события, в тишине — до минуты. Если
+     * трафик пошёл после простоя, а сессия уже старше [NetSettings.rekeyAfterMs], отправитель будит
+     * его: rekey идёт в фоне по старой, ещё действующей сессии, а не на отправителе (раньше
+     * отправитель сам ждал рукопожатия, и все пакеты стояли — на H/H+ по 2,6 с каждые 5 с).
+     */
+    private val timerWake = Object()
+    private var timerKicked = false
+
     /** Сколько раз ПОДРЯД не удалось отправить пакет: несколько подряд = сеть ушла. */
     private val sendFailures = java.util.concurrent.atomic.AtomicInteger(0)
 
@@ -525,14 +537,18 @@ class DataPlane(
 
         sendOne()
         nextSendAt = startedAt + spacing
-        var deadline = startedAt + spacing * (attempts - 1) + settings.timeoutMs
+        // Пересогласование ждёт дольше подъёма (с 1.10.40, см. NetSettings.rekeyWaitMs): старая сессия
+        // ещё действует, а ответ, пришедший после конца окна, пропал бы — новое окно ждёт уже свои
+        // инициации. При подъёме окно прежнее: молчащую точку надо менять быстро.
+        val waitMs = if (initial) settings.timeoutMs.toLong() else maxOf(settings.timeoutMs.toLong(), settings.rekeyWaitMs)
+        var deadline = startedAt + spacing * (attempts - 1) + waitMs
         while (!stopped && System.currentTimeMillis() < deadline) {
             val now = System.currentTimeMillis()
             if (sent < attempts && now >= nextSendAt) {
                 sendOne()
                 nextSendAt = now + spacing
                 log("повтор инициации №${sent} — ответа не было ${spacing} мс")
-                if (sent >= attempts) {
+                if (sent >= attempts && initial) {
                     // Все инициации уже ушли. Ждать полный timeout нечего: пять датаграмм подряд
                     // без единого ответа — это молчащая точка, а не «медленная сеть». В ночном
                     // журнале здесь стояло «5 инициаций за 17946 мс без ответа» — 15 секунд
@@ -699,7 +715,7 @@ class DataPlane(
             if (now < nextEvent) {
                 val sleep = (nextEvent - now).coerceIn(250L, 60_000L)
                 try {
-                    Thread.sleep(sleep)
+                    sleepTimer(sleep)
                 } catch (e: InterruptedException) {
                     return
                 }
@@ -712,7 +728,7 @@ class DataPlane(
                 warnedExpiry = false
                 val sleep = (nextKeepaliveAt - now).coerceIn(250L, 60_000L)
                 try {
-                    Thread.sleep(sleep)
+                    sleepTimer(sleep)
                 } catch (e: InterruptedException) {
                     return
                 }
@@ -721,9 +737,9 @@ class DataPlane(
 
             if (age >= settings.rekeyAfterMs && now - lastAttemptAt >= settings.rekeyRetryMs) {
                 lastAttemptAt = now
-                if (age >= 180_000 && !warnedExpiry) {
+                if (age >= settings.rejectAfterMs && !warnedExpiry) {
                     warnedExpiry = true
-                    log("сессия старше 180 с — сервер её уже мог выбросить, пересогласовываю")
+                    log("сессия старше ${settings.rejectAfterMs / 1000} с — сервер её уже мог выбросить, пересогласовываю")
                 }
                 if (!rekey(force = true)) {
                     lastRekeyFailure = failureReason ?: "rekey не удался"
@@ -731,15 +747,35 @@ class DataPlane(
                     log("rekey не удался: ${lastRekeyFailure}")
                     // Два провала пересогласования подряд — сессия мертва, хотя туннель числится
                     // поднятым. Именно так выглядит «подключено, но ничего не открывается».
+                    //
+                    // Но не тогда, когда сервер, пока мы ждали ответа на rekey, слал данные по нынешней
+                    // сессии, а она ещё не просрочена (с 1.10.40): путь жив, просто ответ идёт дольше
+                    // окна — так бывает на H/H+ под нагрузкой. Раньше такой туннель рвали (журнал 23.11,
+                    // 15:13 и 15:50), а переподъём на медленной сети стоил секунды и обрыв всех
+                    // соединений. Просроченную сессию сервер уже не примет — тогда рвём, как раньше.
                     if (rekeyFailures >= 2) {
-                        rekeyFailures = 0
-                        val reason = "сессия не пересогласовывается: $lastRekeyFailure"
-                        log(reason)
-                        onFatal?.invoke(reason)
+                        val after = System.currentTimeMillis()
+                        val alive = lastRxAt >= now
+                        val sessionAge = if (sessionStartedAt == 0L) 0L else after - sessionStartedAt
+                        if (alive && sessionAge < settings.rejectAfterMs) {
+                            if (!slowRekeySaid) {
+                                slowRekeySaid = true
+                                log(
+                                    "rekey не проходит ($rekeyFailures раза подряд), но данные по нынешней сессии идут — " +
+                                        "сеть медленная, туннель не рву: пробую ещё, пока сессии нет ${settings.rejectAfterMs / 1000} с"
+                                )
+                            }
+                        } else {
+                            rekeyFailures = 0
+                            val reason = "сессия не пересогласовывается: $lastRekeyFailure"
+                            log(reason)
+                            onFatal?.invoke(reason)
+                        }
                     }
                 } else {
                     warnedExpiry = false
                     rekeyFailures = 0
+                    slowRekeySaid = false
                 }
                 continue
             }
@@ -830,6 +866,21 @@ class DataPlane(
         return false
     }
 
+    /** Сон таймера до [ms] мс; [kickTimer] будит раньше. Прерывание — штатная остановка, как у sleep. */
+    private fun sleepTimer(ms: Long) {
+        synchronized(timerWake) {
+            if (!timerKicked) timerWake.wait(ms)
+            timerKicked = false
+        }
+    }
+
+    private fun kickTimer() {
+        synchronized(timerWake) {
+            timerKicked = true
+            timerWake.notifyAll()
+        }
+    }
+
     private fun tunToUdp() {
         val mtu = config.mtu.coerceIn(576, 1420)
         val buf = ByteArray(mtu)
@@ -858,7 +909,23 @@ class DataPlane(
             // (REJECT_AFTER_TIME), и отправлять им бессмысленно. Пересогласовываем здесь, на
             // отправителе: таймер в это время спит и радио не будит, а ожидание ответа (0,2–0,4 с)
             // случается ровно тогда, когда пользователь и так ждёт загрузки.
-            if (sessionAgeMs() > settings.rekeyAfterMs) rekey()
+            //
+            // С 1.10.40 — только для просроченной сессии. Раньше отправитель ждал rekey уже со 150 с,
+            // пока сессия ещё действовала: на медленной сети пакеты стояли на всё окно рукопожатия
+            // при каждой попытке. Действующая сессия везёт пакеты дальше, а rekey делает таймер —
+            // если он спал, пока было тихо, будим его.
+            val age = sessionAgeMs()
+            if (age >= settings.rejectAfterMs) {
+                rekey()
+            } else if (age > settings.rekeyAfterMs) {
+                val now = System.currentTimeMillis()
+                if (lastUserTrafficAt == 0L || now - lastUserTrafficAt >= settings.rekeyAfterMs) {
+                    // Сначала отметка «трафик идёт», потом будильник: проснувшись, таймер должен
+                    // увидеть трафик, а не тишину, — иначе он снова уснул бы до keepalive.
+                    lastUserTrafficAt = now
+                    kickTimer()
+                }
+            }
             // Без копии: буфер tun переиспользуется, а длина передаётся отдельно. Раньше под
             // каждый пакет делался ByteArray(n) только ради того, чтобы «подрезать» буфер.
             val packet: ByteArray? = synchronized(lock) {

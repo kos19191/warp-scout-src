@@ -91,6 +91,12 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             dataPlaneRekey()
             dataPlaneRetryAfterLoss()
         }
+        section("медленная мобильная связь: H+, H (1.10.40)") {
+            slowNetSettings()
+            dataPlaneSlowRekey()
+            dataPlaneRekeyAliveKeeps()
+            dataPlaneRekeyDeadFails()
+        }
         section("junk-профили") {
             quicMaskRoundTrip()
             templateRendering()
@@ -1645,12 +1651,13 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         fun runGate(
             replyIf: (Long) -> Boolean,
             rtt: Long = 80L,
-            bytesAt: (Long) -> Long = { 0L }
+            bytesAt: (Long) -> Long = { 0L },
+            slowNet: Boolean = false
         ): Pair<DataGate.Verdict?, Long> {
-            val gate = DataGate()
+            val gate = if (slowNet) DataGate.forSlowNetwork() else DataGate()
             val sentAt = ArrayList<Long>()
             var t = 0L
-            while (t <= 8_000L) {
+            while (t <= 12_000L) {
                 val replies = sentAt.count { s0 -> replyIf(s0) && t >= s0 + rtt }
                 when (gate.step(t, replies, bytesAt(t))) {
                     DataGate.Step.SEND_PROBE -> sentAt += t
@@ -1676,6 +1683,19 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         val slow = runGate({ true }, rtt = 1_200L)
         expect("проверка данных: медленная сеть (1,2 с на ответ) — рабочий", slow.first, DataGate.Verdict.FLOWING)
         check("проверка данных: укладывается в окно", flowing.second <= DataGate.WINDOW_MS && slow.second <= DataGate.WINDOW_MS)
+
+        // H/H+ под нагрузкой (1.10.40): ответ через 4,5 с. Обычное окно (4 с) кончается раньше —
+        // «данных нет», хотя они идут; окно медленной связи (8 с) их дожидается.
+        expect("медленная связь: ответ через 4,5 с — обычная проверка его не дожидается",
+            runGate({ true }, rtt = 4_500L).first, DataGate.Verdict.NO_DATA)
+        val slowGate = runGate({ true }, rtt = 4_500L, slowNet = true)
+        expect("медленная связь: ответ через 4,5 с — для H/H+ рабочий", slowGate.first, DataGate.Verdict.FLOWING)
+        check("медленная связь: решение в пределах окна", slowGate.second <= DataGate.SLOW_WINDOW_MS, "t=${slowGate.second}")
+        // Правило то же: «пошли и встали» и на медленной связи — заморозка, тишина — «данных нет».
+        expect("медленная связь: «пошли и встали» — всё ещё заморозка",
+            runGate({ it < 500L }, slowNet = true).first, DataGate.Verdict.FROZEN)
+        expect("медленная связь: ни ответа — данных нет", runGate({ false }, slowNet = true).first, DataGate.Verdict.NO_DATA)
+        expect("медленная связь: окно проверки — 8 с", DataGate.forSlowNetwork().windowMs, 8_000L)
     }
 
     /**
@@ -2068,13 +2088,13 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         )
         check(
             "батарея: пересогласование успевает до жёсткого предела протокола",
-            NetSettings().rekeyAfterMs < 180_000L,
+            NetSettings().rekeyAfterMs < NetSettings().rejectAfterMs,
             "${NetSettings().rekeyAfterMs}"
         )
         check(
             "батарея: запас на повторные попытки не меньше трёх штук",
-            (180_000L - NetSettings().rekeyAfterMs) / NetSettings().rekeyRetryMs >= 3,
-            "${(180_000L - NetSettings().rekeyAfterMs) / NetSettings().rekeyRetryMs}"
+            (NetSettings().rejectAfterMs - NetSettings().rekeyAfterMs) / NetSettings().rekeyRetryMs >= 3,
+            "${(NetSettings().rejectAfterMs - NetSettings().rekeyAfterMs) / NetSettings().rekeyRetryMs}"
         )
     }
 
@@ -2686,6 +2706,191 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
                 h.tunOut.poll(4000L) != null,
                 "back=null; ${h.log}"
             )
+        } finally {
+            h.stop()
+            server.stop()
+        }
+    }
+
+    /** Окна пересогласования (1.10.40): ответ на rekey ждём дольше, чем 2,6 с прежнего окна. */
+    private fun slowNetSettings() {
+        val service = NetSettings(attempts = 5, timeoutMs = 1000, retryEveryMs = 400)
+        val rekeyWindow = service.retryEveryMs * (service.attempts - 1) + maxOf(service.timeoutMs.toLong(), service.rekeyWaitMs)
+        check("медленная связь: окно rekey шире прежних 2,6 с (журнал 23.11, 15:50 — ответ шёл 4,8 с)",
+            rekeyWindow >= 6_000L, "$rekeyWindow мс")
+        expect("медленная связь: предел сессии — 180 с (REJECT_AFTER_TIME)", NetSettings().rejectAfterMs, 180_000L)
+        check("медленная связь: rekey начинается раньше предела, есть время на повторы",
+            NetSettings().rejectAfterMs - NetSettings().rekeyAfterMs >= 3 * NetSettings().rekeyRetryMs)
+    }
+
+    /** Data plane для проверок медленной сети: с отчётом о смерти сессии ([fatal]). */
+    private class SlowHarness(
+        val plane: dev.warpscout.core.tunnel.DataPlane,
+        val tunIn: QueueInputStream,
+        val tunOut: QueueOutputStream,
+        val log: StringBuffer,
+        val fatal: java.util.concurrent.atomic.AtomicReference<String?>,
+        val fatalAt: java.util.concurrent.atomic.AtomicLong,
+    ) {
+        fun stop() {
+            runCatching { plane.stop() }
+            runCatching { tunIn.close() }
+        }
+
+        fun awaitUp(ms: Long): Boolean {
+            val until = System.currentTimeMillis() + ms
+            while (System.currentTimeMillis() < until) {
+                if (plane.handshakeOk) return true
+                Thread.sleep(20)
+            }
+            return plane.handshakeOk
+        }
+    }
+
+    private fun startSlowPlane(serverPriv: ByteArray, port: Int, settings: NetSettings): SlowHarness {
+        val clientPriv = ByteArray(32) { (it * 7 + 29).toByte() }
+        val tunIn = QueueInputStream()
+        val tunOut = QueueOutputStream()
+        val sock = java.net.DatagramSocket().apply {
+            connect(java.net.InetSocketAddress("127.0.0.1", port))
+            soTimeout = 300
+        }
+        val config = WarpConfig(
+            name = "test",
+            account = WarpAccount(Crypto.base64(clientPriv), Crypto.base64(Crypto.publicOf(serverPriv))),
+            endpoint = Endpoint("127.0.0.1", port),
+            junk = JunkLibrary.none(),
+            persistentKeepalive = null
+        )
+        val log = StringBuffer()
+        val fatal = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        val fatalAt = java.util.concurrent.atomic.AtomicLong(0L)
+        val plane = dev.warpscout.core.tunnel.DataPlane(
+            udp = dev.warpscout.core.tunnel.SocketUdpChannel(sock, Endpoint("127.0.0.1", port), 300),
+            tunInput = tunIn,
+            tunOutput = tunOut,
+            config = config,
+            settings = settings,
+            log = { line -> log.append(line).append("; ") },
+            onFatal = { reason ->
+                if (fatal.compareAndSet(null, reason)) fatalAt.set(System.currentTimeMillis())
+            }
+        )
+        Thread { plane.run() }.apply { isDaemon = true; start() }
+        return SlowHarness(plane, tunIn, tunOut, log, fatal, fatalAt)
+    }
+
+    /**
+     * H/H+ под нагрузкой: сервер отвечает на rekey через 1,5 с — дольше прежнего окна (0,6 с в этих
+     * ускоренных настройках), но в пределах окна пересогласования. Сессия обязана обновиться, а
+     * туннель — не быть объявлен мёртвым.
+     */
+    private fun dataPlaneSlowRekey() {
+        val serverPriv = ByteArray(32) { (it * 11 + 3).toByte() }
+        val server = LoopbackServer(serverPriv, delayResponse = { n -> if (n == 1) 0L else 1_500L }).start()
+        val h = startSlowPlane(serverPriv, server.port, NetSettings(
+            attempts = 2, timeoutMs = 400, retryEveryMs = 200,
+            rekeyAfterMs = 600, rekeyRetryMs = 150, rekeyWaitMs = 3_000
+        ))
+        try {
+            check("медленная связь: сессия поднялась", h.awaitUp(4_000), h.log.toString())
+            val until = System.currentTimeMillis() + 5_000
+            while (h.plane.rekeyCount < 1 && System.currentTimeMillis() < until) {
+                h.tunIn.offer(testPacket())
+                h.tunOut.poll(40L)
+            }
+            check("медленная связь: rekey дождался ответа через 1,5 с", h.plane.rekeyCount >= 1,
+                "rekey=${h.plane.rekeyCount}, инициаций=${server.initiations.get()}; ${h.log}")
+            check("медленная связь: туннель не объявлен мёртвым", h.fatal.get() == null, h.fatal.get() ?: "")
+            val ip = testPacket()
+            h.tunIn.offer(ip)
+            check("медленная связь: данные идут после медленного rekey", h.tunOut.poll(3_000L)?.contentEquals(ip) == true, h.log.toString())
+        } finally {
+            h.stop()
+            server.stop()
+        }
+    }
+
+    /**
+     * Сервер на rekey молчит, а данные по нынешней сессии возит (журнал 23.11, 15:50). Туннель не
+     * рвём, пока сессия не старше предела ([NetSettings.rejectAfterMs], здесь 3 с), — и всё это время
+     * пакеты идут без задержек: отправитель не стоит на пересогласовании. После предела — обрыв.
+     */
+    private fun dataPlaneRekeyAliveKeeps() {
+        val serverPriv = ByteArray(32) { (it * 13 + 5).toByte() }
+        val server = LoopbackServer(serverPriv, answerInitiation = { it == 1 }).start()
+        val h = startSlowPlane(serverPriv, server.port, NetSettings(
+            attempts = 2, timeoutMs = 400, retryEveryMs = 150,
+            rekeyAfterMs = 500, rekeyRetryMs = 150, rekeyWaitMs = 600, rejectAfterMs = 3_000
+        ))
+        try {
+            check("rekey молчит, данные идут: сессия поднялась", h.awaitUp(4_000), h.log.toString())
+            val upAt = System.currentTimeMillis()
+            var worst = 0L
+            var lost = 0
+            var echoed = 0
+            while (System.currentTimeMillis() - upAt < 2_700L && h.fatal.get() == null) {
+                val ip = testPacket()
+                val sent = System.currentTimeMillis()
+                h.tunIn.offer(ip)
+                val back = h.tunOut.poll(1_500L)
+                if (back == null) lost++ else {
+                    echoed++
+                    worst = maxOf(worst, System.currentTimeMillis() - sent)
+                }
+                Thread.sleep(30)
+            }
+            val keptFor = System.currentTimeMillis() - upAt
+            check("rekey молчит, данные идут: пересогласование и правда не проходит", h.plane.rekeyCount == 0,
+                "rekey=${h.plane.rekeyCount}")
+            check("rekey молчит, данные идут: туннель не рвётся, пока сессия действует",
+                h.fatal.get() == null, "${h.fatal.get()} через $keptFor мс; ${h.log}")
+            check("rekey молчит, данные идут: пакеты не стоят на пересогласовании",
+                worst < 350L && lost == 0 && echoed > 20, "худший ответ $worst мс, потеряно $lost, дошло $echoed")
+            check("rekey молчит, данные идут: в журнале — «сеть медленная, туннель не рву»",
+                h.log.contains("туннель не рву"), h.log.toString().takeLast(300))
+            // Дальше сессия просрочена — сервер её не примет: рвём, как раньше.
+            val until = System.currentTimeMillis() + 3_000
+            while (h.fatal.get() == null && System.currentTimeMillis() < until) {
+                h.tunIn.offer(testPacket())
+                h.tunOut.poll(50L)
+            }
+            val after = if (h.fatalAt.get() > 0L) h.fatalAt.get() - upAt else -1L
+            check("rekey молчит, данные идут: после предела сессии — обрыв",
+                h.fatal.get()?.contains("не пересогласовывается") == true && after >= 3_000L,
+                "${h.fatal.get()} через $after мс")
+        } finally {
+            h.stop()
+            server.stop()
+        }
+    }
+
+    /** Сервер умер совсем: на rekey молчит и данных не возит — обрыв после двух неудач, как раньше. */
+    private fun dataPlaneRekeyDeadFails() {
+        val serverPriv = ByteArray(32) { (it * 17 + 9).toByte() }
+        val dead = java.util.concurrent.atomic.AtomicBoolean(false)
+        val server = LoopbackServer(
+            serverPriv,
+            answerInitiation = { it == 1 },
+            answerData = { if (dead.get()) null else it }
+        ).start()
+        val h = startSlowPlane(serverPriv, server.port, NetSettings(
+            attempts = 2, timeoutMs = 400, retryEveryMs = 150,
+            rekeyAfterMs = 500, rekeyRetryMs = 150, rekeyWaitMs = 600, rejectAfterMs = 60_000
+        ))
+        try {
+            check("сервер умер: сессия поднялась", h.awaitUp(4_000), h.log.toString())
+            val upAt = System.currentTimeMillis()
+            dead.set(true)
+            val until = upAt + 5_000
+            while (h.fatal.get() == null && System.currentTimeMillis() < until) {
+                h.tunIn.offer(testPacket())
+                h.tunOut.poll(50L)
+            }
+            val after = if (h.fatalAt.get() > 0L) h.fatalAt.get() - upAt else -1L
+            check("сервер умер: обрыв после двух неудачных rekey, не дожидаясь предела сессии",
+                h.fatal.get()?.contains("не пересогласовывается") == true && after in 0L..4_000L,
+                "${h.fatal.get()} через $after мс; ${h.log}")
         } finally {
             h.stop()
             server.stop()
@@ -3739,7 +3944,9 @@ private class LoopbackServer(
      * Что вернуть на пакет данных: по умолчанию эхо; null — выбросить (сеть, которая пропускает
      * рукопожатие, но режет данные — «вверх есть, вниз 0»).
      */
-    private val answerData: (ByteArray) -> ByteArray? = { it }
+    private val answerData: (ByteArray) -> ByteArray? = { it },
+    /** Через сколько мс ответить на n-ю инициацию (медленная сеть, 1.10.40); 0 — сразу. */
+    private val delayResponse: (Int) -> Long = { 0L }
 ) {
     private val socket = java.net.DatagramSocket()
     private val sessions = HashMap<Int, dev.warpscout.core.wg.Wg.Session>()
@@ -3814,7 +4021,18 @@ private class LoopbackServer(
                         val (resp, srv) = WgResponder.respondWithSession(pkt, serverPrivate, senderIndex = idx)
                         sessions[idx] = srv
                         clientIndex[idx] = Crypto.readLe32(pkt, 4)
-                        socket.send(java.net.DatagramPacket(resp, resp.size, p.socketAddress))
+                        val delay = delayResponse(n)
+                        if (delay > 0L) {
+                            val to = p.socketAddress
+                            Thread {
+                                runCatching {
+                                    Thread.sleep(delay)
+                                    socket.send(java.net.DatagramPacket(resp, resp.size, to))
+                                }
+                            }.apply { isDaemon = true; start() }
+                        } else {
+                            socket.send(java.net.DatagramPacket(resp, resp.size, p.socketAddress))
+                        }
                     }
 
                     dev.warpscout.core.wg.Wg.TYPE_TRANSPORT -> {

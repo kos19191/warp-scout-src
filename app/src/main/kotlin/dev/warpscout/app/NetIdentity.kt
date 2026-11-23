@@ -101,6 +101,56 @@ object NetIdentity {
         tm.networkOperatorName.orEmpty().trim()
     }.getOrDefault("")
 
+    /**
+     * Поколение мобильной связи, как его пишет строка состояния телефона: «5G», «LTE», «H+», «H»,
+     * «3G», «E», «G», «2G» (с 1.10.40). Пусто — не мобильная сеть или система не сказала.
+     *
+     * Без разрешений: тип мобильной сети отдаёт сам ConnectivityManager (NetworkInfo — устаревший
+     * API, но единственный без доступа к состоянию телефона; TelephonyManager.getDataNetworkType
+     * требует READ_PHONE_STATE). Система обновляет его при смене типа связи и без смены сети.
+     */
+    fun radioOf(context: Context, network: Network?): String = runCatching {
+        val net = network ?: return@runCatching ""
+        val cm = context.getSystemService(ConnectivityManager::class.java) ?: return@runCatching ""
+        @Suppress("DEPRECATION")
+        val info = cm.getNetworkInfo(net) ?: return@runCatching ""
+        @Suppress("DEPRECATION")
+        if (info.type != ConnectivityManager.TYPE_MOBILE) return@runCatching ""
+        @Suppress("DEPRECATION")
+        radioName(info.subtype)
+    }.getOrDefault("")
+
+    /** Тип связи по коду TelephonyManager.NETWORK_TYPE_*; пусто — неизвестный код. */
+    fun radioName(subtype: Int): String = when (subtype) {
+        android.telephony.TelephonyManager.NETWORK_TYPE_NR -> "5G"
+        android.telephony.TelephonyManager.NETWORK_TYPE_LTE, 19 /* LTE_CA, скрытая константа */ -> "LTE"
+        android.telephony.TelephonyManager.NETWORK_TYPE_HSPAP -> "H+"
+        android.telephony.TelephonyManager.NETWORK_TYPE_HSPA,
+        android.telephony.TelephonyManager.NETWORK_TYPE_HSDPA,
+        android.telephony.TelephonyManager.NETWORK_TYPE_HSUPA -> "H"
+        android.telephony.TelephonyManager.NETWORK_TYPE_UMTS,
+        android.telephony.TelephonyManager.NETWORK_TYPE_TD_SCDMA,
+        android.telephony.TelephonyManager.NETWORK_TYPE_EVDO_0,
+        android.telephony.TelephonyManager.NETWORK_TYPE_EVDO_A,
+        android.telephony.TelephonyManager.NETWORK_TYPE_EVDO_B,
+        android.telephony.TelephonyManager.NETWORK_TYPE_EHRPD -> "3G"
+        android.telephony.TelephonyManager.NETWORK_TYPE_EDGE -> "E"
+        android.telephony.TelephonyManager.NETWORK_TYPE_GPRS -> "G"
+        android.telephony.TelephonyManager.NETWORK_TYPE_GSM,
+        android.telephony.TelephonyManager.NETWORK_TYPE_CDMA,
+        android.telephony.TelephonyManager.NETWORK_TYPE_1xRTT,
+        11 /* NETWORK_TYPE_IDEN, устаревшая константа */ -> "2G"
+        else -> ""
+    }
+
+    /**
+     * Медленная мобильная связь — H+ и всё, что старше. На ней задержка под нагрузкой доходит до
+     * секунд, а полоса — до единиц мегабит (журнал 23.11: пинг 1157 мс, замер 310 Кбит/с).
+     */
+    fun isSlowRadio(radio: String): Boolean = radio in SLOW_RADIOS
+
+    private val SLOW_RADIOS = setOf("H+", "H", "3G", "E", "G", "2G")
+
     /** Шлюз по умолчанию (IPv4) у этой сети; пусто — не знаем. */
     private fun gatewayOf(context: Context, network: Network?): String {
         val net = network ?: return ""
