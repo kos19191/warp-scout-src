@@ -36,6 +36,16 @@ class Prefs(private val context: Context) {
         if (!sp.getBoolean("availMigrated", false)) {
             sp.edit().putBoolean("availMigrated", true).putBoolean("tunnel_verify", true).apply()
         }
+        // 1.10.40: шум «как Chrome» (JunkLibrary.chrome) — новый профиль. Набор включённых профилей
+        // хранится, как только настройки сохранили хоть раз, и новое имя в него само не попадёт: подбор
+        // его бы не проверял. Добавляем один раз; снять галочку можно, как с любого профиля.
+        if (!sp.getBoolean("junkChromeAdded", false)) {
+            val edit = sp.edit().putBoolean("junkChromeAdded", true)
+            sp.getStringSet("junk", null)?.let { stored ->
+                edit.putStringSet("junk", HashSet(stored).apply { add(JunkLibrary.chrome().name) })
+            }
+            edit.apply()
+        }
     }
     private val junkNames = JunkLibrary.defaultPool().map { it.name }
 

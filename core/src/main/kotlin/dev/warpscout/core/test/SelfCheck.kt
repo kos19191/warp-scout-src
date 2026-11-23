@@ -15,6 +15,7 @@ import dev.warpscout.core.tune.CachedPoint
 import dev.warpscout.core.tunnel.IpPacket
 import dev.warpscout.core.crypto.Blake2s
 import dev.warpscout.core.crypto.Crypto
+import dev.warpscout.core.junk.ChromeQuic
 import dev.warpscout.core.junk.JunkLibrary
 import dev.warpscout.core.junk.QuicMask
 import dev.warpscout.core.keys.KeySource
@@ -192,6 +193,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         }
         section("строка «где мы»: страна второго выхода (1.10.40)") {
             whereLineChecks()
+        }
+        section("шум «как Chrome»: первый пакет QUIC целиком (1.10.40)") {
+            chromeQuicChecks()
         }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
@@ -889,6 +893,110 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         expect("где мы: строка проверки из настроек", ExitCheck.secondCountry(true, "", ExitCheck.decode("NL|149.34.244.177|1700000000000|829")), "NL")
     }
 
+    /**
+     * Шум «как Chrome» (с 1.10.40): настоящий первый пакет QUIC. Расшифровывается независимой распаковкой
+     * (QuicMaskForTest), внутри — ClientHello Chrome с именем сайта, ровно 1250 байт. Ключи Initial
+     * сверяются с примером из RFC 9001: иначе «расшифровалось» значило бы только, что сборка и распаковка
+     * ошибаются одинаково.
+     */
+    private fun chromeQuicChecks() {
+        val rfcInitial = Crypto.hmacSha256(Crypto.unHex("38762cf7f55934b34d179ae6a4c80cadccbb7f0a"), Crypto.unHex("8394c8f03e515708"))
+        expect("quic: initial_secret — как в RFC 9001 (A.1)", Crypto.hex(rfcInitial), "7db5df06e7a69e432496adedb00851923595221596ae2ae9fb8115c1e9ed0a44")
+        val rfcClient = Crypto.tlsDeriveSecret(rfcInitial, 32, "client in")
+        expect("quic: client_initial_secret — как в RFC 9001", Crypto.hex(rfcClient), "c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea")
+        expect("quic: key — как в RFC 9001", Crypto.hex(Crypto.tlsDeriveSecret(rfcClient, 16, "quic key")), "1f369613dd76d5467730efcbe3b1a22d")
+        expect("quic: iv — как в RFC 9001", Crypto.hex(Crypto.tlsDeriveSecret(rfcClient, 12, "quic iv")), "fa044b2f42a3fd3b46fb255c")
+        expect("quic: hp — как в RFC 9001", Crypto.hex(Crypto.tlsDeriveSecret(rfcClient, 16, "quic hp")), "9f50449e04a0e810283a1e9933adedd2")
+
+        val profile = JunkLibrary.chrome()
+        expect("как Chrome: имя профиля", profile.name, "chrome:apteka.ru")
+        check("как Chrome: шаблон — один литерал (сервис шлёт первый кусок шаблона — значит, весь пакет)",
+            profile.i1.size == 1 && profile.i1[0] is JunkChunk.Literal && profile.i2.isEmpty())
+        val packet = (profile.i1[0] as JunkChunk.Literal).bytes
+        expect("как Chrome: 1250 байт, как у Chrome", packet.size, ChromeQuic.SIZE)
+        check("как Chrome: длинный заголовок QUIC", (packet[0].toInt() and 0xc0) == 0xc0)
+        expect("как Chrome: QUIC v1", Crypto.hex(packet.copyOfRange(1, 5)), "00000001")
+        expect("как Chrome: DCID 8 байт", packet[5].toInt(), 8)
+        expect("как Chrome: SCID пустой", packet[14].toInt(), 0)
+        expect("как Chrome: без токена", packet[15].toInt(), 0)
+        val dcid = packet.copyOfRange(6, 14)
+        val header = QuicMaskForTest.unprotect(packet, dcid)
+        expect("как Chrome: Initial, номер пакета — один байт", header[0].toInt() and 0xff, 0xc0)
+        expect("как Chrome: номер пакета 1, как у Chrome", header[18].toInt(), 1)
+        val plain = QuicMaskForTest.decrypt(packet, dcid)
+        expect("как Chrome: расшифровывается (1215 байт кадров)", plain.size, 1215)
+        val frames = QuicMaskForTest.frames(plain)
+        val crypto = frames.filter { it.startsWith("CRYPTO ") }
+        check("как Chrome: ClientHello разрезан на куски, как у Chrome", crypto.size >= 2, frames.joinToString(" "))
+        check("как Chrome: среди кусков есть PING", "PING" in frames, frames.joinToString(" "))
+        check("как Chrome: незнакомых кадров нет", frames.none { it.startsWith("?") }, frames.joinToString(" "))
+        val ch = QuicMaskForTest.extractClientHello(packet, dcid)
+        check("как Chrome: собирается в ClientHello", ch.size > 100 && ch[0] == 0x01.toByte(), "${ch.size} байт")
+        val covered = crypto.map { it.removePrefix("CRYPTO ").split('+').let { (o, l) -> o.toInt() to l.toInt() } }.sortedBy { it.first }
+        check("как Chrome: куски покрывают ClientHello без дыр и наложений",
+            covered.first().first == 0 && covered.zipWithNext().all { (a, b) -> a.first + a.second == b.first } &&
+                covered.last().let { it.first + it.second } == ch.size)
+        expect("как Chrome: длина ClientHello сходится",
+            ((ch[1].toInt() and 0xff) shl 16) or ((ch[2].toInt() and 0xff) shl 8) or (ch[3].toInt() and 0xff), ch.size - 4)
+        expect("как Chrome: TLS 1.2 в заголовке, без session id (как в QUIC)", Crypto.hex(ch.copyOfRange(4, 6)) + "/" + ch[38], "0303/0")
+        expect("как Chrome: наборы шифров TLS 1.3", Crypto.hex(ch.copyOfRange(39, 47)), "0006130113021303")
+        val exts = QuicMaskForTest.extensions(ch)
+        expect("как Chrome: десять расширений Chrome", exts.keys.sorted(), ChromeQuic.EXTENSIONS.sorted())
+        expect("как Chrome: имя сайта", QuicMaskForTest.sni(exts[0x0000]), "apteka.ru")
+        expect("как Chrome: ALPN h3", exts[0x0010]?.let { Crypto.hex(it) }, "0003026833")
+        expect("как Chrome: только TLS 1.3", exts[0x002b]?.let { Crypto.hex(it) }, "020304")
+        expect("как Chrome: группы X25519, P-256, P-384", exts[0x000a]?.let { Crypto.hex(it) }, "0006001d00170018")
+        check("как Chrome: ключ X25519 на 32 байта (без постквантового)",
+            exts[0x0033]?.let { it.size == 38 && Crypto.hex(it.copyOfRange(0, 6)) == "0024001d0020" } == true)
+        val tps = QuicMaskForTest.transportParameters(exts[0x0039])
+        expect("как Chrome: тайм-аут простоя 30 с", tps[0x01]?.let { Crypto.hex(it) }, "80007530")
+        expect("как Chrome: SCID в параметрах пустой", tps[0x0f]?.size, 0)
+        check("как Chrome: GREASE-параметр (31·N + 27)", tps.keys.any { it % 31 == 27L && it > 0x20 })
+        check("как Chrome: GREASE-версия вида 0x?a?a?a?a",
+            tps[0xff73dbL]?.let { v -> v.size == 12 && (4 until 8).all { (v[it].toInt() and 0x0f) == 0x0a } } == true)
+
+        // Одни и те же байты от зерна: шум из памяти совпадает с проверенным подбором.
+        check("как Chrome: зерно даёт те же байты", ChromeQuic.packet("apteka.ru", 5L).contentEquals(ChromeQuic.packet("apteka.ru", 5L)))
+        check("как Chrome: другое зерно — другие байты", !ChromeQuic.packet("apteka.ru", 5L).contentEquals(ChromeQuic.packet("apteka.ru", 6L)))
+        check("как Chrome: по имени — тот же пакет",
+            (JunkLibrary.byName("chrome:apteka.ru")?.i1?.firstOrNull() as? JunkChunk.Literal)?.bytes?.contentEquals(packet) == true)
+        expect("как Chrome: шум из конфига узнаётся по байтам", JunkLibrary.nameOf(profile.copy(name = "imported")), "chrome:apteka.ru")
+        expect("как Chrome: к другому сайту — по имени", JunkLibrary.byName("chrome:ozon.ru")?.let { p ->
+            QuicMaskForTest.sni(QuicMaskForTest.extensions(QuicMaskForTest.extractClientHello(
+                (p.i1[0] as JunkChunk.Literal).bytes, (p.i1[0] as JunkChunk.Literal).bytes.copyOfRange(6, 14)))[0x0000])
+        }, "ozon.ru")
+        check("как Chrome: имя сайта кириллицей или пустое — не профиль",
+            JunkLibrary.byName("chrome:аптека.рф") == null && JunkLibrary.byName("chrome:") == null && JunkLibrary.byName("chrome:a b") == null)
+        expect("как Chrome: в подборе", JunkLibrary.defaultPool().count { it.name == "chrome:apteka.ru" }, 1)
+        expect("как Chrome: сервис пробует первым", JunkLibrary.serviceOrder().map { it.name }.take(2), listOf("chrome:apteka.ru", "tls-fixed"))
+        expect("как Chrome: «без шума» — последним", JunkLibrary.serviceOrder().last().name, "none")
+        val rendered = WgConf.renderJunk(profile.i1)
+        check("как Chrome: в конфиге — <b 0x…> на 1250 байт", rendered.startsWith("<b 0x") && rendered.length == 2500 + 6, "${rendered.length} знаков")
+        check("как Chrome: из конфига читается обратно",
+            WgConf.parseJunk(rendered).let { it.size == 1 && (it[0] as? JunkChunk.Literal)?.bytes?.contentEquals(packet) == true })
+
+        // Любое зерно и другой сайт: всегда 1250 байт, расшифровывается, имя на месте, куски без дыр.
+        var bad = 0
+        val sites = listOf("apteka.ru", "ozon.ru", "a.ru", "very-long-subdomain-for-test.example-site.ru")
+        for (seed in 0L until 120L) {
+            val site = sites[(seed % sites.size).toInt()]
+            val p = ChromeQuic.packet(site, seed)
+            val id = p.copyOfRange(6, 14)
+            val hello = QuicMaskForTest.extractClientHello(p, id)
+            val e = QuicMaskForTest.extensions(hello)
+            val f = QuicMaskForTest.frames(QuicMaskForTest.decrypt(p, id))
+            // Имя сайта — целиком в одном куске (фильтр, который не склеивает куски, его увидит).
+            val range = ChromeQuic.sniRange(hello, site)
+            val oneSlice = range != null && f.filter { it.startsWith("CRYPTO ") }
+                .map { it.removePrefix("CRYPTO ").split('+').let { (o, l) -> o.toInt() until o.toInt() + l.toInt() } }
+                .any { range.first in it && range.last in it }
+            if (p.size != ChromeQuic.SIZE || QuicMaskForTest.sni(e[0x0000]) != site || e.size != 10 ||
+                f.any { it.startsWith("?") } || f.count { it.startsWith("CRYPTO") } < 2 || !oneSlice
+            ) bad++
+        }
+        expect("как Chrome: 120 зёрен и разные сайты — все пакеты правильные, имя сайта в одном куске", bad, 0)
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private fun section(name: String, block: () -> Unit) {
@@ -1521,7 +1629,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             expect("имя шума переживает текст конфига: ${p.name}", back?.let { JunkLibrary.nameOf(it.junk) }, p.name)
             expect("профиль по имени: ${p.name}", JunkLibrary.byName(p.name)?.let { JunkChunk.renderAll(it.i1 + it.i2) }, JunkChunk.renderAll(p.i1 + p.i2))
         }
-        expect("порядок шума в сервисе: первым tls-fixed", JunkLibrary.serviceOrder().firstOrNull()?.name, "tls-fixed")
+        // С 1.10.40 первым — «как Chrome», вторым — фиксированный TLS (см. JunkLibrary.serviceOrder).
+        expect("порядок шума в сервисе: первым «как Chrome», вторым tls-fixed",
+            JunkLibrary.serviceOrder().take(2).map { it.name }, listOf("chrome:apteka.ru", "tls-fixed"))
         expect("порядок шума в сервисе: «без шума» последним", JunkLibrary.serviceOrder().lastOrNull()?.name, "none")
         check("неизвестный шум по имени — null", JunkLibrary.byName("нет-такого") == null)
     }
@@ -1656,7 +1766,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
 
         val plainFroze = listOf(ev("none", NoiseBook.FROZE, "8.39.204.10:4500"))
         check("шум: «пошли и встали» без шума — сразу замерзающий", "none" in NoiseBook.frozen(plainFroze, net, now))
-        expect("шум: замена «none» — tls-fixed", NoiseBook.replacement(plainFroze, net, "none", order, now), "tls-fixed")
+        expect("шум: замена «none» — «как Chrome» (с 1.10.40)", NoiseBook.replacement(plainFroze, net, "none", order, now), "chrome:apteka.ru")
+        val chromeFroze = plainFroze + ev("chrome:apteka.ru", NoiseBook.TUNER, "")
+        expect("шум: «как Chrome» здесь встаёт — замена tls-fixed", NoiseBook.replacement(chromeFroze, net, "none", order, now), "tls-fixed")
         check("шум: на другой сети ничего не известно", NoiseBook.frozen(plainFroze, "мобильная·25001", now).isEmpty())
         check("шум: через четверо суток запись забыта", NoiseBook.frozen(listOf(ev("none", NoiseBook.FROZE, "a", ago = 4L * 24 * 3600 * 1000)), net, now).isEmpty())
 

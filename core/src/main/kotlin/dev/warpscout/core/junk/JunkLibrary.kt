@@ -37,6 +37,33 @@ object JunkLibrary {
         AwgParams(), JunkKind.SIP, "SIP INVITE / 100 Trying (3 вариант генератора)"
     )
 
+    /**
+     * Имя сайта в пакете «как Chrome» (с 1.10.40): то же, что в конфиге, который на сети человека «прям
+     * хорошо работает со всеми ресурсами» (23.11), — российский сайт, который фильтры пропускают.
+     */
+    const val CHROME_SNI = "apteka.ru"
+
+    /** Зерно пакета «как Chrome»: те же байты на всех телефонах и во всех версиях с этим генератором. */
+    private const val CHROME_SEED = 1_250L
+
+    private val chromeCache = java.util.concurrent.ConcurrentHashMap<String, JunkProfile>()
+
+    /**
+     * Пакет «как Chrome» (с 1.10.40, см. [ChromeQuic]): первый пакет QUIC к [sni] целиком, 1250 байт, одним
+     * литералом — так он и уходит перед каждой инициацией (шлётся первый кусок шаблона). Собирается один
+     * раз: [defaultPool] и [nameOf] зовут часто, а шифровать 1250 байт каждый раз незачем.
+     */
+    fun chrome(sni: String = CHROME_SNI): JunkProfile = chromeCache.getOrPut(sni) {
+        JunkProfile(
+            name = "chrome:$sni",
+            i1 = listOf(JunkChunk.Literal(ChromeQuic.packet(sni, CHROME_SEED + sni.hashCode()))),
+            i2 = emptyList(),
+            awg = AwgParams(),
+            kind = JunkKind.QUIC,
+            note = "как Chrome: первый пакет QUIC к $sni, ${ChromeQuic.SIZE} байт"
+        )
+    }
+
     /** QUIC-маска под конкретный SNI; level 1..4 — насколько «обрезанный» ClientHello. */
     fun quic(sni: String, level: Int = 3, seed: Long? = null, awg: AwgParams = AwgParams()) = JunkProfile(
         name = "quic:$sni",
@@ -55,8 +82,8 @@ object JunkLibrary {
     )
 
     /**
-     * Набор профилей для автоподбора: «нет шума» + фиксированный TLS + QUIC под несколько SNI из
-     * белого списка + SIP. Порядок такой, чтобы дешёвые/типовые проверялись первыми.
+     * Набор профилей для автоподбора: «нет шума» + фиксированный TLS + «как Chrome» + QUIC под несколько
+     * SNI из белого списка + SIP. Порядок такой, чтобы дешёвые/типовые проверялись первыми.
      */
     fun defaultPool(sniCount: Int = 3, level: Int = 3, seed: Long = 7L): List<JunkProfile> {
         val snis = SNI_DOMAINS.take(sniCount.coerceAtLeast(1))
@@ -66,6 +93,9 @@ object JunkLibrary {
             // проверялся лишь для лучшей точки одной запасной конфигурацией.
             add(this@JunkLibrary.none())
             add(tlsFixed())
+            // «Как Chrome» (с 1.10.40): настоящий первый пакет QUIC, а не обрезок, — подбор сравнивает
+            // его с остальными на каждой из лучших точек.
+            add(chrome())
             for ((i, sni) in snis.withIndex()) add(quic(sni, level, seed + i))
             add(sip())
         }
@@ -73,13 +103,16 @@ object JunkLibrary {
 
     /**
      * Порядок, в котором сервис пробует шум, когда рукопожатие проходит, а данные — нет (с 1.10.30).
-     * Первым — фиксированный TLS: на сети человека он держал туннель 12 часов подряд (журнал 22.11,
-     * 01:21–13:06), когда чистый WireGuard не поднимался ни разу. «Без шума» — последним.
+     * С 1.10.40 первым — «как Chrome»: с таким пакетом конфиг человека на его сети «прям хорошо работает
+     * со всеми ресурсами» (23.11). Вторым — фиксированный TLS: он держал туннель 12 часов подряд (журнал
+     * 22.11, 01:21–13:06), когда чистый WireGuard не поднимался ни разу. «Без шума» — последним. Шум, с
+     * которым на этой сети уже шли данные, сервис берёт раньше этого порядка (см. NoiseMemory).
      */
     fun serviceOrder(): List<JunkProfile> {
         val pool = defaultPool()
-        val quic = pool.filter { it.kind == JunkKind.QUIC }
+        val quic = pool.filter { it.kind == JunkKind.QUIC && it.name.startsWith("quic:") }
         return buildList {
+            add(chrome())
             add(tlsFixed())
             quic.firstOrNull()?.let { add(it) }
             add(sip())
@@ -97,6 +130,16 @@ object JunkLibrary {
         if (n.isEmpty()) return null
         if (n == "none") return none()
         defaultPool().firstOrNull { it.name == n }?.let { return it }
+        // «Как Chrome» к другому сайту — тем же генератором (имя сайта — после «chrome:»). Только латиница,
+        // цифры, точка и дефис: в ClientHello имя идёт ASCII, кириллица превратилась бы в «?».
+        if (n.startsWith("chrome:")) {
+            val sni = n.removePrefix("chrome:")
+            if (sni.isNotEmpty() && sni.length < 200 &&
+                sni.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '.' || it == '-' }
+            ) {
+                return runCatching { chrome(sni) }.getOrNull()
+            }
+        }
         // Остальные SNI из списка: зерно — как в defaultPool при большем числе доменов.
         return defaultPool(sniCount = SNI_DOMAINS.size).firstOrNull { it.name == n }
             ?: listOf(tlsFixed(), sip(), httpGet()).firstOrNull { it.name == n }

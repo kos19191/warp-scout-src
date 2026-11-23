@@ -50,22 +50,28 @@ object QuicMaskForTest {
         return Header(pknOffset + pknLen, flags, pkn, dcidLen, pknOffset)
     }
 
-    /** Возвращает пакет с восстановленными (unprotected) флагами и номером пакета. */
+    /**
+     * Возвращает пакет с восстановленными (unprotected) флагами и номером пакета.
+     *
+     * Пока заголовок защищён, длина номера пакета в первом байте тоже замаскирована (RFC 9001 §5.4.2):
+     * образец для маски берётся с pknOffset + 4 при любой длине, а длина номера читается только после
+     * снятия маски с первого байта. До 1.10.40 длина бралась из ещё защищённого байта: если маска
+     * задевала эти биты, лишние байты шифртекста «размаскировывались» и пакет не расшифровывался —
+     * QUIC-маска проходила проверку, только пока ей везло с маской.
+     */
     fun unprotect(packet: ByteArray, dcid: ByteArray): ByteArray {
         val h = parseHeader(packet)
-        val pknLen = (h.flags and 0x03) + 1
-        val encrypted = packet.copyOfRange(h.length, packet.size)
-
         val initialSecret = Crypto.hmacSha256(INITIAL_SALT_V1, dcid)
         val clientSecret = Crypto.tlsDeriveSecret(initialSecret, 32, "client in")
         val hp = Crypto.tlsDeriveSecret(clientSecret, 16, "quic hp")
 
-        val sampleStart = (4 - pknLen).coerceAtLeast(0)
-        val mask = Crypto.aesEcbBlock(hp, encrypted.copyOfRange(sampleStart, sampleStart + 16))
-            .also { it[0] = (it[0].toInt() and 0x0f).toByte() }
+        val sampleAt = h.pknOffset + 4
+        val mask = Crypto.aesEcbBlock(hp, packet.copyOfRange(sampleAt, sampleAt + 16))
 
         val out = packet.copyOf()
-        out[0] = (out[0].toInt() xor mask[0].toInt()).toByte()
+        // Длинный заголовок: маска — на младшие 4 бита первого байта.
+        out[0] = (out[0].toInt() xor (mask[0].toInt() and 0x0f)).toByte()
+        val pknLen = (out[0].toInt() and 0x03) + 1
         for (i in 0 until pknLen) {
             val at = h.pknOffset + i
             out[at] = (out[at].toInt() xor mask[1 + i].toInt()).toByte()
@@ -75,33 +81,8 @@ object QuicMaskForTest {
 
     /** Полный ClientHello, собранный из CRYPTO-фреймов (или пустой массив, если не собрался). */
     fun extractClientHello(packet: ByteArray, dcid: ByteArray): ByteArray {
-        val unprotected = runCatching { unprotect(packet, dcid) }.getOrNull() ?: return ByteArray(0)
-        val h = parseHeader(unprotected)
-        val pknLen = (h.flags and 0x03) + 1
-        val initialSecret = Crypto.hmacSha256(INITIAL_SALT_V1, dcid)
-        val clientSecret = Crypto.tlsDeriveSecret(initialSecret, 32, "client in")
-        val key = Crypto.tlsDeriveSecret(clientSecret, 16, "quic key")
-        val iv = Crypto.tlsDeriveSecret(clientSecret, 12, "quic iv")
-
-        var pkn = 0L
-        for (i in 0 until pknLen) pkn = (pkn shl 8) or (unprotected[h.pknOffset + i].toLong() and 0xff)
-        val nonce = iv.copyOf()
-        // nonce = iv XOR номер пакета, выровненный вправо (RFC 9001 §5.3)
-        val pknBytes = ByteArray(8)
-        for (i in 0 until 8) pknBytes[i] = ((pkn ushr (8 * (7 - i))) and 0xff).toByte()
-        Crypto.xorInto(nonce, nonce.size - 8, pknBytes, 0, 8)
-
-        val aad = unprotected.copyOfRange(0, h.length)
-        val ct = unprotected.copyOfRange(h.length, unprotected.size)
-
-        val plain = try {
-            val c = Cipher.getInstance("AES/GCM/NoPadding")
-            c.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
-            c.updateAAD(aad)
-            c.doFinal(ct)
-        } catch (e: Exception) {
-            return ByteArray(0)
-        }
+        val plain = decrypt(packet, dcid)
+        if (plain.isEmpty()) return ByteArray(0)
 
         // CRYPTO-фреймы: 0x06 offset varint | length varint | data
         var off = 0
@@ -121,4 +102,104 @@ object QuicMaskForTest {
         for ((o, data) in pieces) data.copyInto(ch, o)
         return ch
     }
+
+    /** Расшифрованная полезная нагрузка Initial — кадры по порядку (пустой массив — не расшифровался). */
+    fun decrypt(packet: ByteArray, dcid: ByteArray): ByteArray {
+        val unprotected = runCatching { unprotect(packet, dcid) }.getOrNull() ?: return ByteArray(0)
+        val h = parseHeader(unprotected)
+        val pknLen = (h.flags and 0x03) + 1
+        val initialSecret = Crypto.hmacSha256(INITIAL_SALT_V1, dcid)
+        val clientSecret = Crypto.tlsDeriveSecret(initialSecret, 32, "client in")
+        val key = Crypto.tlsDeriveSecret(clientSecret, 16, "quic key")
+        val iv = Crypto.tlsDeriveSecret(clientSecret, 12, "quic iv")
+
+        var pkn = 0L
+        for (i in 0 until pknLen) pkn = (pkn shl 8) or (unprotected[h.pknOffset + i].toLong() and 0xff)
+        val nonce = iv.copyOf()
+        // nonce = iv XOR номер пакета, выровненный вправо (RFC 9001 §5.3)
+        val pknBytes = ByteArray(8)
+        for (i in 0 until 8) pknBytes[i] = ((pkn ushr (8 * (7 - i))) and 0xff).toByte()
+        Crypto.xorInto(nonce, nonce.size - 8, pknBytes, 0, 8)
+
+        val aad = unprotected.copyOfRange(0, h.length)
+        val ct = unprotected.copyOfRange(h.length, unprotected.size)
+
+        return try {
+            val c = Cipher.getInstance("AES/GCM/NoPadding")
+            c.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
+            c.updateAAD(aad)
+            c.doFinal(ct)
+        } catch (e: Exception) {
+            ByteArray(0)
+        }
+    }
+
+    /**
+     * Кадры полезной нагрузки по порядку: «CRYPTO 0+236», «PING», «PADDING 176», «? 1f» (незнакомый — и
+     * дальше не разбираем). Для проверки пакета «как Chrome» (с 1.10.40).
+     */
+    fun frames(plain: ByteArray): List<String> {
+        val out = ArrayList<String>()
+        var off = 0
+        while (off < plain.size) {
+            when (val type = plain[off].toInt() and 0xff) {
+                0x00 -> {
+                    var n = 0
+                    while (off < plain.size && plain[off].toInt() == 0) { n++; off++ }
+                    out += "PADDING $n"
+                }
+                0x01 -> { out += "PING"; off++ }
+                0x06 -> {
+                    off++
+                    val (offset, n1) = readVarint(plain, off); off += n1
+                    val (length, n2) = readVarint(plain, off); off += n2
+                    out += "CRYPTO $offset+$length"
+                    off += length.toInt()
+                }
+                else -> { out += "? %02x".format(type); return out }
+            }
+        }
+        return out
+    }
+
+    /** Расширения ClientHello: тип → данные (пусто — не разобрался). */
+    fun extensions(ch: ByteArray): Map<Int, ByteArray> = runCatching {
+        fun u16(at: Int) = ((ch[at].toInt() and 0xff) shl 8) or (ch[at + 1].toInt() and 0xff)
+        var off = 4 + 2 + 32                                  // заголовок, версия, random
+        off += 1 + (ch[off].toInt() and 0xff)                 // session id
+        off += 2 + u16(off)                                   // наборы шифров
+        off += 1 + (ch[off].toInt() and 0xff)                 // сжатие
+        val end = off + 2 + u16(off)
+        off += 2
+        val out = LinkedHashMap<Int, ByteArray>()
+        while (off + 4 <= end) {
+            val type = u16(off)
+            val len = u16(off + 2)
+            out[type] = ch.copyOfRange(off + 4, off + 4 + len)
+            off += 4 + len
+        }
+        if (off != end || end != ch.size) emptyMap() else out
+    }.getOrDefault(emptyMap())
+
+    /** Имя сайта из данных расширения server_name. */
+    fun sni(data: ByteArray?): String? = runCatching {
+        val d = data ?: return@runCatching null
+        if (d[2].toInt() != 0) return@runCatching null
+        val len = ((d[3].toInt() and 0xff) shl 8) or (d[4].toInt() and 0xff)
+        String(d, 5, len, Charsets.US_ASCII)
+    }.getOrNull()
+
+    /** Транспортные параметры QUIC: номер → значение. */
+    fun transportParameters(data: ByteArray?): Map<Long, ByteArray> = runCatching {
+        val d = data ?: return@runCatching emptyMap<Long, ByteArray>()
+        val out = LinkedHashMap<Long, ByteArray>()
+        var off = 0
+        while (off < d.size) {
+            val (id, n1) = readVarint(d, off); off += n1
+            val (len, n2) = readVarint(d, off); off += n2
+            out[id] = d.copyOfRange(off, off + len.toInt())
+            off += len.toInt()
+        }
+        out
+    }.getOrDefault(emptyMap())
 }
