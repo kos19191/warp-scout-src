@@ -181,6 +181,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("Gemini — вместе с приложением Google (1.10.37)") {
             companionChecks()
         }
+        section("Grok — через второй выход (1.10.38)") {
+            grokChecks()
+        }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
                 liveNetwork()
@@ -600,6 +603,26 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         check("спутники: приложение Google — не сервис", a.serviceOf(a.GOOGLE_APP) == null)
         check("спутники: приложение Google — не браузер из списка", !a.isKnownBrowser(a.GOOGLE_APP))
         expect("спутники: сетей не добавляют — у Gemini только его список", a.listsFor(listOf(gemini, a.GOOGLE_APP)), listOf("google-ai"))
+    }
+
+    /**
+     * 1.10.38: Grok. xAI отказывает российским адресам, а в списке ru-ip-blocked из него только
+     * grok.x.com: grok.com и x.ai шли через WARP с российским адресом.
+     */
+    private fun grokChecks() {
+        val a = dev.warpscout.core.lists.AppServices
+        val extra = dev.warpscout.core.lists.AllowLists.EXTRA_HOSTS["ru-ip-blocked"].orEmpty()
+        check("Grok: grok.com — во втором выходе", "grok.com" in extra)
+        check("Grok: вход (accounts.x.ai) и API (api.x.ai) — во втором выходе", "accounts.x.ai" in extra && "api.x.ai" in extra)
+        check(
+            "Grok: его список — среди источников второго выхода",
+            dev.warpscout.core.lists.AllowLists.byId["ru-ip-blocked"] != null
+        )
+        expect("Grok: приложение — известный сервис", a.serviceOf("ai.x.grok")?.title, "Grok")
+        check("Grok: сетей не добавляет — его адреса во втором выходе", a.listsFor(listOf("ai.x.grok")).isEmpty())
+        check("Grok: ngrok — не Grok", a.serviceOf("com.ngrok.app") == null)
+        expect("Grok: порядок названий для экрана", a.titlesFor(listOf("ai.x.grok", "com.anthropic.claude")), listOf("Claude", "Grok"))
+        check("Grok: спутников нет", a.companionsFor(listOf("ai.x.grok")).isEmpty())
     }
 
     /** Маршруты из частей: сайты для браузера, сети выбранных приложений, прежние режимы. */

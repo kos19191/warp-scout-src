@@ -155,7 +155,8 @@ object AllowLists {
     val YOUTUBE_VIDEO_NETS: List<String> get() = EXTRA_PREFIXES["youtube"].orEmpty()
 
     /**
-     * Поддомены, без которых сервис из списка не работает (с 1.10.35). В списках allow-domains —
+     * Поддомены, без которых сервис из списка не работает (с 1.10.35), и имена сервисов, которых в
+     * списке нет, хотя по смыслу они в нём (с 1.10.38 — Grok в ru-ip-blocked). В списках allow-domains —
      * правила «домен и все поддомены» для прокси-клиентов, а приложение превращает в адреса ровно
      * перечисленные имена: поддомен на других адресах в таблицу не попадает. Журнал 23.11:
      * chatgpt.com открылся через второй выход, а вход (auth.openai.com) ушёл через WARP с российским
@@ -174,6 +175,16 @@ object AllowLists {
             "a-cdn.anthropic.com", "s-cdn.anthropic.com", "assets-proxy.anthropic.com", "www.claude.ai",
         ),
         "google-ai" to listOf("alkalimakersuite-pa.clients6.google.com"),
+        // Grok (с 1.10.38): xAI сам отказывает российским адресам («This service is not available in
+        // your region», проверено 21.10.2026), а в списке ru-ip-blocked из него только grok.x.com —
+        // grok.com и x.ai лежат в списке X (twitter), который идёт через WARP, то есть с российским
+        // адресом. Человек ставит приложение Grok (23.11) — его имена идут вместе со списком «закрытые
+        // для российских адресов». Поддомены x.ai у xAI на одних адресах (Cloudflare), но вход и API
+        // перечислены явно: адреса могут разойтись.
+        "ru-ip-blocked" to listOf(
+            "grok.com", "www.grok.com", "assets.grok.com",
+            "x.ai", "accounts.x.ai", "auth.x.ai", "api.x.ai", "imagine-public.x.ai",
+        ),
     )
 
     /** ID категорий по умолчанию: то, что люди обычно и хотят пустить через WARP. */

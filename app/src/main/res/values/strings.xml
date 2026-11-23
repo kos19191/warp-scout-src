@@ -233,7 +233,7 @@
     <string name="route_manual_dd">Только мои сайты (кнопка «Сайты»)</string>
     <string name="section_second_exit">Второй выход: свой сервер для сайтов, закрытых для России</string>
     <string name="second_switch">Включить второй выход</string>
-    <string name="second_hint">Сервисы вроде ChatGPT, Claude, Gemini, Adobe и Canva не работают с российских адресов, а выход WARP — российский. Второй выход пускает их через ваш сервер WireGuard или AmneziaWG. Какие сайты туда идут, подбирается само по спискам ниже; адреса обновляются раз в сутки. Нужен только конфиг сервера — вставьте его один раз. Бесплатно: Proton VPN Free (account.protonvpn.com → Downloads → WireGuard configuration → Free server configs → любой сервер → Create) — для такого конфига сервер приложение выбирает само и меняет, если он перестал отвечать. Или свой VPS с WireGuard/AmneziaWG.</string>
+    <string name="second_hint">Сервисы вроде ChatGPT, Claude, Gemini, Grok, Adobe и Canva не работают с российских адресов, а выход WARP — российский. Второй выход пускает их через ваш сервер WireGuard или AmneziaWG. Какие сайты туда идут, подбирается само по спискам ниже; адреса обновляются раз в сутки. Нужен только конфиг сервера — вставьте его один раз. Бесплатно: Proton VPN Free (account.protonvpn.com → Downloads → WireGuard configuration → Free server configs → любой сервер → Create) — для такого конфига сервер приложение выбирает само и меняет, если он перестал отвечать. Или свой VPS с WireGuard/AmneziaWG.</string>
     <string name="hint_second_conf">Конфиг второго выхода ([Interface]/[Peer])</string>
     <string name="hint_second_domains">Свои сайты для второго выхода (по одному в строке)</string>
     <string name="btn_second_resolve">Обновить адреса и проверить выход</string>
@@ -528,7 +528,7 @@
     <string name="apps_other_profile">⚠ Копия %1$s есть в другом профиле Android (Двойной профиль или рабочий): туннель WarpScout работает в основном профиле, и эта копия, скорее всего, идёт мимо него.</string>
     <!-- 1.10.35: браузер — только к нужным сайтам, сети выбранных приложений -->
     <string name="browser_sites_switch">Браузер — только к нужным сайтам</string>
-    <string name="browser_sites_note">Если среди выбранных есть браузер, через туннель из него идут только сайты второго выхода (ChatGPT, Claude, Gemini, заблокированные для РФ), «Мои сайты» и отмеченные списки, остальное — напрямую. Telegram, Instagram, YouTube, Facebook, X и другие известные приложения идут целиком: их сети добавляются сами.</string>
+    <string name="browser_sites_note">Если среди выбранных есть браузер, через туннель из него идут только сайты второго выхода (ChatGPT, Claude, Gemini, Grok, заблокированные для РФ), «Мои сайты» и отмеченные списки, остальное — напрямую. Telegram, Instagram, YouTube, Facebook, X и другие известные приложения идут целиком: их сети добавляются сами.</string>
     <string name="tunnel_sum_routes_browser">браузер — только к нужным сайтам (маршрутов: %1$d)</string>
     <string name="tunnel_browser_pending">Браузер среди выбранных: соберу сети приложений и сайты — до этого он идёт через туннель целиком. Сразу — «Сохранить и применить».</string>
     <string name="tunnel_apps_whole">Целиком, по своим сетям: %1$s.</string>
@@ -570,7 +570,7 @@
     <string name="tunneling_saved_reconnect">Туннелирование сохранено — переподключаю туннель</string>
     <string name="tunneling_saved">Туннелирование сохранено — применится при включении туннеля</string>
     <string name="second_sources_label">Через второй выход идут:</string>
-    <string name="second_src_ru_blocked">Сайты, закрытые для российских адресов (Adobe, Canva, Atlassian и другие)</string>
+    <string name="second_src_ru_blocked">Сайты, закрытые для российских адресов (Grok, Adobe, Canva, Atlassian и другие)</string>
     <string name="second_src_openai">ChatGPT / OpenAI</string>
     <string name="second_src_claude">Claude / Anthropic</string>
     <string name="second_src_google_ai">Gemini / Google AI</string>
@@ -587,7 +587,7 @@
     <string name="second_state_up">Сейчас: работает — свой сервер ответил.</string>
     <string name="second_state_starting">Сейчас: поднимается…</string>
     <string name="second_state_failed">⚠ Сейчас: не поднялся — свой сервер не ответил, эти сайты идут через WARP.</string>
-    <string name="second_apps_warn">⚠ Через туннель идут только выбранные приложения — второй выход работает только в них. Для ChatGPT, Claude, Gemini отметьте их приложения и браузер в «Туннелировании»: браузер пойдёт через туннель только к нужным сайтам, а не целиком.</string>
+    <string name="second_apps_warn">⚠ Через туннель идут только выбранные приложения — второй выход работает только в них. Для ChatGPT, Claude, Gemini, Grok отметьте их приложения и браузер в «Туннелировании»: браузер пойдёт через туннель только к нужным сайтам, а не целиком.</string>
     <string name="simple_update_desc">Проверить обновления</string>
     <!-- С 1.10.32 — в две строки: в одну скорость упиралась в кольцо кнопки. -->
     <string name="simple_rate">↓ %1$s\n↑ %2$s</string>

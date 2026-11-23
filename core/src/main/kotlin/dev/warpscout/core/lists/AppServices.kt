@@ -13,7 +13,8 @@ package dev.warpscout.core.lists
  *
  * Сети известны не у всех: у Telegram, Meta (Instagram, Facebook, WhatsApp), X и Discord в списках
  * есть подсети, у YouTube — сети Google для видео (см. AllowLists.EXTRA_PREFIXES); у ChatGPT, Claude,
- * Gemini и TikTok — только домены, их адреса собираются через DoH. Приложение без сервиса здесь
+ * Gemini и TikTok — только домены, их адреса собираются через DoH; у Grok (с 1.10.38) своего списка
+ * нет — его адреса во втором выходе. Приложение без сервиса здесь
  * ([serviceOf] = null) при неполных маршрутах идёт только к выбранным сайтам — об этом экран
  * предупреждает (так решил человек 23.11).
  *
@@ -89,6 +90,10 @@ object AppServices {
             "Gemini", listOf("google-ai"), setOf("com.google.android.apps.bard"),
             companions = listOf(Companion(GOOGLE_APP, "Google")),
         ),
+        // Grok (с 1.10.38): его адреса — во втором выходе (AllowLists.EXTRA_HOSTS, xAI отказывает
+        // российским адресам), своего списка в allow-domains у него нет — сетей не добавляем. Подсказок
+        // по имени пакета тоже нет: «grok» сидит и в «ngrok».
+        Service("Grok", emptyList(), setOf("ai.x.grok")),
         Service(
             "TikTok", listOf("tiktok"),
             setOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill", "com.zhiliaoapp.musically.go"),

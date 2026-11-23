@@ -2849,8 +2849,9 @@ class MainActivity : AppCompatActivity() {
         // Не собралось (DoH молчит) — следующая попытка не раньше чем через полчаса.
         if (System.currentTimeMillis() - secondRefreshTriedAt < 30 * 60_000L) return
         if (!prefs.secondExitOn || prefs.secondConf.isBlank() || prefs.secondCidrs.isBlank()) return
-        // Правила сборки поменялись (с 1.10.35 — поддомены ChatGPT, Claude, Gemini) — собираем сразу,
-        // не дожидаясь суток: иначе после обновления вход в ChatGPT ещё сутки шёл бы через WARP.
+        // Правила сборки поменялись (1.10.35 — поддомены ChatGPT, Claude, Gemini; 1.10.38 — Grok) —
+        // собираем сразу, не дожидаясь суток: иначе после обновления вход в ChatGPT (а теперь и Grok)
+        // ещё сутки шёл бы через WARP.
         if (System.currentTimeMillis() - prefs.secondRoutesAt < SecondRoutes.STALE_MS && !SecondRoutes.rulesChanged(prefs)) return
         if (SecondRoutes.signature(prefs) != prefs.secondBuiltSig) return
         if (!tunnel.supported || !tunnel.isUp) return
