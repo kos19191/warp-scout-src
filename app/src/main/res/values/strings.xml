@@ -336,6 +336,7 @@
     <string name="routes_mode_lists">сайты из списков</string>
     <string name="routes_mode_manual">мои сайты</string>
     <string name="routes_mode_all">весь трафик</string>
+    <string name="routes_mode_browser">браузер — только к нужным сайтам</string>
     <string name="pool_mode_masque">Только MASQUE</string>
     <string name="pool_mode_full">Полный перебор</string>
     <string name="pool_mode_default">Пул генератора</string>
@@ -418,7 +419,7 @@
     <string name="scan_mobile_done">Для мобильной сети: %1$d точки в списке. Резервную для неё можно отметить в «Резервной»</string>
     <string name="scan_mobile_none">Для мобильной сети ничего не нашлось: включены ли мобильные данные? Подробности — в журнале</string>
     <string name="sheet_apps_title">Туннелирование</string>
-    <string name="sheet_apps_hint">Приложения и сайты действуют вместе: через туннель идут выбранные приложения и только к выбранным сайтам. Ничего не меняется до «Сохранить».</string>
+    <string name="sheet_apps_hint">Через туннель идут выбранные приложения: известные (Telegram, Instagram, YouTube…) — целиком, браузер — только к нужным сайтам. Ничего не меняется до «Сохранить».</string>
     <string name="sheet_apps_save">Сохранить</string>
     <string name="sheet_apps_cancel">Отмена</string>
     <string name="sheet_apps_count">Отмечено: %1$d</string>
@@ -489,7 +490,7 @@
     <string name="avail_routes_note">В «Что туннелировать» выбрано не всё: сайты вне списков открываются напрямую, и проверка показывает прямой путь.</string>
     <!-- ── 1.10.31: вкладка «Туннелирование», свои сайты, второй выход, обновления ── -->
     <string name="section_tunneling">Что идёт через туннель</string>
-    <string name="tunnel_note">Можно выбрать приложения, свои сайты или списки сайтов. Приложения и сайты действуют вместе: например, только браузер и Telegram — и только к выбранным сайтам.</string>
+    <string name="tunnel_note">Можно выбрать приложения, свои сайты или списки сайтов. Выбранные Telegram, Instagram, YouTube, Facebook, X и другие известные приложения идут через туннель целиком — их сети добавляются сами; сайты и списки — для браузера и остальных выбранных приложений.</string>
     <string name="tunnel_kind_apps">Приложения</string>
     <string name="tunnel_kind_sites">Сайты</string>
     <string name="tunnel_kind_lists">Списки</string>
@@ -516,6 +517,16 @@
     <string name="apps_defaults_added">Через туннель пойдут: %1$s. Остальные приложения — напрямую (это можно поменять в «Туннелировании»).</string>
     <string name="apps_defaults_added_up">Через туннель пойдут ещё: %1$s — со следующего подключения.</string>
     <string name="apps_other_profile">⚠ Копия %1$s есть в другом профиле Android (Двойной профиль или рабочий): туннель WarpScout работает в основном профиле, и эта копия, скорее всего, идёт мимо него.</string>
+    <!-- 1.10.35: браузер — только к нужным сайтам, сети выбранных приложений -->
+    <string name="browser_sites_switch">Браузер — только к нужным сайтам</string>
+    <string name="browser_sites_note">Если среди выбранных есть браузер, через туннель из него идут только сайты второго выхода (ChatGPT, Claude, Gemini, заблокированные для РФ), «Мои сайты» и отмеченные списки, остальное — напрямую. Telegram, Instagram, YouTube, Facebook, X и другие известные приложения идут целиком: их сети добавляются сами.</string>
+    <string name="tunnel_sum_routes_browser">браузер — только к нужным сайтам (маршрутов: %1$d)</string>
+    <string name="tunnel_browser_pending">Браузер среди выбранных: соберу сети приложений и сайты — до этого он идёт через туннель целиком. Сразу — «Сохранить и применить».</string>
+    <string name="tunnel_apps_whole">Целиком, по своим сетям: %1$s.</string>
+    <string name="tunnel_warn_unknown_apps">⚠ Сетей %1$s не знаю: они идут через туннель только к выбранным сайтам.</string>
+    <string name="tunnel_warn_unknown_fix">Чтобы шли целиком, впишите их сайты в «Мои сайты».</string>
+    <string name="app_nets_failed">сети выбранных приложений не собрались — браузер пока идёт целиком</string>
+    <string name="browser_sites_ready">Браузер — только к нужным сайтам: адреса собраны. Включится со следующего подключения, сразу — «Сохранить и применить».</string>
     <string name="tunnel_warn_apps_routes">⚠ Выбраны приложения и только часть сайтов: всё, чего нет в списках, эти приложения открывают напрямую. Для видео YouTube сети Google добавляются сами; если в другом приложении что-то не грузится — выберите «все сайты».</string>
     <string name="second_country_label">Страна второго выхода</string>
     <string name="second_country_any">Любая — ближние первыми</string>
@@ -562,7 +573,7 @@
     <string name="second_state_up">Сейчас: работает — свой сервер ответил.</string>
     <string name="second_state_starting">Сейчас: поднимается…</string>
     <string name="second_state_failed">⚠ Сейчас: не поднялся — свой сервер не ответил, эти сайты идут через WARP.</string>
-    <string name="second_apps_warn">⚠ Через туннель идут только выбранные приложения — второй выход работает только в них. Для ChatGPT, Claude, Gemini отметьте их приложения и браузер в «Туннелировании».</string>
+    <string name="second_apps_warn">⚠ Через туннель идут только выбранные приложения — второй выход работает только в них. Для ChatGPT, Claude, Gemini отметьте их приложения и браузер в «Туннелировании»: браузер пойдёт через туннель только к нужным сайтам, а не целиком.</string>
     <string name="simple_update_desc">Проверить обновления</string>
     <!-- С 1.10.32 — в две строки: в одну скорость упиралась в кольцо кнопки. -->
     <string name="simple_rate">↓ %1$s\n↑ %2$s</string>
@@ -575,6 +586,7 @@
     <string name="simple_tun_sites_preset">кроме российских сетей</string>
     <string name="simple_tun_sites_lists">сайты из списков</string>
     <string name="simple_tun_sites_mine">мои сайты: %1$d</string>
+    <string name="simple_tun_sites_browser">браузер — только к нужным сайтам</string>
     <string name="simple_tun_change">Изменить ›</string>
     <string name="btn_check_update">Проверить обновления</string>
     <string name="update_checking">Проверяю обновления…</string>

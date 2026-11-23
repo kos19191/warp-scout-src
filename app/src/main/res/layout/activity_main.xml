@@ -1237,6 +1237,21 @@
                             android:textSize="15sp" />
                     </RadioGroup>
 
+                    <!-- С 1.10.35: браузер среди выбранных — только к нужным сайтам -->
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchBrowserSites"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="@string/browser_sites_switch" />
+
+                    <TextView
+                        android:id="@+id/textBrowserSitesNote"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/browser_sites_note"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
                     <TextView
                         android:id="@+id/textAppsState"
                         android:layout_width="match_parent"

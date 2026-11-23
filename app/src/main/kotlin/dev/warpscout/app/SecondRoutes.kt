@@ -48,6 +48,16 @@ object SecondRoutes {
             (if (missing.isNotEmpty()) ", не скачано: ${missing.joinToString(", ")}" else "")
     }
 
+    /**
+     * Правила сборки: поменялись — адреса собираются заново при первом удобном случае, не дожидаясь
+     * суток (см. [rulesChanged]). В подпись выбора они не входят: иначе экран писал бы «выбор сайтов
+     * поменялся», хотя человек ничего не трогал. 1 — 1.10.35: поддомены сервисов (AllowLists.EXTRA_HOSTS).
+     */
+    const val RULES = 1
+
+    /** Адреса собраны прежними правилами — пора собрать заново. */
+    fun rulesChanged(prefs: Prefs): Boolean = prefs.secondRules != RULES
+
     /** Что собирали — по этой подписи видно, что выбор поменялся и адреса пора собрать заново. */
     fun signature(prefs: Prefs): String =
         prefs.secondSources.sorted().joinToString(",") + "|" + prefs.secondDomains.trim()
@@ -56,7 +66,7 @@ object SecondRoutes {
     fun needsBuild(prefs: Prefs, now: Long = System.currentTimeMillis()): Boolean =
         prefs.secondExitOn && prefs.secondConf.isNotBlank() &&
             (prefs.secondCidrs.isBlank() || signature(prefs) != prefs.secondBuiltSig ||
-                now - prefs.secondRoutesAt > STALE_MS)
+                rulesChanged(prefs) || now - prefs.secondRoutesAt > STALE_MS)
 
     /**
      * Собрать адреса: скачать нужные списки (нет в кеше или старше недели), домены → адреса через
@@ -91,23 +101,32 @@ object SecondRoutes {
             }
         }
         listHosts.removeAll(ownHosts)
-        val all = ownHosts.toList() + listHosts.toList()
+        // Поддомены сервисов, которых нет в списках (с 1.10.35, см. AllowLists.EXTRA_HOSTS): вход в
+        // ChatGPT — auth.openai.com, а в списке только openai.com, и вход уходил через WARP.
+        val extraHosts = LinkedHashSet<String>()
+        ids.forEach { id -> AllowLists.EXTRA_HOSTS[id]?.let { extraHosts += it } }
+        extraHosts.removeAll(ownHosts)
+        extraHosts.removeAll(listHosts)
+        val all = ownHosts.toList() + listHosts.toList() + extraHosts.toList()
         log("второй выход: разворачиваю ${all.size} сайтов в адреса через DoH…")
         val resolved = AllowListPlanner.resolveAll(all, progress = progress)
+        // Поддомены сервисов — вместе со своими сайтами, в начало: при обрезке по MAX_CIDRS вход в
+        // ChatGPT не должен уступить место хвосту большого списка.
         val first = SiteList.cidrs(
             SiteList.Parsed(emptyList(), own.prefixes, emptyList()),
-            resolved.filterKeys { it in ownHosts }
+            resolved.filterKeys { it in ownHosts || it in extraHosts }
         )
         val rest = SiteList.cidrs(
             SiteList.Parsed(emptyList(), listPrefixes.toList(), emptyList()),
-            resolved.filterKeys { it !in ownHosts }
+            resolved.filterKeys { it !in ownHosts && it !in extraHosts }
         )
         val cidrs = LinkedHashSet<String>().apply {
             addAll(first)
             addAll(rest)
         }.toList()
-        val unresolved = resolved.count { it.value.isEmpty() }
-        return Result(cidrs.take(MAX_CIDRS), all.size, unresolved, missing)
+        // Поддомены, которых нет в DNS, — не ошибка списка: в «не найдено» их не считаем.
+        val unresolved = resolved.count { it.value.isEmpty() && it.key !in extraHosts }
+        return Result(cidrs.take(MAX_CIDRS), all.size - extraHosts.size, unresolved, missing)
     }
 
     /** Сохранить сборку. true — адреса изменились (сервису есть что обновить). */
@@ -124,6 +143,7 @@ object SecondRoutes {
         prefs.secondRoutesAt = System.currentTimeMillis()
         prefs.secondRoutesNote = result.note()
         prefs.secondBuiltSig = signature(prefs)
+        prefs.secondRules = RULES
         return changed
     }
 

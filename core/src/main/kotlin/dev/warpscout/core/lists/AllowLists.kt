@@ -154,6 +154,28 @@ object AllowLists {
     /** Сети Google, откуда идёт видео YouTube (googlevideo.com), — то же, что у списка youtube выше. */
     val YOUTUBE_VIDEO_NETS: List<String> get() = EXTRA_PREFIXES["youtube"].orEmpty()
 
+    /**
+     * Поддомены, без которых сервис из списка не работает (с 1.10.35). В списках allow-domains —
+     * правила «домен и все поддомены» для прокси-клиентов, а приложение превращает в адреса ровно
+     * перечисленные имена: поддомен на других адресах в таблицу не попадает. Журнал 23.11:
+     * chatgpt.com открылся через второй выход, а вход (auth.openai.com) ушёл через WARP с российским
+     * адресом — «unsupported_country_region_territory». Имена, которых нет в DNS, просто не дают
+     * адресов и в «не найдено» не считаются.
+     */
+    val EXTRA_HOSTS: Map<String, List<String>> = mapOf(
+        "openai" to listOf(
+            "auth.openai.com", "auth0.openai.com", "api.openai.com", "chat.openai.com", "platform.openai.com",
+            "cdn.openai.com", "cdn.oaistatic.com", "auth-cdn.oaistatic.com", "files.oaiusercontent.com",
+            "ab.chatgpt.com", "ws.chatgpt.com", "android.chat.openai.com", "ios.chat.openai.com",
+            "sora.chatgpt.com", "videos.openai.com",
+        ),
+        "claude" to listOf(
+            "api.anthropic.com", "console.anthropic.com", "www.anthropic.com", "statsig.anthropic.com",
+            "a-cdn.anthropic.com", "s-cdn.anthropic.com", "assets-proxy.anthropic.com", "www.claude.ai",
+        ),
+        "google-ai" to listOf("alkalimakersuite-pa.clients6.google.com"),
+    )
+
     /** ID категорий по умолчанию: то, что люди обычно и хотят пустить через WARP. */
     val DEFAULT_BLOCK_IDS = listOf("youtube", "discord", "telegram", "meta", "openai", "claude", "google-ai")
 

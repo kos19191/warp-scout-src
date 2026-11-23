@@ -309,6 +309,8 @@ class MainActivity : AppCompatActivity() {
             startSimpleTick()
             // Адреса сайтов второго выхода — тоже раз в сутки (с 1.10.31).
             refreshSecondIfStale()
+            // «Браузер — только к нужным сайтам» — собрать нужное, если ещё не собрано (с 1.10.35).
+            prepareBrowserSitesInBackground()
             // Список бесплатных серверов Proton — раз в неделю.
             refreshProtonIfStale()
             updateSecondState()
@@ -743,6 +745,15 @@ class MainActivity : AppCompatActivity() {
             markSettingsDirtyLater(getString(R.string.dirty_sites))
         }
         binding.btnBuildSites.setOnClickListener { buildSites() }
+        // «Браузер — только к нужным сайтам» (с 1.10.35). Маршруты задаются при подключении —
+        // правка ставит переподключение в очередь, как и выбор приложений.
+        binding.switchBrowserSites.isChecked = prefs.featBrowserSites
+        binding.switchBrowserSites.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked == prefs.featBrowserSites) return@setOnCheckedChangeListener
+            prefs.featBrowserSites = isChecked
+            updateTunnelSummary()
+            markSettingsDirty(getString(R.string.browser_sites_switch))
+        }
         updateSitesState()
         updateTunnelSummary()
     }
@@ -777,11 +788,14 @@ class MainActivity : AppCompatActivity() {
             // Сколько маршрутов получит туннель: к собранным добавляются сети Google для видео
             // YouTube (с 1.10.33), а без IPv6 v6-маршруты не выпускаются.
             val liveRoutes = runCatching { routeCount(prefs.allowedIps()) }.getOrDefault(0)
-            val routes = when (prefs.routesMode) {
-                1 -> getString(R.string.tunnel_sum_routes_preset)
-                2 -> if (listRoutes == 0) getString(R.string.tunnel_sum_routes_all)
+            val browserWanted = runCatching { prefs.browserSitesWanted() }.getOrDefault(false)
+            val browserActive = browserWanted && runCatching { prefs.browserSitesActive() }.getOrDefault(false)
+            val routes = when {
+                browserActive -> getString(R.string.tunnel_sum_routes_browser, liveRoutes)
+                prefs.routesMode == 1 -> getString(R.string.tunnel_sum_routes_preset)
+                prefs.routesMode == 2 -> if (listRoutes == 0) getString(R.string.tunnel_sum_routes_all)
                 else getString(R.string.tunnel_sum_routes_lists, if (liveRoutes > 0) liveRoutes else listRoutes)
-                3 -> if (sitesRoutes == 0) getString(R.string.tunnel_sum_routes_all)
+                prefs.routesMode == 3 -> if (sitesRoutes == 0) getString(R.string.tunnel_sum_routes_all)
                 else getString(R.string.tunnel_sum_routes_sites, if (liveRoutes > 0) liveRoutes else sitesRoutes)
                 else -> getString(R.string.tunnel_sum_routes_all)
             }
@@ -793,10 +807,29 @@ class MainActivity : AppCompatActivity() {
                 if ((prefs.routesMode == 2 && listRoutes == 0) || (prefs.routesMode == 3 && sitesRoutes == 0)) {
                     append("\n").append(getString(R.string.tunnel_warn_routes_empty))
                 }
-                // Приложения выбраны, а сайты — только из списков или свои: у приложений вроде YouTube
-                // видео идёт с серверов, которых в списках нет, и оно пойдёт мимо туннеля.
-                if (prefs.appsMode == Prefs.APPS_ONLY && selected > 0 && (prefs.routesMode == 2 || prefs.routesMode == 3)) {
-                    append("\n").append(getString(R.string.tunnel_warn_apps_routes))
+                // Браузер выбран, а сети выбранных приложений ещё не собраны — пока браузер идёт целиком.
+                if (browserWanted && !browserActive) {
+                    append("\n").append(getString(R.string.tunnel_browser_pending))
+                }
+                // Сайты выбраны не все (с 1.10.35): известные сервисы идут целиком по своим сетям, а о
+                // приложениях, чьих сетей мы не знаем, — предупреждаем: они идут только к выбранным
+                // сайтам (так решил человек 23.11).
+                val partial = browserActive ||
+                    ((prefs.routesMode == 2 && listRoutes > 0) || (prefs.routesMode == 3 && sitesRoutes > 0))
+                if (prefs.appsMode == Prefs.APPS_ONLY && selected > 0 && partial) {
+                    val whole = dev.warpscout.core.lists.AppServices.titlesFor(prefs.appsSelected)
+                    if (whole.isNotEmpty()) {
+                        append("\n").append(getString(R.string.tunnel_apps_whole, whole.joinToString(", ")))
+                    }
+                    val unknown = runCatching { prefs.unknownSelectedApps() }.getOrDefault(emptyList())
+                    if (unknown.isNotEmpty()) {
+                        val names = unknown.take(6).joinToString(", ") { "«${labelOfPackage(it)}»" } +
+                            if (unknown.size > 6) " и ещё ${unknown.size - 6}" else ""
+                        append("\n").append(getString(R.string.tunnel_warn_unknown_apps, names))
+                        if (browserActive || prefs.routesMode == 3) {
+                            append(" ").append(getString(R.string.tunnel_warn_unknown_fix))
+                        }
+                    }
                 }
                 append(otherProfileNote())
             }
@@ -891,6 +924,122 @@ class MainActivity : AppCompatActivity() {
         return summary
     }
 
+    /** Что собрать перед применением: свои сайты, маршруты по спискам, сети выбранных приложений. */
+    private class RouteNeeds(val sites: Boolean, val lists: Boolean, val apps: Boolean) {
+        val any: Boolean get() = sites || lists || apps
+    }
+
+    /**
+     * Что не собрано или устарело. С 1.10.35 — и для «Браузер — только к нужным сайтам» (ему нужны
+     * свои сайты и отмеченные списки), и сети выбранных приложений: при неполных маршрутах
+     * Telegram, Instagram, YouTube идут через туннель целиком только с ними.
+     */
+    private fun routeNeeds(): RouteNeeds {
+        val browser = runCatching { prefs.browserSitesWanted() }.getOrDefault(false)
+        val sites = (prefs.routesMode == 3 || browser) && prefs.tunnelSites.isNotBlank() &&
+            (prefs.tunnelSitesSig != prefs.tunnelSites.trim() || prefs.tunnelSitesCidrs.isBlank())
+        val lists = (prefs.routesMode == 2 || browser) &&
+            (prefs.allowedIpsText.isBlank() || prefs.listsBuiltSig != listsSignature())
+        val partial = browser || prefs.routesMode == 2 || prefs.routesMode == 3
+        val apps = partial && prefs.appsMode == Prefs.APPS_ONLY && !prefs.appNetsReady()
+        return RouteNeeds(sites, lists, apps)
+    }
+
+    /**
+     * Сети выбранных приложений → адреса (сеть: не из UI-потока, с 1.10.35): списки их сервисов
+     * (AppServices) — подсети как есть, домены через DoH. false — не собрались: тогда маршруты
+     * остаются прежними (браузер идёт целиком), а не без сетей Telegram и YouTube.
+     */
+    private fun buildAppNetsSync(): Boolean {
+        val ids = prefs.appNetsLists()
+        val sig = prefs.appNetsSignature()
+        if (ids.isEmpty()) {
+            prefs.appNetsText = ""
+            prefs.appNetsSig = sig
+            return true
+        }
+        val missing = ids.filter { lists.cached()[it] == null }
+        if (missing.isNotEmpty()) lists.refresh(missing) { line -> runOnUiThread { sink().log(line) } }
+        val cache = lists.cached()
+        val absent = ids.filter { cache[it] == null }
+        if (absent.isNotEmpty()) {
+            TunnelDebug.stage("сети выбранных приложений не собраны: не скачались списки ${absent.joinToString(", ")}")
+            return false
+        }
+        val block = ids.mapNotNull { dev.warpscout.core.lists.AllowLists.byId[it] }
+        val plan = AllowListPlanner.plan(
+            block = block,
+            direct = emptyList(),
+            parsed = cache.mapValues { it.value.parsed },
+            maxDomains = prefs.routeDomainBudget
+        )
+        if (plan.include.isEmpty()) return false
+        // Адрес замера скорости — тоже в маршруты: при неполных маршрутах замер после подключения
+        // шёл бы мимо туннеля и не мерился («не мерил — адрес замера не в маршрутах»), а по нему
+        // ловится «заморозка» точки.
+        val speed = runCatching { AllowListPlanner.dohResolve("speed.cloudflare.com") }.getOrDefault(emptyList())
+            .mapNotNull { a ->
+                when {
+                    a.contains(':') -> "$a/128"
+                    a.count { it == '.' } == 3 -> "$a/32"
+                    else -> null
+                }
+            }
+        prefs.appNetsText = (plan.include + speed).distinct().joinToString(", ")
+        prefs.appNetsSig = sig
+        prefs.appNetsAt = System.currentTimeMillis()
+        TunnelDebug.stage(
+            "сети выбранных приложений (" + dev.warpscout.core.lists.AppServices.titlesFor(prefs.appsSelected).joinToString(", ") +
+                "): ${plan.include.size} маршрутов"
+        )
+        return true
+    }
+
+    /** Идёт подготовка «Браузер — только к нужным сайтам» в фоне — второй раз не запускаем. */
+    @Volatile
+    private var browserPrepRunning = false
+
+    /** Подготовка в фоне уже была в этом процессе (удалась или нет) — сама больше не запускается. */
+    private var browserPrepTried = false
+
+    /**
+     * Браузер среди выбранных и «Браузер — только к нужным сайтам» включён, а нужное не собрано
+     * (например, сразу после обновления до 1.10.35) — собираем сами, в фоне, один раз за процесс.
+     * Маршруты меняются только при подключении: собранное поднимется со следующим подключением, а
+     * сразу — по «Сохранить и применить» (так и говорим). Ради этого туннель сами не рвём.
+     */
+    private fun prepareBrowserSitesInBackground() {
+        if (browserPrepRunning || browserPrepTried || preparingRoutes) return
+        val wanted = runCatching { prefs.browserSitesWanted() }.getOrDefault(false)
+        if (!wanted) return
+        val needs = runCatching { routeNeeds() }.getOrNull() ?: return
+        if (!needs.any) return
+        browserPrepRunning = true
+        browserPrepTried = true
+        Thread {
+            val ok = runCatching {
+                if (needs.sites) buildSitesSync()
+                if (needs.lists) buildListsSync()
+                if (needs.apps) buildAppNetsSync() else true
+            }.getOrDefault(false)
+            runCatching { dev.warpscout.app.status.ServiceSettingsStore.syncFromPrefs(this) }
+            runOnUiThread {
+                browserPrepRunning = false
+                if (!uiReady()) return@runOnUiThread
+                runCatching {
+                    updateTunnelSummary()
+                    updateSimple()
+                    if (ok && prefs.browserSitesActive()) {
+                        TunnelDebug.stage("браузер — только к нужным сайтам: адреса собраны — с следующего подключения (сразу — «Сохранить и применить»)")
+                        if (tunnel.supported && tunnel.isUp) banner(getString(R.string.browser_sites_ready))
+                    } else if (!ok) {
+                        TunnelDebug.stage("браузер — только к нужным сайтам: адреса не собрались — браузер пока идёт целиком")
+                    }
+                }
+            }
+        }.apply { isDaemon = true; name = "warpscout-browser-sites" }.start()
+    }
+
     /** Идёт сборка перед «Сохранить и применить» — второй раз не запускаем. */
     private var preparingRoutes = false
 
@@ -901,12 +1050,12 @@ class MainActivity : AppCompatActivity() {
      */
     private fun applyWithRoutes(why: String, upText: String? = null, downText: String? = null) {
         runCatching { persistUi() }
-        val needSites = prefs.routesMode == 3 && prefs.tunnelSites.isNotBlank() &&
-            (prefs.tunnelSitesSig != prefs.tunnelSites.trim() || prefs.tunnelSitesCidrs.isBlank())
-        val needLists = prefs.routesMode == 2 &&
-            (prefs.allowedIpsText.isBlank() || prefs.listsBuiltSig != listsSignature())
+        val needs = routeNeeds()
+        val needSites = needs.sites
+        val needLists = needs.lists
+        val needApps = needs.apps
         val needSecond = SecondRoutes.needsBuild(prefs)
-        if (!needSites && !needLists && !needSecond) {
+        if (!needSites && !needLists && !needApps && !needSecond) {
             saveAndApply(why, upText, downText)
             scheduleSecondCheck()
             return
@@ -925,6 +1074,11 @@ class MainActivity : AppCompatActivity() {
                     .onFailure { errors += (it.message ?: it.javaClass.simpleName) }
             }
             if (needLists) runCatching { buildListsSync() }.onFailure { errors += (it.message ?: it.javaClass.simpleName) }
+            if (needApps) {
+                runCatching { buildAppNetsSync() }
+                    .onSuccess { ok -> if (!ok) errors += getString(R.string.app_nets_failed) }
+                    .onFailure { errors += (it.message ?: it.javaClass.simpleName) }
+            }
             if (needSecond) {
                 runCatching {
                     val r = SecondRoutes.build(this, prefs) { line -> runOnUiThread { sink().log(line) } }
@@ -1136,6 +1290,10 @@ class MainActivity : AppCompatActivity() {
         // ничего не переключает, но занимает пол-экрана и выглядит как рабочая настройка —
         // поэтому прячем его целиком: поиск, «системные», сам список.
         val needsList = prefs.appsMode != Prefs.APPS_ALL
+        // «Браузер — только к нужным сайтам» имеет смысл, только когда приложения выбраны (с 1.10.35).
+        val onlyMode = if (prefs.appsMode == Prefs.APPS_ONLY) View.VISIBLE else View.GONE
+        binding.switchBrowserSites.visibility = onlyMode
+        binding.textBrowserSitesNote.visibility = onlyMode
         binding.tilAppSearch.visibility = if (needsList) View.VISIBLE else View.GONE
         binding.checkAppsSystem.visibility = if (needsList) View.VISIBLE else View.GONE
         binding.appsBox.visibility = if (needsList) View.VISIBLE else View.GONE
@@ -2674,7 +2832,9 @@ class MainActivity : AppCompatActivity() {
         // Не собралось (DoH молчит) — следующая попытка не раньше чем через полчаса.
         if (System.currentTimeMillis() - secondRefreshTriedAt < 30 * 60_000L) return
         if (!prefs.secondExitOn || prefs.secondConf.isBlank() || prefs.secondCidrs.isBlank()) return
-        if (System.currentTimeMillis() - prefs.secondRoutesAt < SecondRoutes.STALE_MS) return
+        // Правила сборки поменялись (с 1.10.35 — поддомены ChatGPT, Claude, Gemini) — собираем сразу,
+        // не дожидаясь суток: иначе после обновления вход в ChatGPT ещё сутки шёл бы через WARP.
+        if (System.currentTimeMillis() - prefs.secondRoutesAt < SecondRoutes.STALE_MS && !SecondRoutes.rulesChanged(prefs)) return
         if (SecondRoutes.signature(prefs) != prefs.secondBuiltSig) return
         if (!tunnel.supported || !tunnel.isUp) return
         secondRefreshRunning = true
@@ -3854,13 +4014,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun probeExitRegion() {
         Thread {
-            val trace = runCatching {
-                val conn = java.net.URL("https://www.cloudflare.com/cdn-cgi/trace").openConnection() as java.net.HttpURLConnection
+            // Сначала по адресу 1.1.1.1 (с 1.10.35): при раздельных маршрутах он в туннеле (DNS идёт
+            // через туннель), а www.cloudflare.com — нет, и регион выходил «мимо WARP» (журнал 23.11).
+            fun traceOf(url: String): dev.warpscout.core.net.CfTrace? = runCatching {
+                val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
                 conn.connectTimeout = 5000
                 conn.readTimeout = 5000
                 val text = conn.inputStream.bufferedReader().use { it.readText() }
                 dev.warpscout.core.net.CfTrace.parse(text)
             }.getOrNull()
+            val trace = traceOf(dev.warpscout.core.net.CfTrace.URL_BY_IP)?.takeIf { it.viaWarp }
+                ?: traceOf("https://www.cloudflare.com/cdn-cgi/trace")
             runOnUiThread {
                 when {
                     trace == null -> {
@@ -4979,7 +5143,8 @@ class MainActivity : AppCompatActivity() {
             else -> getString(R.string.simple_tun_apps_all)
         }
         val sitesCount = SiteList.parse(prefs.tunnelSites).total
-        val sub = when (prefs.routesMode) {
+        val browserSites = runCatching { prefs.browserSitesActive() }.getOrDefault(false)
+        val sub = if (browserSites) getString(R.string.simple_tun_sites_browser) else when (prefs.routesMode) {
             1 -> getString(R.string.simple_tun_sites_preset)
             2 -> getString(R.string.simple_tun_sites_lists)
             3 -> if (sitesCount > 0) getString(R.string.simple_tun_sites_mine, sitesCount)

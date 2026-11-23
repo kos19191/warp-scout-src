@@ -1898,9 +1898,8 @@ class WarpVpnService : VpnService() {
      */
     private fun runLinkCheck(): LinkResult {
         lastLinkCheckAt = System.currentTimeMillis()
-        val routes = lastConfigText
-            ?.let { text -> runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull() }
-            ?.let { cfg -> runCatching { ExitRouter.of(SplitRoutes.prefixesOf(cfg.allowedIps)) }.getOrNull() }
+        // Маршруты tun вместе с адресами DNS (с 1.10.35, см. tunRoutesOf).
+        val routes = currentRoutes()
         // С 1.10.28 сам WarpScout входит в туннель и в режиме «только выбранные» (см.
         // applyAppSplit) — мимо идут только адреса вне маршрутов.
         fun routed(ip: String): Boolean = routedIp(routes, ip)
@@ -2209,7 +2208,22 @@ class WarpVpnService : VpnService() {
 
     private fun currentRoutes(): ExitRouter? = lastConfigText
         ?.let { text -> runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull() }
-        ?.let { cfg -> runCatching { ExitRouter.of(SplitRoutes.prefixesOf(cfg.allowedIps)) }.getOrNull() }
+        ?.let { cfg -> tunRoutesOf(cfg) }
+
+    /**
+     * Маршруты tun так, как их ставит [builderFor] (с 1.10.35): маршруты конфига плюс адреса DNS при
+     * раздельных маршрутах. Раньше проверки смотрели только маршруты конфига: при «сайтах из списков»
+     * адрес 1.1.1.1 в туннеле был (DNS идёт через туннель), а проверка связи писала «интернет — мимо
+     * туннеля» и не видела, через какой город выходит WARP (журнал 23.11, 08:41–09:26).
+     */
+    private fun tunRoutesOf(cfg: WarpConfig): ExitRouter? = runCatching {
+        val text = if (runCatching { serviceSettings().dnsInTunnel }.getOrDefault(true)) {
+            runCatching { SplitRoutes.withDns(cfg.allowedIps, cfg.dns) }.getOrDefault(cfg.allowedIps)
+        } else {
+            cfg.allowedIps
+        }
+        ExitRouter.of(SplitRoutes.prefixesOf(text))
+    }.getOrNull()
 
     /**
      * Замер в своём потоке. [full] — по нажатию (до 10 МБ / 6 с), иначе короткий (полмегабайта).

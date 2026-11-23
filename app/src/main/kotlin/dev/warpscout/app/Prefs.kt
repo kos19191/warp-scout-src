@@ -164,6 +164,11 @@ class Prefs(private val context: Context) {
         get() = sp.getString("secondBuiltSig", "").orEmpty()
         set(v) = sp.edit().putString("secondBuiltSig", v).apply()
 
+    /** Какими правилами собраны адреса второго выхода (см. SecondRoutes.RULES; 0 — до 1.10.35). */
+    var secondRules: Int
+        get() = sp.getInt("secondRules", 0)
+        set(v) = sp.edit().putInt("secondRules", v).apply()
+
     /** Второй выход внутри WARP (по умолчанию) или напрямую — см. ServiceSettings.secondViaWarp. */
     var secondViaWarp: Boolean
         get() = sp.getBoolean("secondViaWarp", true)
@@ -517,6 +522,35 @@ class Prefs(private val context: Context) {
             pushToService()
         }
 
+    /**
+     * «Браузер — только к нужным сайтам» (с 1.10.35, так решил человек 23.11): браузер среди
+     * выбранных приложений идёт через туннель только к сайтам второго выхода, своим сайтам и
+     * отмеченным спискам; выбранные приложения известных сервисов — целиком (см. [routeParts]).
+     */
+    var featBrowserSites: Boolean
+        get() = sp.getBoolean("featBrowserSites", true)
+        set(v) {
+            sp.edit().putBoolean("featBrowserSites", v).apply()
+            pushToService()
+        }
+
+    /**
+     * Сети выбранных приложений (с 1.10.35): списки их сервисов (AppServices), собранные в адреса —
+     * подсети из списков и адреса доменов через DoH. Собираются при «Сохранить и применить»
+     * (см. [appNetsReady]), подпись — [appNetsSignature].
+     */
+    var appNetsText: String
+        get() = sp.getString("appNetsText", "").orEmpty()
+        set(v) = sp.edit().putString("appNetsText", v.trim()).apply()
+
+    var appNetsSig: String
+        get() = sp.getString("appNetsSig", "").orEmpty()
+        set(v) = sp.edit().putString("appNetsSig", v).apply()
+
+    var appNetsAt: Long
+        get() = sp.getLong("appNetsAt", 0L)
+        set(v) = sp.edit().putLong("appNetsAt", v).apply()
+
     /** Пускать Telegram через второй выход, пока выход WARP — в России (с 1.10.34). */
     var featTgSecond: Boolean
         get() = sp.getBoolean("featTgSecond", true)
@@ -638,13 +672,64 @@ class Prefs(private val context: Context) {
         dev.warpscout.core.config.ConfTarget.values()[confTarget.coerceIn(0, 3)]
 
     fun routesModeName(): String = context.getString(
-        when (routesMode) {
-            1 -> R.string.routes_mode_preset
-            2 -> R.string.routes_mode_lists
-            3 -> R.string.routes_mode_manual
+        when {
+            runCatching { browserSitesActive() }.getOrDefault(false) -> R.string.routes_mode_browser
+            routesMode == 1 -> R.string.routes_mode_preset
+            routesMode == 2 -> R.string.routes_mode_lists
+            routesMode == 3 -> R.string.routes_mode_manual
             else -> R.string.routes_mode_all
         }
     )
+
+    // ------------------------------------------------ браузер — только к нужным сайтам (с 1.10.35)
+    //
+    // Android решает сначала по приложению, потом по адресам, и адреса у туннеля общие для всех
+    // выбранных приложений. Поэтому «браузер — только к сайтам, Telegram — целиком» выражается так:
+    // маршруты = нужные сайты + сети выбранных приложений. Telegram, Instagram, YouTube ходят только в
+    // свои сети и идут целиком; браузеру из этих маршрутов достаются только сайты (и сайты тех же
+    // сервисов: youtube.com, instagram.com — маршруты общие). Сайты второго выхода сервис добавляет
+    // в маршруты сам. Приложения без известного сервиса при неполных маршрутах идут только к сайтам —
+    // экран об этом предупреждает (так решил человек 23.11).
+
+    /** Списки сервисов выбранных приложений (только в режиме «только выбранные»). */
+    fun appNetsLists(): List<String> =
+        if (appsMode == APPS_ONLY) dev.warpscout.core.lists.AppServices.listsFor(appsSelected) else emptyList()
+
+    /** Подпись сетей приложений: правила сборки и списки. Изменилась — собрать заново. */
+    fun appNetsSignature(): String =
+        "v${dev.warpscout.core.lists.AllowListPlanner.VERSION};" + appNetsLists().sorted().joinToString(",")
+
+    /** Сети выбранных приложений собраны под нынешний выбор (или собирать нечего). */
+    fun appNetsReady(): Boolean = appNetsLists().isEmpty() || (appNetsText.isNotBlank() && appNetsSig == appNetsSignature())
+
+    /** Выбранные браузеры (только в режиме «только выбранные»). */
+    fun selectedBrowsers(): List<String> =
+        if (appsMode == APPS_ONLY) Browsers.among(context, appsSelected) else emptyList()
+
+    /** Выбранные приложения, сетей которых мы не знаем (не браузеры и не известные сервисы). */
+    fun unknownSelectedApps(): List<String> {
+        if (appsMode != APPS_ONLY) return emptyList()
+        return appsSelected.filter { pkg ->
+            dev.warpscout.core.lists.AppServices.serviceOf(pkg) == null && !Browsers.isBrowser(context, pkg)
+        }.sorted()
+    }
+
+    /**
+     * Браузер должен идти только к нужным сайтам: переключатель включён, «только выбранные», среди
+     * них есть браузер, а сайты — «все» или «всё, кроме российских сетей» (иначе маршруты и так
+     * неполные: там браузер уже идёт только к выбранным сайтам).
+     */
+    fun browserSitesWanted(): Boolean =
+        featBrowserSites && appsMode == APPS_ONLY && (routesMode == 0 || routesMode == 1) && selectedBrowsers().isNotEmpty()
+
+    /**
+     * То же, и сети выбранных приложений собраны. Пока не собраны — по-старому (браузер целиком):
+     * иначе Telegram и YouTube остались бы без своих сетей.
+     */
+    fun browserSitesActive(): Boolean = browserSitesWanted() && appNetsReady()
+
+    /** Маршруты по спискам собраны под нынешние отметки. */
+    fun listsReady(): Boolean = allowedIpsText.isNotBlank() && listsBuiltSig == listsSignature()
 
     /**
      * Что реально попадёт в `AllowedIPs`.
@@ -671,8 +756,8 @@ class Prefs(private val context: Context) {
     }
 
     fun allowedIps(): String {
-        val (raw, video) = routeParts()
-        return onlyUsable(if (video.isEmpty()) raw else raw + ", " + video.joinToString(", "))
+        val parts = routeParts()
+        return onlyUsable(parts.all())
     }
 
     /**
@@ -683,23 +768,27 @@ class Prefs(private val context: Context) {
      * «Сохранить и применить». Журнал 23.11: в режиме «сайты из списков» страница и превью YouTube
      * грузились, а видео шло мимо туннеля — по LTE, где его замедляет оператор, — и вставало.
      */
-    private fun routeParts(): Pair<String, List<String>> {
-        val plan = allowedIpsText
-        val raw = when (routesMode) {
-            1 -> dev.warpscout.core.presets.RoutePresets.BYPASS_WHITELIST_CSV
-            2 -> plan.ifBlank { "0.0.0.0/0, ::/0" }
-            // «Мои сайты» (с 1.10.31) — их адреса; до первой сборки — весь трафик. Прежний ручной
-            // список переносится сам (см. migrateManualRoutes) — и здесь тоже: туннель может
-            // подняться после обновления раньше, чем откроют экран (автозапуск, плитка).
-            3 -> tunnelSitesCidrs.ifBlank { migrateManualRoutes(); tunnelSitesCidrs }.ifBlank { "0.0.0.0/0, ::/0" }
-            else -> "0.0.0.0/0, ::/0"
-        }
-        val video = if ((routesMode == 2 || routesMode == 3) && youtubeTunneled()) {
-            dev.warpscout.core.config.SplitRoutes.missing(raw, dev.warpscout.core.lists.AllowLists.YOUTUBE_VIDEO_NETS)
-        } else {
-            emptyList()
-        }
-        return raw to video
+    private fun routeParts(): dev.warpscout.core.config.TunnelRoutes.Parts {
+        val browser = runCatching { browserSitesActive() }.getOrDefault(false)
+        // «Мои сайты» (с 1.10.31) — их адреса; до первой сборки — весь трафик. Прежний ручной
+        // список переносится сам (см. migrateManualRoutes) — и здесь тоже: туннель может
+        // подняться после обновления раньше, чем откроют экран (автозапуск, плитка).
+        val own = if (routesMode == 3) tunnelSitesCidrs.ifBlank { migrateManualRoutes(); tunnelSitesCidrs } else tunnelSitesCidrs
+        // Для браузера — только списки, собранные под нынешние отметки: устаревшие могли включать
+        // то, с чего галочку уже сняли.
+        val lists = if (browser && !listsReady()) "" else allowedIpsText
+        // Сети выбранных приложений (с 1.10.35): Telegram, Instagram, YouTube идут целиком, даже
+        // когда сайты выбраны не все.
+        val appNets = if (appsMode == APPS_ONLY && appNetsReady()) appNetsText else ""
+        return dev.warpscout.core.config.TunnelRoutes.compose(
+            mode = routesMode,
+            browser = browser,
+            lists = lists,
+            own = own,
+            preset = dev.warpscout.core.presets.RoutePresets.BYPASS_WHITELIST_CSV,
+            appNets = appNets,
+            youtube = youtubeTunneled(),
+        )
     }
 
     /**
@@ -721,7 +810,7 @@ class Prefs(private val context: Context) {
      */
     fun youtubeTunneled(): Boolean {
         val lists = dev.warpscout.core.lists.AllowLists
-        if (routesMode == 2) {
+        if (routesMode == 2 || runCatching { browserSitesActive() }.getOrDefault(false)) {
             // Пустой выбор списков сборка понимает как набор по умолчанию (см. ConfigComposer.buildPlan).
             val block = allowBlockIds.filter { lists.byId.containsKey(it) }.ifEmpty { lists.DEFAULT_BLOCK_IDS }
             if ("youtube" in block) return true
@@ -736,16 +825,27 @@ class Prefs(private val context: Context) {
      * каком режиме поднялся туннель и добавились ли сети Google для видео YouTube.
      */
     fun routesNote(): String {
-        val (raw, video) = routeParts()
+        val parts = routeParts()
+        val split = dev.warpscout.core.config.SplitRoutes
         val name = routesModeName()
-        val full = dev.warpscout.core.config.SplitRoutes.prefixesOf(raw).any { it == "0.0.0.0/0" }
+        val full = split.prefixesOf(parts.base).any { it == "0.0.0.0/0" }
+        val usable = { list: List<String> -> list.count { enableIpv6 || !it.contains(':') } }
         val base = when {
+            parts.browser -> name + ": " + usable(split.prefixesOf(parts.base))
+            routesMode == 0 && browserSitesWanted() -> "$name — браузер пока целиком: сети выбранных приложений ещё не собраны"
             routesMode == 0 -> name
             full && (routesMode == 2 || routesMode == 3) -> "$name — адреса ещё не собраны, пока весь трафик"
-            else -> name + ": " + dev.warpscout.core.config.SplitRoutes.prefixesOf(onlyUsable(raw)).size
+            else -> name + ": " + usable(split.prefixesOf(parts.base))
         }
-        val added = video.count { enableIpv6 || !it.contains(':') }
-        return if (added > 0) "$base + сети Google для видео YouTube: $added" else base
+        val apps = usable(parts.apps)
+        val withApps = if (apps > 0) {
+            val titles = dev.warpscout.core.lists.AppServices.titlesFor(appsSelected).joinToString(", ")
+            "$base + сети выбранных приложений ($titles): $apps"
+        } else {
+            base
+        }
+        val added = usable(parts.video)
+        return if (added > 0) "$withApps + сети Google для видео YouTube: $added" else withApps
     }
 
     /**

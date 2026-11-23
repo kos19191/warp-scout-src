@@ -167,6 +167,10 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             siteProbeChecks()
             telegramMediaChecks()
         }
+        section("браузер — только к нужным сайтам, поддомены второго выхода (1.10.35)") {
+            appServicesChecks()
+            tunnelRoutesChecks()
+        }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
                 liveNetwork()
@@ -440,6 +444,75 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         } finally {
             server.close()
         }
+    }
+
+    /** Какие списки нужны выбранным приложениям, какие приложения — браузеры, поддомены сервисов. */
+    private fun appServicesChecks() {
+        val a = dev.warpscout.core.lists.AppServices
+        expect("сервисы: Telegram — по пакету", a.serviceOf("org.telegram.messenger")?.title, "Telegram")
+        expect("сервисы: Telegram X — тоже Telegram", a.serviceOf("org.thunderdog.challegram")?.lists, listOf("telegram"))
+        expect("сервисы: неизвестный клиент Telegram — по имени пакета", a.serviceOf("com.example.telegram.fork")?.title, "Telegram")
+        expect("сервисы: WhatsApp — сети Meta", a.serviceOf("com.whatsapp")?.lists, listOf("meta"))
+        expect("сервисы: ChatGPT — список OpenAI", a.serviceOf("com.openai.chatgpt")?.lists, listOf("openai"))
+        expect(
+            "сервисы: Telegram, Instagram, Facebook, YouTube, X — списки без повторов",
+            a.listsFor(listOf("com.twitter.android", "com.facebook.katana", "org.telegram.messenger", "com.instagram.android", "com.google.android.youtube")),
+            listOf("telegram", "meta", "youtube", "twitter")
+        )
+        check("сервисы: Chrome — не сервис", a.serviceOf("com.android.chrome") == null)
+        check("сервисы: браузер со словом сервиса в имени — всё равно браузер", a.serviceOf("com.yandex.browser") == null)
+        check("сервисы: незнакомое приложение — сетей не знаем", a.serviceOf("com.valvesoftware.android.steam.community") == null)
+        check(
+            "браузеры: Chrome, Samsung Internet, Яндекс, Firefox — известны",
+            listOf("com.android.chrome", "com.sec.android.app.sbrowser", "com.yandex.browser", "org.mozilla.firefox").all { a.isKnownBrowser(it) }
+        )
+        check("браузеры: Telegram — не браузер", !a.isKnownBrowser("org.telegram.messenger"))
+        expect("сервисы: названия для экрана", a.titlesFor(listOf("com.whatsapp", "org.telegram.messenger")), listOf("Telegram", "WhatsApp"))
+        val extra = dev.warpscout.core.lists.AllowLists.EXTRA_HOSTS
+        check("второй выход: вход в ChatGPT (auth.openai.com) — в адресах", "auth.openai.com" in extra["openai"].orEmpty())
+        check("второй выход: API Claude — в адресах", "api.anthropic.com" in extra["claude"].orEmpty())
+        check(
+            "второй выход: поддомены — только для известных списков",
+            extra.keys.all { dev.warpscout.core.lists.AllowLists.byId.containsKey(it) }
+        )
+    }
+
+    /** Маршруты из частей: сайты для браузера, сети выбранных приложений, прежние режимы. */
+    private fun tunnelRoutesChecks() {
+        val r = dev.warpscout.core.config.TunnelRoutes
+        val sr = SplitRoutes
+        expect("маршруты: объединение — пустое начало", sr.union("", "1.2.3.4/32"), "1.2.3.4/32")
+        expect("маршруты: объединение — накрытое и повторы не добавляются", sr.union("10.0.0.0/8, 8.8.8.8/32", "10.1.2.3/32, 8.8.8.8/32, 9.9.9.9/32"),
+            "10.0.0.0/8, 8.8.8.8/32, 9.9.9.9/32")
+        expect("маршруты: объединение — всё пусто", sr.union("", " "), "")
+        expect("маршруты: объединение — весь трафик остаётся весь", sr.union("0.0.0.0/0, ::/0", "1.2.3.4/32"), "0.0.0.0/0, ::/0")
+        val preset = "5.0.0.0/8, 37.0.0.0/8"
+        val tg = "91.108.4.0/22, 149.154.160.0/20"
+        // Прежние режимы без браузера — как были.
+        expect("маршруты: весь трафик — как был", r.compose(0, false, "", "", preset, tg, true).all(), "0.0.0.0/0, ::/0")
+        expect("маршруты: кроме российских — как был", r.compose(1, false, "", "", preset, tg, false).all(), preset)
+        expect("маршруты: списки не собраны — весь трафик", r.compose(2, false, "", "", preset, tg, false).all(), "0.0.0.0/0, ::/0")
+        // Списки + сети выбранных приложений.
+        val lists = r.compose(2, false, "1.1.1.0/24", "", preset, tg, false)
+        expect("маршруты: списки + сети выбранных приложений", lists.all(), "1.1.1.0/24, 91.108.4.0/22, 149.154.160.0/20")
+        expect("маршруты: добавленные сети приложений видны отдельно", lists.apps, listOf("91.108.4.0/22", "149.154.160.0/20"))
+        expect("маршруты: мои сайты + сети приложений", r.compose(3, false, "", "104.18.32.47/32", preset, tg, false).all(),
+            "104.18.32.47/32, 91.108.4.0/22, 149.154.160.0/20")
+        // Браузер — только к нужным сайтам: списки и свои сайты вместе, плюс сети приложений.
+        val browser = r.compose(0, true, "1.1.1.0/24", "104.18.32.47/32", preset, tg, false)
+        check("маршруты: браузер — не весь трафик", sr.prefixesOf(browser.all()).none { it == "0.0.0.0/0" })
+        expect("маршруты: браузер — списки, свои сайты и сети приложений", browser.all(),
+            "1.1.1.0/24, 104.18.32.47/32, 91.108.4.0/22, 149.154.160.0/20")
+        check("маршруты: браузер — режим отмечен", browser.browser)
+        expect("маршруты: браузер без сайтов — только сети приложений", r.compose(0, true, "", "", preset, tg, false).all(), tg)
+        expect("маршруты: браузер, но выбрать нечего — весь трафик", r.compose(0, true, "", "", preset, "", false).all(), "0.0.0.0/0, ::/0")
+        // Сеть приложения, уже накрытая сайтами, второй раз не добавляется.
+        expect("маршруты: накрытая сеть приложения не повторяется", r.compose(2, false, "91.108.0.0/16", "", preset, tg, false).apps,
+            listOf("149.154.160.0/20"))
+        // YouTube: сети Google для видео — при неполных маршрутах.
+        val yt = r.compose(2, false, "1.1.1.0/24", "", preset, "", true)
+        check("маршруты: YouTube — сети Google для видео добавлены", "192.178.0.0/15" in yt.video)
+        check("маршруты: весь трафик — сети Google не нужны", r.compose(0, false, "", "", preset, "", true).video.isEmpty())
     }
 
     // ------------------------------------------------------------------ helpers

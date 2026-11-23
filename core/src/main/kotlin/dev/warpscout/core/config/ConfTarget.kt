@@ -202,6 +202,23 @@ object SplitRoutes {
         return (prefixesOf(allowedIps) + add).joinToString(", ")
     }
 
+    /**
+     * Маршруты из частей (с 1.10.35): первая непустая часть — основа, к ней добавляется то, чего в
+     * ней ещё нет (повторы и сети, которые накрывает более широкий префикс, — пропускаются, см.
+     * [missing]). Все части пустые — пустая строка: что делать с пустым выбором, решает вызывающий.
+     * Нужна, чтобы к сайтам добавить сети выбранных приложений: браузер — только к сайтам, а
+     * Telegram, Instagram, YouTube — целиком.
+     */
+    fun union(vararg parts: String): String {
+        var acc = ""
+        for (part in parts) {
+            val prefixes = prefixesOf(part)
+            if (prefixes.isEmpty()) continue
+            acc = if (prefixesOf(acc).isEmpty()) prefixes.distinct().joinToString(", ") else withExtra(acc, prefixes)
+        }
+        return acc
+    }
+
     /** «a.b.c.d» → число; null — не IPv4. */
     private fun v4ToInt(ip: String): Int? {
         val parts = ip.split('.')
