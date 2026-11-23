@@ -378,7 +378,7 @@ WARP выходит в интернет через площадку Cloudflare, 
 | `speed.cloudflare.com` | замер скорости | по кнопке в отчёте |
 | `1.1.1.1` (запрос `id.server` внутри пробы WARP) | площадка выхода точки | подбор |
 | `telegram.org` (начало `/dl/android/apk`, до 256 КБ) | проверка медиа Telegram | проверка связи, не чаще раза в 30 минут |
-| `api.github.com`, `github.com`, `objects.githubusercontent.com` | последний релиз и его APK | по кнопке «Обновления»; при раздельных маршрутах — через туннель |
+| `api.github.com`, `github.com`, `release-assets.githubusercontent.com` (раньше `objects.githubusercontent.com`) | последний релиз и его APK | по кнопке «Обновления»; при раздельных маршрутах — через туннель |
 | `raw.githubusercontent.com` | списки сайтов (allow-domains) и серверов Proton Free (gluetun) | сборка адресов второго выхода и списков |
 
 Приложение не создаёт аккаунтов, не собирает телеметрию, не показывает рекламу и не отправляет
