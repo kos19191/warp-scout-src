@@ -235,9 +235,16 @@ class Prefs(private val context: Context) {
         pushToService()
     }
 
-    /** Восстановление из бекапа: пишем только известные типы, мусор игнорируем. */
+    /**
+     * Восстановление из бекапа: настройки становятся такими, как в копии («будут заменены» — так и
+     * написано в вопросе). До 1.10.40 значения дописывались поверх текущих, и на свежей установке её
+     * отметки разовых переносов (init) оставались: копия из прошлой версии не получала, например, шум
+     * «как Chrome». Теперь сначала всё стирается, а переносы отрабатывают при следующем создании Prefs
+     * (Backup.restoreText создаёт его сразу). commit, а не apply: экран тут же читает настройки заново.
+     * Пишем только известные типы, мусор игнорируем.
+     */
     fun restoreAll(values: Map<String, Any?>) {
-        val edit = sp.edit()
+        val edit = sp.edit().clear()
         values.forEach { (key, value) ->
             when (value) {
                 is String -> edit.putString(key, value)
@@ -248,7 +255,7 @@ class Prefs(private val context: Context) {
                 is Set<*> -> edit.putStringSet(key, value.map { it.toString() }.toSet())
             }
         }
-        edit.apply()
+        edit.commit()
         pushToService()
     }
 

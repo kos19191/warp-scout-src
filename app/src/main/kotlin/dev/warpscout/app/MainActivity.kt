@@ -130,6 +130,24 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         }
     }
 
+    /**
+     * Выбор файла бекапа (с 1.10.40). При удалении приложения Android стирает и его копии
+     * (files/backups), и после переустановки «Восстановить из копии» писала только «Бекапов пока нет» —
+     * хотя файл, сохранённый раньше кнопкой «Сохранить резервную копию», лежал в «Загрузках», на Диске
+     * или в Telegram. Теперь открывается системное окно выбора файла. Разрешений не нужно.
+     */
+    private val pickBackup = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val uri = result.data?.data
+        if (result.resultCode == android.app.Activity.RESULT_OK && uri != null && ::binding.isInitialized) {
+            runCatching { loadBackupFile(uri) }.onFailure { t ->
+                TunnelDebug.error("бекап: файл не прочитался — " + SafeMode.describe(t))
+                banner(getString(R.string.backup_file_fail, SafeMode.describe(t)), error = true)
+            }
+        }
+    }
+
     /** Одна строка списка приложений: только то, что нужно для показа и сохранения. */
     private data class AppEntry(val pkg: String, val label: String, val system: Boolean)
     private var selectedTab = 0
@@ -1993,31 +2011,10 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         }
 
         binding.btnRestore.setOnClickListener {
-            val file = Backup.newest(this)
-            if (file == null) {
-                toast(getString(R.string.backup_none))
-                return@setOnClickListener
+            runCatching { restoreFromBackup() }.onFailure { t ->
+                TunnelDebug.error("бекап: " + SafeMode.describe(t))
+                banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
             }
-            androidx.appcompat.app.AlertDialog.Builder(this)
-                .setTitle(R.string.backup_restore_title)
-                .setMessage(getString(R.string.backup_restore_message, file.name))
-                .setPositiveButton(R.string.backup_restore_ok) { _, _ ->
-                    val applied = Backup.restore(this, file)
-                    if (applied > 0) {
-                        toast(getString(R.string.backup_restored, file.name, applied))
-                        suppressSettingsReconnect = true
-                        runCatching { fillFromPrefs() }
-                        suppressSettingsReconnect = false
-                        runCatching { buildListsChecks() }
-                        runCatching { rebuildAppsList() }
-                        runCatching { refreshRoutesState() }
-                        runCatching { updateEndpointNote() }
-                    } else {
-                        toast(getString(R.string.backup_failed))
-                    }
-                }
-                .setNegativeButton(android.R.string.cancel, null)
-                .show()
         }
 
         binding.btnExportAmnezia.setOnClickListener {
@@ -5222,6 +5219,154 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         banner(getString(if (proton) R.string.second_file_ok_proton else R.string.second_file_ok, endpoint))
     }
 
+    // ------------------------------------------------ бекап: восстановление (с 1.10.40)
+
+    /**
+     * «Восстановить из копии». Есть копия в приложении — спрашиваем про неё, рядом «Выбрать файл…»
+     * (может быть нужна другая, например с прошлого телефона). Нет — а после переустановки её нет
+     * всегда — сразу открываем выбор файла, а не пишем «Бекапов пока нет» и всё.
+     */
+    private fun restoreFromBackup() {
+        val file = Backup.newest(this)
+        if (file == null) {
+            toast(getString(R.string.backup_none))
+            openBackupPicker()
+            return
+        }
+        val details = runCatching { Backup.describe(file.readText()) }.getOrNull()
+        confirmRestore(file.name, details, pickOther = true) { Backup.restore(this, file) }
+    }
+
+    /** Системное окно выбора файла — сразу в «Загрузках», куда копию обычно и сохраняют. */
+    private fun openBackupPicker() {
+        // Тип у .bak бывает любой (text/plain, application/octet-stream) — показываем все файлы.
+        val open = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(
+                android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                android.provider.DocumentsContract.buildDocumentUri(
+                    "com.android.externalstorage.documents", "primary:Download"
+                )
+            )
+        }
+        // Прошивка без системного окна документов — тогда любое приложение, которое отдаёт файлы.
+        val get = Intent(Intent.ACTION_GET_CONTENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        val opened = runCatching { pickBackup.launch(open) }.isSuccess ||
+            runCatching { pickBackup.launch(get) }.isSuccess
+        if (!opened) {
+            TunnelDebug.error("бекап: окно выбора файла не открылось")
+            banner(getString(R.string.backup_picker_fail), error = true)
+        }
+    }
+
+    /**
+     * Бекап из выбранного файла: не больше 4 МБ, текстом. Читаем в своём потоке: файл с Диска система
+     * может сначала докачивать, и в потоке экрана это было бы зависание. Потом — на экране: проверяем,
+     * что это наш файл (первая строка — заголовок бекапа), и показываем, когда и почему он записан;
+     * применяем — только после «Восстановить».
+     */
+    private fun loadBackupFile(uri: Uri) {
+        Thread {
+            val fileName = displayName(uri) ?: uri.lastPathSegment ?: "файл"
+            val read = runCatching { readBackupBytes(uri) }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                read.onSuccess { bytes ->
+                    runCatching { onBackupFileRead(fileName, bytes) }.onFailure { t ->
+                        TunnelDebug.error("бекап: «$fileName» — " + SafeMode.describe(t))
+                        banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+                    }
+                }.onFailure { t ->
+                    TunnelDebug.error("бекап: «$fileName» не прочитался — " + SafeMode.describe(t))
+                    banner(getString(R.string.backup_file_fail, SafeMode.describe(t)), error = true)
+                }
+            }
+        }.apply { isDaemon = true; name = "warpscout-backup-read" }.start()
+    }
+
+    /** Байты файла, не больше [BACKUP_FILE_LIMIT] + 1 (лишний байт — признак «файл больше»). */
+    private fun readBackupBytes(uri: Uri): ByteArray =
+        contentResolver.openInputStream(uri)?.use { input ->
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(8192)
+            while (out.size() <= BACKUP_FILE_LIMIT) {
+                val n = input.read(buf)
+                if (n < 0) break
+                out.write(buf, 0, n)
+            }
+            out.toByteArray()
+        } ?: throw java.io.IOException("файл не открылся")
+
+    private fun onBackupFileRead(fileName: String, bytes: ByteArray) {
+        if (bytes.size > BACKUP_FILE_LIMIT) {
+            banner(getString(R.string.backup_file_big), error = true)
+            return
+        }
+        val text = String(bytes, Charsets.UTF_8)
+        if (!Backup.isBackup(text)) {
+            TunnelDebug.stage("бекап: «$fileName» — не бекап WarpScout")
+            banner(getString(R.string.backup_file_bad, fileName), error = true)
+            return
+        }
+        val details = Backup.describe(text)
+        TunnelDebug.stage("бекап: выбран файл «$fileName»" + (details?.let { " ($it)" } ?: ""))
+        confirmRestore(fileName, details, pickOther = false) { Backup.restoreText(this, text) }
+    }
+
+    /** Имя выбранного файла, как его показывает система. */
+    private fun displayName(uri: Uri): String? = runCatching {
+        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        }
+    }.getOrNull()
+
+    /**
+     * Вопрос «Восстановить настройки?»: имя файла и, если есть, когда и почему он записан. [pickOther] —
+     * кнопка «Выбрать файл…» рядом с копией из приложения.
+     */
+    private fun confirmRestore(name: String, details: String?, pickOther: Boolean, doRestore: () -> Int) {
+        val label = "«$name»" + (details?.let { " ($it)" } ?: "")
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(R.string.backup_restore_title)
+            .setMessage(getString(R.string.backup_restore_message, label))
+            .setPositiveButton(R.string.backup_restore_ok) { _, _ ->
+                runCatching { applyRestore(name, doRestore) }.onFailure { t ->
+                    TunnelDebug.error("бекап: восстановление — " + SafeMode.describe(t))
+                    banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+        if (pickOther) {
+            dialog.setNeutralButton(R.string.backup_pick) { _, _ -> runCatching { openBackupPicker() } }
+        }
+        dialog.show()
+    }
+
+    private fun applyRestore(name: String, doRestore: () -> Int) {
+        val applied = doRestore()
+        if (applied <= 0) {
+            toast(getString(R.string.backup_failed))
+            return
+        }
+        TunnelDebug.stage("бекап: восстановлено из «$name» — настроек $applied")
+        toast(getString(R.string.backup_restored, name, applied))
+        suppressSettingsReconnect = true
+        runCatching { fillFromPrefs() }
+        suppressSettingsReconnect = false
+        // Галочки шума и «Что проверять» — тоже из восстановленных настроек. Раньше они оставались
+        // прежними, и следующее сохранение экрана (persistUi) записывало старые отметки обратно.
+        runCatching { buildJunkChecks() }
+        runCatching { buildResourceList() }
+        runCatching { buildListsChecks() }
+        runCatching { rebuildAppsList() }
+        runCatching { refreshRoutesState() }
+        runCatching { updateEndpointNote() }
+    }
+
     // ------------------------------------------------ приложения (упрощённый экран)
 
     private fun showAppsSheet() {
@@ -5975,6 +6120,9 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         /** Индекс выбранной вкладки переживает поворот экрана. */
         /** Сколько приложений рисуем сразу: остальные — через поиск (иначе экран «залипает»). */
         const val APP_ROWS_LIMIT = 60
+
+        /** Бекап из выбранного файла — не больше 4 МБ: настоящий весит десятки килобайт (с 1.10.40). */
+        const val BACKUP_FILE_LIMIT = 4 * 1024 * 1024
         const val STATE_TAB = "warpscout.tab"
 
         /** Пауза между переездом ползунка «Расширенный режим» и сменой вида. */
