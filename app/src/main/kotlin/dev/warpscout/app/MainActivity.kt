@@ -51,7 +51,7 @@ import kotlin.math.abs
  * Всё тяжёлое (подбор, скан, проверка ресурсов, запись файлов) делает [Engine] на своём потоке,
  * сюда прилетают только строки лога и готовый отчёт.
  */
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var prefs: Prefs
@@ -241,6 +241,8 @@ class MainActivity : AppCompatActivity() {
             runCatching { setupThemeToggle() }
             applyUiMode()
             shown = this
+            // Загрузка обновления живёт дольше экрана (с 1.10.40, см. UpdateFlow): ход и итог — этому экрану.
+            UpdateFlow.ui = this
             // Подбор мог идти, пока экран создавался заново: показываем его и даём остановить.
             syncScanUi(fresh = true)
             // Экран создан заново после сброса по умолчанию (с 1.10.32): говорим, что дальше.
@@ -253,6 +255,8 @@ class MainActivity : AppCompatActivity() {
             // APK, скачанный «Обновлениями» 1.10.31 в кеш приложения, больше не нужен: с 1.10.32
             // обновление качается в «Загрузки» (см. Updater). 11 МБ не должны лежать вечно.
             runCatching { File(cacheDir, "updates").takeIf { it.exists() }?.deleteRecursively() }
+            // Системные загрузки обновлений, вставшие в прошлых версиях (с 1.10.40, см. UpdateFlow), — убрать.
+            runCatching { cleanStaleUpdateDownloads() }
         } catch (t: Throwable) {
             SafeMode.show(this, t, "запуск интерфейса")
         }
@@ -261,6 +265,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         stopTunnelPolling()
         if (shown === this) shown = null
+        if (UpdateFlow.ui === this) UpdateFlow.ui = null
         super.onDestroy()
     }
 
@@ -303,6 +308,7 @@ class MainActivity : AppCompatActivity() {
         // из-за ошибки»). Ошибка обновления — не повод терять экран.
         runCatching {
             shown = this
+            UpdateFlow.ui = this
             startTunnelPolling()
             refreshInstalledApps()
             updateAppsState()
@@ -5667,26 +5673,27 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------ обновления (с 1.10.31)
 
-    /** Проверка или скачивание идёт — второй раз не запускаем. */
-    private var updateBusy = false
-
     /**
      * «Проверить обновления»: последний релиз на GitHub. Есть новее (или свежая пересборка той же
      * версии) — спрашиваем, скачать ли; нет — так и говорим. Только по нажатию.
+     *
+     * С 1.10.40 нажатие во время проверки или загрузки говорит, что именно идёт — проверка, проценты,
+     * «системная загрузка ждёт сеть» (см. UpdateFlow), — а не «Обновление уже скачивается» на всё: в
+     * 1.10.38–1.10.39 так и висело, хотя ничего не происходило.
      */
     private fun checkForUpdate() {
-        if (updateBusy) {
-            updateNote(getString(R.string.update_busy))
+        UpdateFlow.busyText(this)?.let { text ->
+            updateNote(text)
             return
         }
-        updateBusy = true
+        if (!UpdateFlow.beginCheck()) return
         updateNote(getString(R.string.update_checking))
         Thread {
             val result = runCatching {
                 Updater.check(BuildConfig.VERSION_NAME, BuildConfig.BUILD_REV, BuildConfig.FLAVOR)
             }
             runOnUiThread {
-                updateBusy = false
+                UpdateFlow.endCheck()
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 runCatching {
                     result.onSuccess { r ->
@@ -5727,20 +5734,35 @@ class MainActivity : AppCompatActivity() {
     private fun sizeText(bytes: Long): String =
         if (bytes <= 0L) "APK" else String.format(java.util.Locale.US, "%.1f МБ", bytes / 1_048_576.0)
 
+    /** Размеры совпадают; 0 — неизвестен (запасной путь без API, записи до 1.10.40) — тогда не сравниваем. */
+    private fun sameSize(a: Long, b: Long): Boolean = a <= 0L || b <= 0L || a == b
+
     private fun offerUpdate(release: Updater.Release, title: String, message: String) {
-        // Этот же файл уже скачан (или качается) — второй раз не качаем.
-        val sp = updatePrefs()
-        val known = sp.getLong("dlId", -1L).takeIf { it >= 0L && sp.getString("dlName", null) == release.apkName }
-        val state = known?.let { id -> runCatching { Updater.query(this, id) }.getOrNull() }
-        if (known != null && state?.status == android.app.DownloadManager.STATUS_SUCCESSFUL && Updater.fileExists(this, known)) {
-            showUpdateReady(release)
+        // Этот же файл WarpScout уже скачал сам (с 1.10.40) и он лежит в «Загрузках» — второй раз не качаем.
+        directReadyName(release)?.let { name ->
+            TunnelDebug.stage("обновления: $name уже в «Загрузках» — ставится нажатием на файл")
+            showUpdateReady(release, name)
             return
         }
-        if (known != null && (state?.status == android.app.DownloadManager.STATUS_RUNNING ||
-                state?.status == android.app.DownloadManager.STATUS_PENDING)
+        // Системная загрузка этого файла: скачана — показываем; идёт или стоит — следим за ней (встанет —
+        // UpdateFlow скачает сам). До 1.10.40 здесь отвечало «Обновление уже скачивается» — и так на
+        // каждое нажатие, пока загрузка ждала сеть или очередь (жалоба на 1.10.38).
+        val sp = updatePrefs()
+        val known = sp.getLong("dlId", -1L).takeIf {
+            it >= 0L && sp.getString("dlName", null) == release.apkName && sameSize(sp.getLong("dlSize", 0L), release.size)
+        }
+        val state = known?.let { id -> runCatching { Updater.query(this, id) }.getOrNull() }
+        if (known != null && state?.status == android.app.DownloadManager.STATUS_SUCCESSFUL && Updater.fileExists(this, known)) {
+            val name = state.name.ifBlank { release.apkName }
+            TunnelDebug.stage("обновления: $name уже в «Загрузках» — ставится нажатием на файл")
+            showUpdateReady(release, name)
+            return
+        }
+        if (known != null && state != null && Build.VERSION.SDK_INT >= 29 &&
+            state.status != android.app.DownloadManager.STATUS_SUCCESSFUL &&
+            state.status != android.app.DownloadManager.STATUS_FAILED
         ) {
-            if (!updateBusy) watchDownload(known, release)
-            updateNote(getString(R.string.update_busy))
+            if (!UpdateFlow.watch(this, known, release)) UpdateFlow.busyText(this)?.let { updateNote(it) }
             return
         }
         android.app.AlertDialog.Builder(this)
@@ -5751,107 +5773,111 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    /** Свой скачанный файл этой версии ещё лежит в «Загрузках» (с 1.10.40): его имя, иначе null. */
+    private fun directReadyName(release: Updater.Release): String? = runCatching {
+        val sp = updatePrefs()
+        if (sp.getString("directFor", null) != release.apkName) return@runCatching null
+        val size = sp.getLong("directSize", -1L)
+        if (size <= 0L || !sameSize(size, release.size)) return@runCatching null
+        val uri = Uri.parse(sp.getString("directUri", null) ?: return@runCatching null)
+        if (Updater.storedSize(this, uri) != size) return@runCatching null
+        sp.getString("directName", null)?.ifBlank { null } ?: release.apkName
+    }.getOrNull()
+
     /**
-     * Скачать системной загрузкой (с 1.10.32): файл ляжет в «Загрузки», Android покажет «Загрузка
-     * завершена». Ставит его человек нажатием — своего разрешения на установку у WarpScout нет
-     * (см. Updater). На Android 8–9 системной загрузке нужно разрешение на запись — там качает браузер.
+     * Скачать: системной загрузкой (с 1.10.32) — в «Загрузки», с уведомлением «Загрузка завершена»; а
+     * встанет — самим WarpScout, тоже в «Загрузки» (с 1.10.40, см. UpdateFlow). Ставит файл человек
+     * нажатием — своего разрешения на установку у WarpScout нет (см. Updater). На Android 8–9
+     * «Загрузкам» нужно разрешение на запись в память, которого у нас нет, — там качает браузер.
      */
     private fun downloadUpdate(release: Updater.Release) {
-        if (updateBusy) {
-            updateNote(getString(R.string.update_busy))
+        UpdateFlow.busyText(this)?.let { text ->
+            updateNote(text)
             return
         }
-        val id = runCatching { Updater.enqueue(this, release) }.getOrElse { t ->
-            TunnelDebug.stage("обновления: системная загрузка не приняла файл — ${t.message ?: t.javaClass.simpleName}")
-            null
-        }
-        if (id == null) {
-            runCatching { startActivity(Updater.browserIntent(release)) }
-                .onSuccess { updateNote(getString(R.string.update_via_browser, release.apkName)) }
-                .onFailure { t -> updateNote(getString(R.string.update_failed, t.message ?: t.javaClass.simpleName), error = true) }
+        if (Build.VERSION.SDK_INT < 29) {
+            openUpdateInBrowser(release)
             return
         }
-        updatePrefs().edit().putLong("dlId", id).putString("dlName", release.apkName).apply()
-        TunnelDebug.stage("обновления: скачиваю ${release.apkName} в «Загрузки»")
-        watchDownload(id, release)
+        if (!UpdateFlow.start(this, release)) UpdateFlow.busyText(this)?.let { updateNote(it) }
     }
 
-    /** Следим за загрузкой, пока она идёт: проценты — плашкой, в конце — сверка и «Открыть загрузки». */
-    private fun watchDownload(id: Long, release: Updater.Release) {
-        updateBusy = true
-        banner(getString(R.string.update_downloading, 0))
-        Thread {
-            var lastPct = -1
-            var done: Updater.Download? = null
-            var gone = false
-            val deadline = System.currentTimeMillis() + 20 * 60_000L
-            while (System.currentTimeMillis() < deadline) {
-                val d = runCatching { Updater.query(this, id) }.getOrNull()
-                if (d == null) {
-                    gone = true
-                    break
-                }
-                if (d.status == android.app.DownloadManager.STATUS_SUCCESSFUL ||
-                    d.status == android.app.DownloadManager.STATUS_FAILED
-                ) {
-                    done = d
-                    break
-                }
-                val pct = if (d.total > 0L) ((d.done * 100L) / d.total).toInt().coerceIn(0, 100) else -1
-                // Плашку обновляем шагами по 5 %, а не каждую секунду.
-                if (pct >= 0 && pct / 5 != lastPct / 5) {
-                    lastPct = pct
-                    runOnUiThread { if (!isFinishing && !isDestroyed) banner(getString(R.string.update_downloading, pct)) }
-                }
-                try {
-                    Thread.sleep(1000L)
-                } catch (e: InterruptedException) {
-                    break
-                }
-            }
-            val outcome = done
-            val vanished = gone
-            val ok = outcome?.status == android.app.DownloadManager.STATUS_SUCCESSFUL
-            val verified = if (ok) runCatching { Updater.verify(this, id, release) }.getOrNull() else null
-            if (verified == false) Updater.remove(this, id)
-            runOnUiThread {
-                updateBusy = false
-                if (isFinishing || isDestroyed) return@runOnUiThread
-                runCatching {
-                    when {
-                        vanished -> updateNote(getString(R.string.update_cancelled))
-                        outcome == null -> updateNote(getString(R.string.update_failed, getString(R.string.update_too_long)), error = true)
-                        !ok -> {
-                            TunnelDebug.stage("обновления: не скачалось — причина ${outcome.reason}")
-                            updateNote(getString(R.string.update_failed, "код ${outcome.reason}"), error = true)
-                        }
-                        verified == false -> {
-                            TunnelDebug.stage("обновления: контрольная сумма не сошлась — файл удалён")
-                            updateNote(getString(R.string.update_bad_hash), error = true)
-                        }
-                        else -> showUpdateReady(release)
-                    }
-                }.onFailure { t -> TunnelDebug.error("обновления: " + SafeMode.describe(t)) }
-            }
-        }.apply { isDaemon = true; name = "warpscout-update-download" }.start()
+    private fun openUpdateInBrowser(release: Updater.Release) {
+        runCatching { startActivity(Updater.browserIntent(release)) }
+            .onSuccess { updateNote(getString(R.string.update_via_browser, release.apkName)) }
+            .onFailure { t -> updateNote(getString(R.string.update_failed, t.message ?: t.javaClass.simpleName), error = true) }
     }
 
-    /** Скачано и сверено: остаётся нажать на файл в «Загрузках» — Android спросит, поставить ли поверх. */
-    private fun showUpdateReady(release: Updater.Release) {
-        TunnelDebug.stage("обновления: ${release.apkName} в «Загрузках» — ставится нажатием на файл")
-        banner(getString(R.string.update_ready_banner, release.apkName))
+    // Что говорит загрузка обновления (UpdateFlow.Ui, с 1.10.40): она живёт дольше экрана и говорит тому,
+    // что сейчас открыт.
+
+    override fun onUpdateProgress(text: String) {
+        if (uiReady()) banner(text)
+    }
+
+    override fun onUpdateNote(text: String, error: Boolean) {
+        if (uiReady()) updateNote(text, error)
+    }
+
+    override fun onUpdateReady(release: Updater.Release, fileName: String) {
+        if (uiReady() && !isFinishing && !isDestroyed) showUpdateReady(release, fileName)
+    }
+
+    override fun onUpdateFailed(release: Updater.Release, reason: String) {
+        if (uiReady() && !isFinishing && !isDestroyed) showUpdateFailed(release, reason)
+    }
+
+    /** Скачано (и сверено): остаётся нажать на файл в «Загрузках» — Android спросит, поставить ли поверх. */
+    private fun showUpdateReady(release: Updater.Release, fileName: String) {
+        banner(getString(R.string.update_ready_banner, fileName))
         android.app.AlertDialog.Builder(this)
             .setTitle(getString(R.string.update_ready_title, release.version))
-            .setMessage(getString(R.string.update_ready_msg, release.apkName))
+            .setMessage(getString(R.string.update_ready_msg, fileName))
             .setPositiveButton(R.string.update_open_downloads) { _, _ ->
                 runCatching { startActivity(Updater.downloadsIntent()) }
-                    .onFailure { updateNote(getString(R.string.update_open_failed, release.apkName), error = true) }
+                    .onFailure { updateNote(getString(R.string.update_open_failed, fileName), error = true) }
             }
             .setNegativeButton(R.string.update_later, null)
             .show()
     }
 
+    /**
+     * Не скачалось ни системной загрузкой, ни самим WarpScout (с 1.10.40): причина словами, подсказка,
+     * если приложение сейчас ходит в сеть мимо туннеля, и «Скачать браузером» — по прямой ссылке релиза.
+     */
+    private fun showUpdateFailed(release: Updater.Release, reason: String) {
+        banner(getString(R.string.update_failed, reason), error = true)
+        val parts = ArrayList<String>()
+        parts += reason.replaceFirstChar { it.uppercase() } + "."
+        if (!Updater.defaultIsVpn(this)) parts += getString(R.string.update_failed_no_tunnel)
+        parts += getString(R.string.update_failed_browser, release.apkName)
+        android.app.AlertDialog.Builder(this)
+            .setTitle(R.string.update_failed_title)
+            .setMessage(parts.joinToString("\n\n"))
+            .setPositiveButton(R.string.update_open_browser) { _, _ -> openUpdateInBrowser(release) }
+            .setNegativeButton(R.string.update_later, null)
+            .show()
+    }
+
     private fun updatePrefs() = getSharedPreferences("warpscout_update", MODE_PRIVATE)
+
+    /**
+     * Один раз после обновления (с 1.10.40): убрать свои системные загрузки обновлений, которые так и
+     * не скачались, — вместе с недокачанными файлами. В 1.10.38–1.10.39 вставшая загрузка висела в
+     * очереди (и в шторке), а «Обновления» отвечали «уже скачивается»; человек ставит новую версию
+     * браузером — и старая запись осталась бы висеть. Скачанные файлы не трогаем.
+     */
+    private fun cleanStaleUpdateDownloads() {
+        val sp = updatePrefs()
+        if (sp.getString("staleCheckedFor", null) == BuildConfig.VERSION_NAME) return
+        sp.edit().putString("staleCheckedFor", BuildConfig.VERSION_NAME).apply()
+        if (Build.VERSION.SDK_INT < 29 || UpdateFlow.phase != UpdateFlow.IDLE) return
+        val app = applicationContext
+        Thread {
+            val n = runCatching { Updater.removeStale(app, keep = -1L) }.getOrDefault(0)
+            if (n > 0) TunnelDebug.stage("обновления: убрал системные загрузки прошлых версий, которые так и не скачались: $n")
+        }.apply { isDaemon = true; name = "warpscout-update-clean" }.start()
+    }
 
     // ------------------------------------------------ тема оформления
 

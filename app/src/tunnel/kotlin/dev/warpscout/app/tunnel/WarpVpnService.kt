@@ -22,6 +22,7 @@ import dev.warpscout.core.config.SplitRoutes
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.crypto.Crypto
 import dev.warpscout.core.junk.JunkLibrary
+import dev.warpscout.core.lists.AllowLists
 import dev.warpscout.core.lists.AppServices
 import dev.warpscout.core.lists.ProtonFree
 import dev.warpscout.core.model.AddrFamily
@@ -2611,13 +2612,45 @@ class WarpVpnService : VpnService() {
      * туннеля» и не видела, через какой город выходит WARP (журнал 23.11, 08:41–09:26).
      */
     private fun tunRoutesOf(cfg: WarpConfig): ExitRouter? = runCatching {
-        val text = if (runCatching { serviceSettings().dnsInTunnel }.getOrDefault(true)) {
+        ExitRouter.of(SplitRoutes.prefixesOf(tunRouteText(cfg, log = false)))
+    }.getOrNull()
+
+    /**
+     * Маршруты tun строкой: маршруты конфига, а при раздельных — ещё адреса DNS (с 1.10.35) и сети
+     * GitHub (с 1.10.40, [AllowLists.GITHUB_NETS]). Сети GitHub — ради обновлений WarpScout: без них при
+     * «сайтах из списков» обновление качалось мимо туннеля, напрямую через оператора, где GitHub бывает
+     * недоступен, — системная загрузка вставала, а приложение отвечало «уже скачивается» (жалоба на
+     * 1.10.38). Системная загрузка Android берёт сеть приложения, которое её поставило (так в AOSP), —
+     * туннель, если WarpScout в нём; но маршрута к GitHub в туннеле не было, и она шла мимо. Если на
+     * каком-то телефоне она идёт мимо туннеля всегда — через 30 с без байта WarpScout качает сам, уже
+     * через туннель (см. UpdateFlow).
+     * [log] — писать ли в журнал (при подъёме — да, при проверках — нет); [v6] — у tun есть адрес IPv6
+     * (без него IPv6-маршруты не ставятся, и в журнале их не считаем).
+     */
+    private fun tunRouteText(cfg: WarpConfig, log: Boolean, v6: Boolean = true): String {
+        // Раздельные маршруты: адреса DNS — тоже в туннель (см. SplitRoutes.withDns). Иначе запросы
+        // имён шли мимо туннеля, и подменённый оператором ответ уводил «сайт из списка» на чужой
+        // адрес — маршрут к настоящему адресу уже не помогал.
+        val withDns = if (runCatching { serviceSettings().dnsInTunnel }.getOrDefault(true)) {
             runCatching { SplitRoutes.withDns(cfg.allowedIps, cfg.dns) }.getOrDefault(cfg.allowedIps)
         } else {
             cfg.allowedIps
         }
-        ExitRouter.of(SplitRoutes.prefixesOf(text))
-    }.getOrNull()
+        if (log && withDns != cfg.allowedIps) {
+            val added = SplitRoutes.prefixesOf(withDns).size - SplitRoutes.prefixesOf(cfg.allowedIps).size
+            TunnelDebug.stage("DNS через туннель: +$added маршрута к ${cfg.dns.joinToString(", ")}")
+        }
+        // При «весь трафик» добавлять нечего: GitHub и так в туннеле (SplitRoutes.withExtra это учитывает).
+        val withGithub = runCatching { SplitRoutes.withExtra(withDns, AllowLists.GITHUB_NETS) }.getOrDefault(withDns)
+        if (log && withGithub != withDns) {
+            val had = SplitRoutes.prefixesOf(withDns).toHashSet()
+            val added = SplitRoutes.prefixesOf(withGithub).count { it !in had && (v6 || !it.contains(':')) }
+            if (added > 0) {
+                TunnelDebug.stage("обновления WarpScout: сети GitHub в маршрутах туннеля (+$added) — обновление и списки сайтов качаются через туннель")
+            }
+        }
+        return withGithub
+    }
 
     /**
      * Замер в своём потоке. [full] — по нажатию (до 10 МБ / 6 с), иначе короткий (полмегабайта).
@@ -3185,18 +3218,8 @@ class WarpVpnService : VpnService() {
         val v6 = cfg.account.ipv6?.takeIf { cfg.enableIpv6Address && it.isNotBlank() }
         if (v6 != null) runCatching { builder.addAddress(v6.substringBefore('/'), 128) }
         cfg.dns.forEach { if (it.isNotBlank()) runCatching { builder.addDnsServer(it.trim()) } }
-        // Раздельные маршруты: адреса DNS — тоже в туннель (см. SplitRoutes.withDns). Иначе запросы
-        // имён шли мимо туннеля, и подменённый оператором ответ уводил «сайт из списка» на чужой
-        // адрес — маршрут к настоящему адресу уже не помогал.
-        val routeText = if (runCatching { serviceSettings().dnsInTunnel }.getOrDefault(true)) {
-            runCatching { SplitRoutes.withDns(cfg.allowedIps, cfg.dns) }.getOrDefault(cfg.allowedIps)
-        } else {
-            cfg.allowedIps
-        }
-        if (routeText != cfg.allowedIps) {
-            val added = SplitRoutes.prefixesOf(routeText).size - SplitRoutes.prefixesOf(cfg.allowedIps).size
-            TunnelDebug.stage("DNS через туннель: +$added маршрута к ${cfg.dns.joinToString(", ")}")
-        }
+        // Раздельные маршруты: плюс адреса DNS и сети GitHub (см. tunRouteText).
+        val routeText = tunRouteText(cfg, log = true, v6 = v6 != null)
         routeText.split(',').map { it.trim() }.filter { it.contains('/') }.forEach { cidr ->
             // IPv6-маршрут без IPv6-адреса на интерфейсе — чёрная дыра (пакеты уходят в tun и
             // пропадают). Проверено на живом запросе: с таким маршрутом Telegram и браузер

@@ -613,19 +613,31 @@
     <string name="update_later">Не сейчас</string>
     <string name="update_downloading">Скачиваю обновление: %1$d %%</string>
     <string name="update_failed">Обновление не скачалось: %1$s</string>
-    <string name="update_bad_hash">Файл обновления повреждён (контрольная сумма не сошлась) — попробуйте ещё раз</string>
     <string name="update_check_failed">Не удалось проверить обновления: %1$s</string>
     <string name="update_no_asset">В релизе %1$s нет файла для этой сборки (%2$s)</string>
     <string name="update_busy">Обновление уже скачивается</string>
     <!-- 1.10.32: обновление скачивает системная загрузка, ставит человек нажатием на файл -->
     <string name="update_via_browser">Скачиваю %1$s браузером: когда закончится, нажмите на файл — Android предложит поставить поверх</string>
     <string name="update_cancelled">Загрузка обновления отменена</string>
-    <string name="update_too_long">загрузка идёт больше 20 минут</string>
+    <string name="update_too_long">Обновление качается дольше 30 минут: когда скачается, Android покажет «Загрузка завершена»</string>
     <string name="update_ready_banner">Обновление скачано: %1$s — в «Загрузках»</string>
     <string name="update_ready_title">Версия %1$s скачана</string>
-    <string name="update_ready_msg">Файл %1$s — в «Загрузках» (и в уведомлении «Загрузка завершена»). Нажмите на него: Android спросит, поставить ли поверх. Настройки сохранятся.</string>
+    <string name="update_ready_msg">Файл %1$s — в «Загрузках». Нажмите на него: Android спросит, поставить ли поверх. Настройки сохранятся.</string>
     <string name="update_open_downloads">Открыть «Загрузки»</string>
-    <string name="update_open_failed">Откройте «Загрузки» или уведомление «Загрузка завершена» и нажмите на %1$s</string>
+    <string name="update_open_failed">Откройте «Загрузки» (или «Мои файлы» → «Загрузки») и нажмите на %1$s</string>
+    <!-- 1.10.40: вставшая системная загрузка больше не «уже скачивается» без конца — WarpScout качает сам -->
+    <string name="update_state_start">Скачиваю обновление…</string>
+    <string name="update_state_attach">Обновление уже в системной загрузке — слежу за ней: встанет — скачаю сам</string>
+    <string name="update_downloading_bytes">Скачиваю обновление: %1$s</string>
+    <string name="update_system_waiting">Скачиваю обновление: системная загрузка %1$s. Не пойдёт — через %2$d с скачаю сам</string>
+    <string name="update_direct_start">Системная загрузка %1$s — скачиваю обновление сам…</string>
+    <string name="update_direct_progress">Скачиваю обновление сам: %1$d %%</string>
+    <string name="update_why_no_dm">недоступна</string>
+    <string name="update_why_bad_hash">скачала испорченный файл</string>
+    <string name="update_failed_title">Обновление не скачалось</string>
+    <string name="update_failed_no_tunnel">Сейчас WarpScout выходит в интернет мимо туннеля, а напрямую GitHub у операторов бывает недоступен: включите туннель и нажмите «Обновления» ещё раз.</string>
+    <string name="update_failed_browser">Или скачайте браузером: откроется файл %1$s; когда скачается, нажмите на него — Android предложит поставить поверх. Настройки сохранятся.</string>
+    <string name="update_open_browser">Скачать браузером</string>
 
     <!-- ── 1.10.32: сброс по умолчанию ── -->
     <string name="section_reset">Сброс</string>

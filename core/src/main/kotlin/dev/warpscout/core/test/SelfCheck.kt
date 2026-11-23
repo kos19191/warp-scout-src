@@ -187,6 +187,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("выход по приложениям: «Само» / «Всегда WARP» / «Второй выход» (1.10.39)") {
             appExitChecks()
         }
+        section("обновления: GitHub через туннель, вставшая загрузка, докачка (1.10.40)") {
+            updateDownloadChecks()
+        }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
                 liveNetwork()
@@ -824,6 +827,45 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         val yt = r.compose(2, false, "1.1.1.0/24", "", preset, "", true)
         check("маршруты: YouTube — сети Google для видео добавлены", "192.178.0.0/15" in yt.video)
         check("маршруты: весь трафик — сети Google не нужны", r.compose(0, false, "", "", preset, "", true).video.isEmpty())
+    }
+
+    /**
+     * Обновления (с 1.10.40): сети GitHub — в раздельные маршруты туннеля, вставшая системная загрузка
+     * распознаётся за полминуты, своя загрузка докачивает с места обрыва.
+     */
+    private fun updateDownloadChecks() {
+        val sr = SplitRoutes
+        val gh = AllowLists.GITHUB_NETS
+        val split = sr.prefixesOf(sr.withExtra("1.1.1.0/24, 149.154.160.0/20", gh))
+        check("обновления: сети GitHub — в раздельные маршруты", "185.199.108.0/22" in split && "140.82.112.0/20" in split)
+        check("обновления: прежние маршруты на месте", split.take(2) == listOf("1.1.1.0/24", "149.154.160.0/20"))
+        expect("обновления: весь трафик — без лишних маршрутов", sr.withExtra("0.0.0.0/0, ::/0", gh), "0.0.0.0/0, ::/0")
+        check("обновления: накрытая сеть GitHub не повторяется", "185.199.108.0/22" !in sr.missing("185.199.0.0/16", gh))
+        check("обновления: сети GitHub — без ошибок записи", gh.all { it.contains('/') } && gh.size == gh.distinct().size)
+        check("обновления: адреса загрузки — внутри сетей GitHub",
+            ExitRouter.of(gh).let { r -> listOf("185.199.108.133", "185.199.111.133", "140.82.121.4").all { ip -> r.route(ExitRouter.ipBytes(ip)!!) == 1 } })
+        // Встала ли загрузка: полминуты без первого байта, 45 с без прироста.
+        val w = dev.warpscout.core.net.StallWatch(0L, 30_000L, 45_000L)
+        check("загрузка: 20 с без байта — ещё ждём", !w.stalled(0L, 20_000L))
+        check("загрузка: 31 с без байта — встала", w.stalled(0L, 31_000L))
+        val w2 = dev.warpscout.core.net.StallWatch(0L, 30_000L, 45_000L)
+        check("загрузка: байты пошли — ждём дольше", !w2.stalled(1_000L, 10_000L) && !w2.stalled(1_000L, 50_000L))
+        check("загрузка: 45 с без прироста — встала", w2.stalled(1_000L, 56_000L))
+        check("загрузка: прирост снова — идёт", !w2.stalled(5_000L, 57_000L))
+        expect("загрузка: сколько ещё ждать", dev.warpscout.core.net.StallWatch(0L, 30_000L, 45_000L).left(0L, 12_000L), 18_000L)
+        // Докачка: продолжение, ответ с начала, ошибки.
+        val d = dev.warpscout.core.net.DownloadRules
+        expect("докачка: 206 с того же места — ничего не пропускаем", d.skipFor(206, 1000L, 1000L), 0L)
+        expect("докачка: 206 раньше записанного — пропускаем повтор", d.skipFor(206, 1000L, 600L), 400L)
+        expect("докачка: 206 дальше записанного — дыра, ошибка", d.skipFor(206, 1000L, 1500L), null)
+        expect("докачка: 200 вместо 206 — пропускаем записанное", d.skipFor(200, 1000L, null), 1000L)
+        expect("докачка: первый запрос — с нуля", d.skipFor(200, 0L, null), 0L)
+        expect("докачка: 404 — ошибка", d.skipFor(404, 0L, null), null)
+        expect("докачка: начало куска", d.rangeStart("bytes 1000-1499/1500"), 1000L)
+        expect("докачка: размер из Content-Range", d.totalFrom(206, 500L, "bytes 1000-1499/1500", 1000L), 1500L)
+        expect("докачка: размер неизвестен (*) — начало плюс кусок", d.totalFrom(206, 500L, "bytes 1000-1499/*", 1000L), 1500L)
+        expect("докачка: 200 — размер по длине", d.totalFrom(200, 1500L, null, 0L), 1500L)
+        expect("докачка: длины нет — размер неизвестен", d.totalFrom(200, -1L, null, 0L), -1L)
     }
 
     // ------------------------------------------------------------------ helpers
