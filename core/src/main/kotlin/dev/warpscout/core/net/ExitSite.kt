@@ -91,6 +91,15 @@ object ExitSite {
         return CITY[s] ?: s
     }
 
+    /**
+     * Город для «через …» (с 1.10.36, вопрос про Telegram): «через Москву», «через Уфу»; у остальных
+     * городов России форма та же («через Санкт-Петербург», «через Казань»).
+     */
+    fun cityAcc(site: String?): String {
+        val c = city(site)
+        return if (c.endsWith("а") && c.length > 1 && c[c.length - 2] !in "аеёиоуыэюя") c.dropLast(1) + "у" else c
+    }
+
     /** «DME · Москва» — для журнала; неизвестно — так и пишется. */
     fun describe(site: String?): String {
         val s = normalize(site)

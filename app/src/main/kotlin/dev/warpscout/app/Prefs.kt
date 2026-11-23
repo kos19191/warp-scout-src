@@ -551,7 +551,10 @@ class Prefs(private val context: Context) {
         get() = sp.getLong("appNetsAt", 0L)
         set(v) = sp.edit().putLong("appNetsAt", v).apply()
 
-    /** Пускать Telegram через второй выход, пока выход WARP — в России (с 1.10.34). */
+    /**
+     * Предлагать второй выход для Telegram, если через Москву медиа тормозит (с 1.10.36 — вопросом,
+     * см. TelegramChoice; ключ прежний, с 1.10.34, — выбор человека переживает обновление).
+     */
     var featTgSecond: Boolean
         get() = sp.getBoolean("featTgSecond", true)
         set(v) {

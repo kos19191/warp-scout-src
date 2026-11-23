@@ -4012,6 +4012,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Вопрос про Telegram, уже показанный окном на этом экране (по времени вопроса). */
+    private var tgAskShownAt = 0L
+
+    /**
+     * Вопрос «пустить Telegram через второй выход?» (с 1.10.36) задаёт уведомление. Если уведомления
+     * приложения или их канал выключены, его никто не увидит — тогда спрашиваем окном, пока экран
+     * открыт. Один раз на вопрос; ответ уходит в сервис, как кнопка уведомления.
+     */
+    private fun maybeAskTelegram() {
+        if (!screenResumed || isFinishing || isDestroyed) return
+        val snap = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull() ?: return
+        if (snap.tgAskAt <= 0L || snap.tgAsk.isBlank() || snap.tgAskAt == tgAskShownAt) return
+        val nm = androidx.core.app.NotificationManagerCompat.from(this)
+        val channelOff = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            nm.getNotificationChannel(TelegramChoiceMemory.ASK_CHANNEL)?.importance == android.app.NotificationManager.IMPORTANCE_NONE
+        if (nm.areNotificationsEnabled() && !channelOff) return
+        tgAskShownAt = snap.tgAskAt
+        android.app.AlertDialog.Builder(this)
+            .setTitle(R.string.tg_ask_dialog_title)
+            .setMessage(snap.tgAsk)
+            .setPositiveButton(R.string.tg_ask_switch) { _, _ -> runCatching { tunnel.answerTelegram(true) } }
+            .setNegativeButton(R.string.tg_ask_stay) { _, _ -> runCatching { tunnel.answerTelegram(false) } }
+            .show()
+    }
+
     private fun probeExitRegion() {
         Thread {
             // Сначала по адресу 1.1.1.1 (с 1.10.35): при раздельных маршрутах он в туннеле (DNS идёт
@@ -4068,6 +4093,7 @@ class MainActivity : AppCompatActivity() {
         override fun run() {
             updateTunnelDiagnostics()
             if (!tunnel.supported) return
+            runCatching { maybeAskTelegram() }
             // Отметка «сейчас подключён» в списке трёх должна появляться сразу после подъёма
             // (и сниматься после падения), а не при следующем случайном обновлении экрана.
             // Кнопка свободна (не идёт подключение и подбор) — держим её подпись в согласии с сервисом.
@@ -5223,6 +5249,8 @@ class MainActivity : AppCompatActivity() {
                 NoiseMemory.forgetAll(app)
                 // Площадки выхода точек и отметки «искали выход за рубежом» (с 1.10.34).
                 SiteMemory.forgetAll(app)
+                // Ответы «Переключить» / «Оставить» про Telegram по сетям (с 1.10.36).
+                TelegramChoiceMemory.forgetAll(app)
             }
             step("доступность") { Availability.forgetAll(app) }
             // Конфиг, которым плитка и автозапуск поднимают туннель (TunnelLastConfig сборки tunnel).

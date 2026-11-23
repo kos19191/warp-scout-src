@@ -29,6 +29,8 @@ import dev.warpscout.core.model.WarpAccount
 import dev.warpscout.core.dpi.DpiComparator
 import dev.warpscout.core.model.ResourceCheck
 import dev.warpscout.core.net.CfTrace
+import dev.warpscout.core.net.TelegramChoice
+import dev.warpscout.core.net.TelegramMedia
 import dev.warpscout.core.net.EndpointPool
 import dev.warpscout.core.net.ExitCheck
 import dev.warpscout.core.net.EndpointSpec
@@ -170,6 +172,11 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("браузер — только к нужным сайтам, поддомены второго выхода (1.10.35)") {
             appServicesChecks()
             tunnelRoutesChecks()
+        }
+        section("Telegram через второй выход — по вопросу; ближние серверы Proton (1.10.36)") {
+            telegramChoiceChecks()
+            excludeHostsChecks()
+            protonNearChecks()
         }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
@@ -444,6 +451,96 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         } finally {
             server.close()
         }
+    }
+
+    /** Решение «Telegram через второй выход»: память по сетям и сравнение двух проверок медиа. */
+    private fun telegramChoiceChecks() {
+        val c = TelegramChoice
+        val ok = TelegramMedia.OK
+        val slow = TelegramMedia.SLOW
+        val stall = TelegramMedia.STALL
+        val fail = TelegramMedia.FAIL
+        val now = 10L * TelegramChoice.VALID_MS
+        var marks = c.put(emptyList(), TelegramChoice.Mark("wifi:дом", TelegramChoice.SECOND, now - 3_600_000L))
+        marks = c.put(marks, TelegramChoice.Mark("mobile:25020", TelegramChoice.STAY, now - 2 * TelegramChoice.VALID_MS))
+        marks = c.put(marks, TelegramChoice.Mark("wifi:кафе", TelegramChoice.ASKED, now - 3_600_000L))
+        expect("Telegram: память — туда и обратно", c.parse(c.render(marks)), marks)
+        expect("Telegram: «Переключить» действует сутки", c.choiceOf(marks, "wifi:дом", now), TelegramChoice.SECOND)
+        expect("Telegram: ответ старше суток — забыт", c.choiceOf(marks, "mobile:25020", now), "")
+        expect("Telegram: без ответа — три часа не спрашиваем", c.choiceOf(marks, "wifi:кафе", now), TelegramChoice.ASKED)
+        expect("Telegram: без ответа — через четыре часа можно спросить", c.choiceOf(marks, "wifi:кафе", now + 3 * 3_600_000L), "")
+        expect("Telegram: незнакомая сеть — решения нет", c.choiceOf(marks, "wifi:работа", now), "")
+        val replaced = c.put(marks, TelegramChoice.Mark("wifi:дом", TelegramChoice.STAY, now))
+        expect("Telegram: новый ответ заменяет прежний", c.choiceOf(replaced, "wifi:дом", now), TelegramChoice.STAY)
+        check("Telegram: одна запись на сеть", replaced.count { it.net == "wifi:дом" } == 1)
+        check("Telegram: битые строки пропускаются", c.parse("кривая\nwifi:x|maybe|1\nwifi:y|stay|abc\n").isEmpty())
+        // Предлагать второй выход — только когда Москва тормозит, а второй выход заметно лучше.
+        check("Telegram: Москва в порядке — не предлагаем", !c.secondHelps(ok, 3000, ok, 9000))
+        check("Telegram: Москва встаёт, второй выход без остановок — предлагаем", c.secondHelps(stall, 200, ok, 2500))
+        check("Telegram: Москва медленно, второй — тоже, но втрое быстрее — предлагаем", c.secondHelps(slow, 300, slow, 900))
+        check("Telegram: Москва медленно, второй чуть быстрее — не предлагаем", !c.secondHelps(slow, 600, slow, 800))
+        check("Telegram: второй выход сам встаёт — не предлагаем", !c.secondHelps(slow, 300, stall, 0))
+        check("Telegram: второй выход не грузит — не предлагаем", !c.secondHelps(stall, 0, fail, -1))
+        check("Telegram: через Москву загрузка не пошла, через второй выход идёт — предлагаем", c.secondHelps(fail, -1, slow, 700))
+        expect("Telegram: «через Москву»", dev.warpscout.core.net.ExitSite.cityAcc("DME"), "Москву")
+        expect("Telegram: «через Санкт-Петербург»", dev.warpscout.core.net.ExitSite.cityAcc("LED"), "Санкт-Петербург")
+        expect("Telegram: «через Уфу»", dev.warpscout.core.net.ExitSite.cityAcc("UFA"), "Уфу")
+        // Возврат через Москву — когда второй выход медленнее.
+        check("Telegram: второй выход медленнее Москвы — возвращаемся", c.secondWorse(ok, 3000, ok, 1500))
+        check("Telegram: второй выход чуть медленнее — остаёмся", !c.secondWorse(ok, 3000, ok, 2700))
+        check("Telegram: второй выход встаёт, Москва нет — возвращаемся", c.secondWorse(slow, 600, stall, 0))
+        check("Telegram: второй выход не грузит — возвращаемся", c.secondWorse(ok, 3000, fail, -1))
+        check("Telegram: Москва сама не грузит — остаёмся", !c.secondWorse(fail, -1, slow, 500))
+        check("Telegram: Москва по-прежнему встаёт — остаёмся", !c.secondWorse(stall, 0, ok, 2000))
+        expect("Telegram: коротко — медленно", c.short(slow, 300), "300 Кбит/с, медленно")
+        expect("Telegram: коротко — рывками", c.short(slow, 2000), "2,0 Мбит/с, рывками")
+        expect("Telegram: коротко — без остановок", c.short(ok, 4100), "4,1 Мбит/с")
+    }
+
+    /** Подсети без адреса замера: замер через Москву, пока Telegram идёт через второй выход. */
+    private fun excludeHostsChecks() {
+        val tg = listOf("149.154.160.0/20", "91.108.4.0/22", "2001:67c:4e8::/48")
+        val cut = SplitRoutes.excludeHosts(tg, listOf("149.154.167.99"))
+        val router = dev.warpscout.core.tunnel.ExitRouter.of(cut)
+        fun via(ip: String): Int = router.route(java.net.InetAddress.getByName(ip).address)
+        check("подсети без адреса: адрес замера — мимо второго выхода", via("149.154.167.99") == 0)
+        check("подсети без адреса: соседние адреса — через второй выход",
+            via("149.154.167.98") == 1 && via("149.154.167.100") == 1 && via("149.154.160.1") == 1 && via("149.154.175.255") == 1)
+        check("подсети без адреса: другие подсети не тронуты", "91.108.4.0/22" in cut && "2001:67c:4e8::/48" in cut)
+        expect("подсети без адреса: /20 без одного адреса — 12 подсетей", cut.count { it.startsWith("149.154.") }, 12)
+        check("подсети без адреса: адрес вне подсетей — как было", SplitRoutes.excludeHosts(tg, listOf("8.8.8.8")) == tg)
+        check("подсети без адреса: /32 самого адреса уходит целиком",
+            SplitRoutes.excludeHosts(listOf("1.2.3.4/32", "5.6.7.0/24"), listOf("1.2.3.4")) == listOf("5.6.7.0/24"))
+    }
+
+    /** «Любая страна» — ближние серверы Proton раньше дальнего из конфига (журнал 23.11: Мексика). */
+    private fun protonNearChecks() {
+        val key = "1fGFZtHU8r8qwdnron9E80NdvLw5WcUdhPgh7phzQnA="
+        fun srv(name: String, country: String, ip: String) = ProtonFree.Server(name, country, "", ip, key)
+        val servers = listOf(
+            srv("MX-FREE#1", "Mexico", "10.1.0.1"),
+            srv("NL-FREE#1", "Netherlands", "10.1.0.2"),
+            srv("NL-FREE#2", "Netherlands", "10.1.0.3"),
+            srv("PL-FREE#1", "Poland", "10.1.0.4"),
+            srv("RO-FREE#1", "Romania", "10.1.0.5"),
+            srv("CH-FREE#1", "Switzerland", "10.1.0.6"),
+            srv("NO-FREE#1", "Norway", "10.1.0.7"),
+            srv("US-FREE#1", "United States", "10.1.0.8"),
+        )
+        val fromConf = ProtonFree.Server("", "", "", "84.20.27.49", key)
+        val mx = ProtonFree.ordered(servers, prefer = "", lastGood = "из конфига", original = fromConf, seed = 0)
+        expect("Proton: «любая» — сначала по одному ближнему, потом сервер из конфига",
+            mx.take(5).map { it.name }, listOf("NL-FREE#1", "PL-FREE#1", "RO-FREE#1", "CH-FREE#1", "из конфига"))
+        val lastMx = ProtonFree.ordered(servers, prefer = "", lastGood = "MX-FREE#1", original = null, seed = 0)
+        expect("Proton: дальний работавший — сразу после ближних", lastMx.getOrNull(ProtonFree.NEAR_PROBES)?.name, "MX-FREE#1")
+        check("Proton: дальний работавший — в первых восьми попытках", lastMx.take(8).any { it.name == "MX-FREE#1" })
+        val lastNl = ProtonFree.ordered(servers, prefer = "", lastGood = "NL-FREE#2", original = fromConf, seed = 0)
+        expect("Proton: ближний работавший — первым", lastNl.first().name, "NL-FREE#2")
+        check("Proton: ближний работавший — его страна второй раз в первом круге не берётся",
+            lastNl.take(ProtonFree.NEAR_PROBES).count { it.code == "NL" } == 1)
+        val chosen = ProtonFree.ordered(servers, prefer = "MX", lastGood = "NL-FREE#1", original = null, seed = 0)
+        expect("Proton: выбранная страна — как раньше, первой", chosen.first().name, "MX-FREE#1")
+        check("Proton: без повторов и без потерь", mx.size == servers.size + 1 && mx.distinctBy { it.ip }.size == mx.size)
     }
 
     /** Какие списки нужны выбранным приложениям, какие приложения — браузеры, поддомены сервисов. */
@@ -2833,7 +2930,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         val us = ProtonFree.ordered(servers, prefer = "US", lastGood = "NL-FREE#2", original = null, seed = 0)
         expect("Proton: выбранная страна первой, прежний сервер другой страны — не первым", us.first().name, "US-FREE#1")
         val last = ProtonFree.ordered(servers, prefer = "", lastGood = "JP-FREE#1", original = servers[2], seed = 0)
-        expect("Proton: работавший последним — первый, сервер из конфига — следом", last.take(2).map { it.name }, listOf("JP-FREE#1", "NL-FREE#2"))
+        // С 1.10.36: при «любой стране» ближний сервер из конфига — раньше дальнего работавшего.
+        expect("Proton: ближний из конфига — первым, дальний работавший — следом", last.take(3).map { it.name },
+            listOf("NL-FREE#2", "JP-FREE#1", "NL-FREE#1"))
         check("Proton: без повторов", last.size == servers.size)
         val rotated = ProtonFree.ordered(servers, prefer = "NL", lastGood = "", original = null, seed = 1)
         expect("Proton: внутри страны — по кругу от дня", rotated.first().name, "NL-FREE#2")

@@ -234,6 +234,24 @@ object TunnelState {
             publishNow(urgent = true)
         }
 
+    /**
+     * Вопрос «пустить Telegram через второй выход?» ждёт ответа (с 1.10.36, см. `TunnelStatus.tgAskAt`):
+     * когда задан (0 — вопроса нет) и текст с цифрами. Пишется одним вызовом [setTgAsk].
+     */
+    @Volatile
+    var tgAskAt: Long = 0L
+        private set
+    @Volatile
+    var tgAsk: String = ""
+        private set
+
+    fun setTgAsk(at: Long, text: String) {
+        if (tgAskAt == at && tgAsk == text) return
+        tgAskAt = at
+        tgAsk = text
+        publishNow(urgent = true)
+    }
+
     fun setLink(at: Long, web: Int, webMs: Int, tg: Int, tgMs: Int, exit: String) {
         linkAt = at
         linkWeb = web
@@ -354,6 +372,8 @@ object TunnelState {
         tgMediaKbps = tgMediaKbps,
         tgMediaAt = tgMediaAt,
         tgSecond = tgSecond,
+        tgAskAt = tgAskAt,
+        tgAsk = tgAsk,
         bytesUp = TunnelDebug.bytesUp,
         bytesDown = TunnelDebug.bytesDown,
         handshakeAttempts = TunnelDebug.handshakeAttempts,
@@ -392,6 +412,7 @@ object TunnelState {
             secondPeer = snapshot.secondPeer
             setTgMedia(snapshot.tgMediaAt, snapshot.tgMedia, snapshot.tgMediaKbps)
             tgSecond = snapshot.tgSecond
+            setTgAsk(snapshot.tgAskAt, snapshot.tgAsk)
         } finally {
             mirroring = false
         }

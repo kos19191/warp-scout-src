@@ -88,6 +88,13 @@ interface TunnelController {
 
     /** Адреса второго выхода обновились: сервис меняет таблицу на лету, не переподключаясь. */
     fun reloadSecondRoutes() {}
+
+    /**
+     * Ответ на вопрос «пустить Telegram через второй выход?» с экрана (с 1.10.36): [switch] —
+     * «Переключить», иначе «Оставить». Обычно отвечают кнопкой уведомления; экран спрашивает сам,
+     * только если уведомления выключены.
+     */
+    fun answerTelegram(switch: Boolean) {}
 }
 
 class UnsupportedTunnelController : TunnelController {

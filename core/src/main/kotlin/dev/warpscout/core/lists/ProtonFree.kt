@@ -42,6 +42,15 @@ object ProtonFree {
     /** Страны по удалённости от России: при «любой стране» ближние идут первыми. */
     val NEAR: List<String> = listOf("NL", "PL", "RO", "CH", "NO", "DE", "FI", "SE", "CA", "US", "JP", "SG", "MX")
 
+    /** Ближние страны — Европа: при «любой стране» их серверы пробуем раньше дальних (с 1.10.36). */
+    val NEAR_GROUP: Set<String> = setOf("NL", "PL", "RO", "CH", "NO", "DE", "FI", "SE")
+
+    /**
+     * Сколько ближних серверов пробовать раньше дальнего, работавшего последним (с 1.10.36): сервис
+     * перебирает не больше восьми серверов подряд — рабочий дальний должен попасть в эти восемь.
+     */
+    const val NEAR_PROBES = 4
+
     private val CODES = mapOf(
         "Netherlands" to "NL", "Poland" to "PL", "Romania" to "RO", "Switzerland" to "CH", "Norway" to "NO",
         "Germany" to "DE", "Finland" to "FI", "Sweden" to "SE", "Canada" to "CA", "United States" to "US",
@@ -134,10 +143,20 @@ object ProtonFree {
     }
 
     /**
-     * Порядок перебора: сервер, работавший последним ([lastGood] — имя), → серверы выбранной
-     * страны ([prefer] — код, пусто — любая) → сервер из самого конфига ([original]) → остальные,
-     * ближние страны первыми. Внутри страны — по кругу от [seed]: бесплатные серверы загружены, и
-     * все телефоны не должны ломиться в первый по списку.
+     * Порядок перебора. Внутри страны — по кругу от [seed]: бесплатные серверы загружены, и все
+     * телефоны не должны ломиться в первый по списку.
+     *
+     * Выбрана страна ([prefer] — код): сервер, работавший последним ([lastGood] — имя), если он из
+     * этой страны → серверы страны → сервер из самого конфига ([original]) → остальные, ближние
+     * страны первыми.
+     *
+     * «Любая — ближние первыми» (с 1.10.36 — по-настоящему): сначала до [NEAR_PROBES] серверов
+     * ближних стран (Европа, по одному на страну; работавший последним и сервер из конфига, если они
+     * ближние, — первыми) → работавший последним → сервер из конфига → остальные, ближние первыми.
+     * Раньше сервер из конфига и работавший последним шли первыми при любой стране: конфиг Proton у
+     * человека — с сервера в Мексике, и второй выход (а с ним и Telegram) ходил через Мексику, хотя
+     * ночью 23.11 работал и сервер в Нидерландах. Дальний рабочий остаётся в первых восьми попытках
+     * (больше подряд сервис не перебирает), а не ответившие сервис ставит в конец сам.
      */
     fun ordered(servers: List<Server>, prefer: String, lastGood: String, original: Server?, seed: Long): List<Server> {
         fun rotate(list: List<Server>): List<Server> {
@@ -147,11 +166,24 @@ object ProtonFree {
         }
         val byCountry = servers.groupBy { it.code }
         val out = ArrayList<Server>()
-        servers.firstOrNull { lastGood.isNotBlank() && it.name == lastGood && (prefer.isBlank() || it.code == prefer) }?.let { out += it }
-        if (prefer.isNotBlank()) out += rotate(byCountry[prefer].orEmpty())
-        if (original != null) {
-            out += servers.firstOrNull { it.publicKey == original.publicKey && it.ip == original.ip }
-                ?: original.copy(name = original.name.ifBlank { "из конфига" })
+        val last = servers.firstOrNull { lastGood.isNotBlank() && it.name == lastGood }
+        val orig = original?.let { o ->
+            servers.firstOrNull { it.publicKey == o.publicKey && it.ip == o.ip } ?: o.copy(name = o.name.ifBlank { "из конфига" })
+        }
+        if (prefer.isNotBlank()) {
+            last?.takeIf { it.code == prefer }?.let { out += it }
+            out += rotate(byCountry[prefer].orEmpty())
+            orig?.let { out += it }
+        } else {
+            val near = ArrayList<Server>()
+            last?.takeIf { it.code in NEAR_GROUP }?.let { near += it }
+            orig?.takeIf { it.code in NEAR_GROUP }?.let { near += it }
+            NEAR.filter { it in NEAR_GROUP }.forEach { code ->
+                if (near.none { it.code == code }) rotate(byCountry[code].orEmpty()).firstOrNull()?.let { near += it }
+            }
+            out += near.distinctBy { it.ip + "|" + it.publicKey + "|" + it.port }.take(NEAR_PROBES)
+            last?.let { out += it }
+            orig?.let { out += it }
         }
         NEAR.forEach { code -> out += rotate(byCountry[code].orEmpty()) }
         byCountry.keys.filter { it !in NEAR }.sorted().forEach { code -> out += rotate(byCountry[code].orEmpty()) }

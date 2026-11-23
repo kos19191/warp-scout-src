@@ -147,6 +147,13 @@ data class TunnelStatus(
      * настроен. Через московскую площадку Cloudflare медиа Telegram режут фильтры (журнал 23.11).
      */
     val tgSecond: Boolean = false,
+    /**
+     * Вопрос «пустить Telegram через второй выход?» ждёт ответа (с 1.10.36): когда задан; 0 — вопроса
+     * нет. Экран, открытый в это время, задаёт тот же вопрос, если уведомление не видно.
+     */
+    val tgAskAt: Long = 0L,
+    /** Текст вопроса с цифрами обеих проверок. */
+    val tgAsk: String = "",
 ) {
 
     val isStarting: Boolean get() = phase == PHASE_STARTING || phase == PHASE_RECONNECTING
@@ -194,6 +201,8 @@ data class TunnelStatus(
         "tgMediaKbps" to JsonVal.num(tgMediaKbps),
         "tgMediaAt" to JsonVal.num(tgMediaAt),
         "tgSecond" to JsonVal.bool(tgSecond),
+        "tgAskAt" to JsonVal.num(tgAskAt),
+        "tgAsk" to JsonVal.str(tgAsk),
     ).render()
 
     companion object {
@@ -312,6 +321,8 @@ data class TunnelStatus(
                 tgMediaKbps = if (obj.fields.containsKey("tgMediaKbps")) obj.lng("tgMediaKbps").toInt() else -1,
                 tgMediaAt = obj.lng("tgMediaAt"),
                 tgSecond = obj.bool("tgSecond") ?: false,
+                tgAskAt = obj.lng("tgAskAt"),
+                tgAsk = obj.str("tgAsk").orEmpty(),
             )
         }
     }
@@ -399,8 +410,10 @@ data class ServiceSettings(
      */
     val abroadSearch: Boolean = true,
     /**
-     * Пускать Telegram через второй выход, пока выход WARP — в России (с 1.10.34). Выход за рубежом —
-     * Telegram снова напрямую через WARP (так быстрее).
+     * Предлагать второй выход для Telegram (с 1.10.36; ключ JSON прежний, с 1.10.34). Telegram идёт
+     * через WARP; если через Москву медиа тормозит, а второй выход заметно быстрее, туннель
+     * спрашивает уведомлением «Переключить» / «Оставить» (см. TelegramChoice). Выключено — не
+     * спрашивает и не переключает.
      */
     val tgSecond: Boolean = true,
 ) {

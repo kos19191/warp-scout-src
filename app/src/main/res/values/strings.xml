@@ -437,7 +437,7 @@
     <string name="feat_freeze">Менять точку, если загрузка встаёт</string>
     <string name="feat_dns">DNS через туннель при раздельных маршрутах</string>
     <string name="feat_abroad">Искать выход за рубежом, если выход в России (на зарядке, экран выключен, раз в сутки)</string>
-    <string name="feat_tg_second">Telegram через второй выход, пока выход в России</string>
+    <string name="feat_tg_second">Telegram: предлагать второй выход, если через Москву тормозит (спросит уведомлением)</string>
     <!-- DNS: адреса по имени -->
     <string name="dns_by_name_pending">адрес по имени %1$s (ещё не получен)</string>
     <string name="dns_fallback_note">У «%1$s» ещё нет адреса — пока имя не разрешится, в конфиг идёт Cloudflare.</string>
@@ -463,6 +463,15 @@
     <string name="exit_ru_warn">%1$s — Telegram может тормозить</string>
     <string name="exit_ru_tg_slow">%1$s — Telegram тормозит</string>
     <string name="exit_ru_tg_second">%1$s — Telegram через второй выход</string>
+    <!-- Вопрос «пустить Telegram через второй выход?» (с 1.10.36): уведомление и окно на экране -->
+    <string name="tg_ask_channel">Вопросы: Telegram и второй выход</string>
+    <string name="tg_ask_title">Telegram тормозит через %1$s</string>
+    <string name="tg_ask_dialog_title">Telegram тормозит</string>
+    <string name="tg_ask_text">Через %1$s: %2$s. Через %3$s: %4$s. Переключить Telegram? Ответ — на сутки для этой сети; если второй выход станет медленнее, Telegram вернётся сам.</string>
+    <string name="tg_ask_switch">Переключить</string>
+    <string name="tg_ask_stay">Оставить</string>
+    <string name="tg_second_country">второй выход (%1$s)</string>
+    <string name="tg_second_plain">второй выход</string>
     <!-- ── 1.10.30: тумблер вида, лучшие точки обеих сетей, доступность ── -->
     <string name="mode_switch_label">%1$s · %2$s</string>
     <string name="mode_state_on">включено</string>

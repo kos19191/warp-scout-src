@@ -181,6 +181,8 @@ class VpnTunnelController(private val context: Context) : TunnelController {
         WarpVpnService.reloadSecondRoutes(context)
     }
 
+    override fun answerTelegram(switch: Boolean) = WarpVpnService.answerTelegram(context, switch)
+
     // Причину отказа называет сервис, а живёт она в снимке его состояния: в процессе интерфейса
     // TunnelDebug.lastError почти всегда пуст, и вместо причины показывалось «нет ответа».
     override fun lastError(): String? = TunnelState.error ?: TunnelDebug.lastError

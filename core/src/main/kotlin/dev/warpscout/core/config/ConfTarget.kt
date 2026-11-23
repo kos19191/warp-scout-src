@@ -219,6 +219,41 @@ object SplitRoutes {
         return acc
     }
 
+    /**
+     * Подсети [cidrs] без адресов [hosts] (IPv4, с 1.10.36): подсеть, в которую попал адрес,
+     * заменяется её остатком — по одной соседней подсети на каждый бит (/20 без одного адреса —
+     * 12 подсетей). Нужно замеру через Москву, пока Telegram идёт через второй выход: адрес замера
+     * идёт мимо второго выхода, остальной Telegram — через него. IPv6 и записи без маски — как есть.
+     */
+    fun excludeHosts(cidrs: List<String>, hosts: Collection<String>): List<String> {
+        val addrs = hosts.mapNotNull { v4ToInt(it.trim()) }.distinct()
+        if (addrs.isEmpty()) return cidrs
+        var out = cidrs
+        for (addr in addrs) {
+            val next = ArrayList<String>(out.size + 32)
+            for (raw in out) {
+                val item = raw.trim()
+                if (!coversV4(item, addr)) {
+                    next += raw
+                    continue
+                }
+                val bits = item.substringAfter('/', "").trim().toIntOrNull() ?: continue
+                // Соседи адреса на каждой длине от bits+1 до 32: вместе это подсеть без него.
+                for (len in bits + 1..32) {
+                    val mask = -1 shl (32 - len)
+                    val sibling = (addr and mask) xor (1 shl (32 - len))
+                    next += "${v4ToText(sibling)}/$len"
+                }
+            }
+            out = next
+        }
+        return out
+    }
+
+    /** Число → «a.b.c.d». */
+    private fun v4ToText(v: Int): String =
+        "${(v ushr 24) and 0xFF}.${(v ushr 16) and 0xFF}.${(v ushr 8) and 0xFF}.${v and 0xFF}"
+
     /** «a.b.c.d» → число; null — не IPv4. */
     private fun v4ToInt(ip: String): Int? {
         val parts = ip.split('.')

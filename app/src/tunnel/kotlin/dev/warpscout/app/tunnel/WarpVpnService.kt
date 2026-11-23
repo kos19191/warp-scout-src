@@ -16,6 +16,7 @@ import dev.warpscout.app.EndpointMemory
 import dev.warpscout.app.NoiseMemory
 import dev.warpscout.app.R
 import dev.warpscout.app.SiteMemory
+import dev.warpscout.app.TelegramChoiceMemory
 import dev.warpscout.app.TunnelDebug
 import dev.warpscout.core.config.SplitRoutes
 import dev.warpscout.core.config.WgConf
@@ -33,6 +34,7 @@ import dev.warpscout.core.net.EndpointSpec
 import dev.warpscout.core.net.ExitSite
 import dev.warpscout.core.net.NetSettings
 import dev.warpscout.core.net.SpeedTest
+import dev.warpscout.core.net.TelegramChoice
 import dev.warpscout.core.net.TelegramMedia
 import dev.warpscout.core.net.UdpSocketFactory
 import dev.warpscout.core.net.WarpDefaults
@@ -722,6 +724,12 @@ class WarpVpnService : VpnService() {
             handleSecondRoutes(startId)
             return START_NOT_STICKY
         }
+        // Ответ на вопрос про Telegram (с 1.10.36): кнопка уведомления или окно на экране. Приходит
+        // обычным startService, как проверки выше: туннель не трогаем и не поднимаем.
+        if (intent?.action == ACTION_TG_SWITCH || intent?.action == ACTION_TG_STAY) {
+            handleTelegramAnswer(intent, startId)
+            return START_NOT_STICKY
+        }
         // ГЛАВНОЕ ПРАВИЛО ANDROID: после startForegroundService() сервис обязан вызвать
         // startForeground() примерно за 5 секунд, иначе процесс убивают с
         // ForegroundServiceDidNotStartInTimeException — без записи в журнал, и туннель умирает
@@ -750,6 +758,8 @@ class WarpVpnService : VpnService() {
                 val already = TunnelState.stoppedByUser && !TunnelState.wanted && !TunnelState.up && !TunnelState.busy
                 TunnelState.stoppedByUser = true
                 TunnelState.stoppedByUserAt = System.currentTimeMillis()
+                // Вопрос про Telegram касается работающего туннеля (с 1.10.36).
+                clearTelegramAsk()
                 if (!already) {
                     TunnelDebug.stage("туннель выключен вручную — сам больше не включаю, пока не нажмёшь «Включить»")
                 }
@@ -1021,9 +1031,10 @@ class WarpVpnService : VpnService() {
         // первого по порядку, дальше перебирает поток второго выхода (см. ниже).
         val secondList = secondCandidates(secondConfig())
         val secondCfg = secondList.firstOrNull()?.second
-        // Telegram — через второй выход, если эта точка на этой сети выходила через Россию (с 1.10.34,
-        // см. applyTelegramRoute): узнаём по памяти площадок ещё до подъёма, чтобы Telegram не
-        // начинал через московский фильтр. Проверка связи после подъёма уточнит и переключит на лету.
+        // Telegram — через второй выход с самого подъёма, только если на этой сети человек ответил
+        // «Переключить» меньше суток назад, а точка выходила через Россию (с 1.10.36, см.
+        // checkTelegramMedia). Иначе — через WARP, как всё остальное: в Москве Telegram режут не
+        // всегда, а второй выход бывает медленнее (23.11: через Мексику было «прямо тяжело»).
         val tgSite = if (secondCfg != null && !quietSession) telegramSiteFor(cfg) else ""
         val tunRoutes = runCatching { ExitRouter.of(SplitRoutes.prefixesOf(cfg.allowedIps)) }.getOrNull()
         val router = secondCfg?.let { ExitRouter.of(secondExitCidrs(tgSite.isNotEmpty(), tunRoutes)) }
@@ -1031,15 +1042,15 @@ class WarpVpnService : VpnService() {
         val multiExit = secondCfg != null && !router.isEmpty
         tgViaSecond = multiExit && tgSite.isNotEmpty()
         TunnelState.tgSecond = tgViaSecond
-        tgNoSecondSaid = false
+        probeHosts.clear()
         siteSaid = ""
         // Говорим и про выключенный второй выход: иначе «две цепочки рукопожатий в журнале»
         // невозможно объяснить, не заглядывая в настройки.
         TunnelDebug.stage(if (multiExit) "второй выход включён" else "второй выход выключен")
         if (tgViaSecond) {
             TunnelDebug.stage(
-                "Telegram — через второй выход: на этой сети точка выходила через ${ExitSite.describe(tgSite)}, " +
-                    "там медиа Telegram режут фильтры"
+                "Telegram — через второй выход: на этой сети ты ответил «Переключить» (действует сутки), " +
+                    "точка выходила через ${ExitSite.describe(tgSite)}; станет медленнее Москвы — верну через WARP"
             )
         }
 
@@ -1833,7 +1844,8 @@ class WarpVpnService : VpnService() {
                 TunnelState.setLink(System.currentTimeMillis(), result.web, result.webMs, result.tg, result.tgMs, result.exit)
                 reportLink(reason, result)
                 // Площадка выхода (с 1.10.34): в память — по ней перебор ставит выход за рубежом
-                // раньше московского; Telegram — через второй выход, пока выход в России.
+                // раньше московского. Выход за рубежом — Telegram снова через WARP; на второй выход
+                // его с 1.10.36 переключает только ответ человека (см. checkTelegramMedia).
                 val site = if (result.web == TunnelStatus.LINK_OK) ExitSite.fromSummary(result.exit) else ""
                 if (site.isNotEmpty()) {
                     TunnelState.endpoint.takeIf { it.isNotBlank() }?.let { ep ->
@@ -1952,17 +1964,17 @@ class WarpVpnService : VpnService() {
     //
     // Журнал 23.11: с 07:39 все точки выходили через московскую площадку Cloudflare (DME), и медиа
     // Telegram грузилось «через раз и рывками», а проверка связи писала «Telegram ✓»: соединение
-    // открывалось, резали уже поток. Человек выбрал (23.11): пока выход WARP в России, Telegram идёт
-    // через второй выход; выход за рубежом — снова напрямую через WARP (так быстрее). И проверка
-    // Telegram должна смотреть, идут ли данные, а не только открывается ли соединение.
+    // открывалось, резали уже поток. С 1.10.34 Telegram при выходе через Россию сразу уходил во
+    // второй выход — но в Москве его режут не всегда, а второй выход бывает медленнее: человек
+    // написал, что через Москву было нормально, а через второй выход (Мексика) — «прямо тяжело».
+    // С 1.10.36 решает человек (ответ 23.11): Telegram идёт через Москву; проверка медиа показала
+    // «тормозит» — та же загрузка через второй выход; он заметно быстрее — вопрос с цифрами
+    // «Переключить» / «Оставить», ответ — на сутки для этой сети (см. TelegramChoice). Переключили —
+    // меряем оба пути; второй выход стал медленнее Москвы — Telegram сам возвращается через WARP.
 
     /** Telegram сейчас идёт через второй выход: подсети Telegram — в таблице второго выхода. */
     @Volatile
     private var tgViaSecond = false
-
-    /** В этой сессии уже сказали «второй выход не настроен — Telegram через Москву». */
-    @Volatile
-    private var tgNoSecondSaid = false
 
     /** Площадка, о которой в этой сессии уже написали в журнал. */
     @Volatile
@@ -1979,6 +1991,23 @@ class WarpVpnService : VpnService() {
     private val TG_MEDIA_GAP_MS = 30 * 60_000L
 
     /**
+     * Замер другим путём идёт сейчас: адреса замера — через второй выход ([probeViaSecond]) или мимо
+     * него, через WARP. Остальной Telegram остаётся, где был: живые соединения при замере не
+     * переезжают на другой выход (у него другой адрес отправителя — они бы оборвались).
+     */
+    private val probeHosts = java.util.concurrent.CopyOnWriteArraySet<String>()
+
+    @Volatile
+    private var probeViaSecond = false
+
+    /** Таблицу второго выхода меняют несколько потоков (замер, ответ, обновление адресов) — по очереди. */
+    private val routerLock = Any()
+
+    /** Сеть, о которой задан вопрос (ответ с экрана приходит без сети). */
+    @Volatile
+    private var tgAskNet = ""
+
+    /**
      * Подсети второго выхода из настроек плюс, если [withTelegram], подсети Telegram — те, что и так
      * идут в туннель по маршрутам [routes] (null — весь трафик). Выбор в «Туннелировании» не меняем:
      * если Telegram идёт мимо туннеля, площадка WARP его не касается.
@@ -1990,56 +2019,64 @@ class WarpVpnService : VpnService() {
         return (base + tg).distinct()
     }
 
+    /** Таблица второго выхода сейчас: адреса из настроек, Telegram (если переключён) и адреса идущего замера. */
+    private fun telegramRouter(): ExitRouter {
+        val cidrs = secondExitCidrs(tgViaSecond)
+        val hosts = probeHosts.toList()
+        val list = when {
+            hosts.isEmpty() -> cidrs
+            probeViaSecond -> (cidrs + hosts.map { "$it/32" }).distinct()
+            else -> SplitRoutes.excludeHosts(cidrs, hosts)
+        }
+        return ExitRouter.of(list)
+    }
+
     /**
-     * Площадка в России, через которую эта точка выходила на этой сети (по памяти), — если Telegram
-     * надо пускать через второй выход; пусто — не надо (выход за рубежом, не знаем или выключено).
+     * Начинать ли сессию с Telegram через второй выход (с 1.10.36 — только по ответу человека): на
+     * этой сети меньше суток назад ответили «Переключить», а эта точка выходила через Россию.
+     * Возвращает площадку; пусто — Telegram идёт через WARP, дальше решит проверка медиа.
      */
     private fun telegramSiteFor(cfg: WarpConfig): String = runCatching {
         if (!serviceSettings().tgSecond || !isWarpPeer(cfg)) return@runCatching ""
-        val site = SiteMemory.siteOf(this, memoryNetKind(), cfg.endpoint.render())
+        val net = memoryNetKind()
+        if (TelegramChoiceMemory.choiceOf(this, net) != TelegramChoice.SECOND) return@runCatching ""
+        val site = SiteMemory.siteOf(this, net, cfg.endpoint.render())
         if (ExitSite.isRussian(site)) site else ""
     }.getOrDefault("")
 
     /**
-     * Пускать ли Telegram через второй выход — по площадке, которую только что показала проверка
-     * связи. Таблица меняется на лету, как при обновлении адресов второго выхода (handleSecondRoutes):
-     * туннель не переподключается.
+     * Переключить Telegram на второй выход или вернуть через WARP — на лету, как при обновлении
+     * адресов второго выхода (handleSecondRoutes): туннель не переподключается. [line] — в журнал.
+     * false — второго выхода в этой сессии нет или Telegram уже идёт так.
+     */
+    private fun setTelegramViaSecond(want: Boolean, line: String): Boolean {
+        val splitter = dispatcher ?: return false
+        synchronized(routerLock) {
+            if (want == tgViaSecond) return false
+            tgViaSecond = want
+            splitter.router = telegramRouter()
+        }
+        TunnelState.tgSecond = want
+        TunnelDebug.stage(line)
+        return true
+    }
+
+    /**
+     * После проверки связи: выход WARP оказался за рубежом — Telegram, если шёл через второй выход,
+     * снова напрямую через WARP (там его не режут), а вопрос, если ждал ответа, снимается. Сам на
+     * второй выход не переключает (с 1.10.36): это решает человек, см. checkTelegramMedia.
      */
     private fun applyTelegramRoute(site: String) {
-        val settings = serviceSettings()
-        val want = settings.tgSecond && ExitSite.isRussian(site)
-        if (want == tgViaSecond) return
-        val splitter = dispatcher
-        if (splitter == null) {
-            // Второго выхода в этой сессии нет: не настроен или без своих адресов.
-            if (want && !tgNoSecondSaid) {
-                tgNoSecondSaid = true
-                TunnelDebug.stage(
-                    if (secondConfig() == null) {
-                        "выход WARP через ${ExitSite.describe(site)} — Telegram пустить в обход нечем: второй выход не настроен"
-                    } else {
-                        "выход WARP через ${ExitSite.describe(site)} — Telegram пойдёт через второй выход со следующего подключения"
-                    }
-                )
-            }
-            return
+        val abroad = ExitSite.isAbroad(site)
+        if (abroad && TunnelState.tgAskAt > 0L) clearTelegramAsk()
+        if (!tgViaSecond) return
+        val back = when {
+            !serviceSettings().tgSecond -> "Telegram: второй выход для Telegram выключен в «Автоматике» — снова напрямую через WARP"
+            abroad -> "выход WARP за рубежом (${ExitSite.describe(site)}) — Telegram снова напрямую через WARP"
+            else -> return
         }
-        val router = ExitRouter.of(secondExitCidrs(want))
-        if (router.isEmpty) return
-        splitter.router = router
-        tgViaSecond = want
-        TunnelState.tgSecond = want
-        val secondUp = TunnelState.second == TunnelStatus.SECOND_UP
-        TunnelDebug.stage(
-            if (want) {
-                "выход WARP через ${ExitSite.describe(site)} — Telegram переключён на второй выход (на лету)" +
-                    if (secondUp) "" else "; пока второй выход не поднят, Telegram идёт через WARP"
-            } else {
-                "выход WARP за рубежом (${ExitSite.describe(site)}) — Telegram снова напрямую через WARP"
-            }
-        )
-        // Площадка сменилась — медиа проверим заново уже по новому пути.
-        tgMediaCheckedAt = 0L
+        // Путь сменился — медиа проверим заново уже по новому пути.
+        if (setTelegramViaSecond(false, back)) tgMediaCheckedAt = 0L
     }
 
     /**
@@ -2054,17 +2091,34 @@ class WarpVpnService : VpnService() {
         return now - tgMediaCheckedAt !in 0 until TG_MEDIA_GAP_MS
     }
 
-    /** Проверка медиа Telegram (см. TelegramMedia): вывод — в снимок и в журнал. */
+    /**
+     * Проверка медиа Telegram (см. TelegramMedia): вывод — в снимок и в журнал. С 1.10.36 — и
+     * сравнение со вторым выходом (см. начало раздела).
+     */
     private fun checkTelegramMedia(myEpoch: Int, site: String) {
         val routes = currentRoutes()
         val tgRouted = TelegramMedia.NETS_V4.any { cidr -> routedIp(routes, cidr.substringBefore('/')) }
         if (!tgRouted) return
         tgMediaCheckedAt = System.currentTimeMillis()
         tgMediaCheckedSite = site
+        val secondUp = dispatcher != null && TunnelState.second == TunnelStatus.SECOND_UP
+        if (tgViaSecond && secondUp) {
+            checkBothWays(myEpoch, site)
+            return
+        }
         val r = runTelegramMedia()
         if (!linkAlive(myEpoch)) return
         TunnelState.setTgMedia(System.currentTimeMillis(), r.verdict, r.kbps)
-        val via = if (tgViaSecond && TunnelState.second == TunnelStatus.SECOND_UP) " (через второй выход)" else ""
+        reportTelegramMedia(r, if (tgViaSecond) " (Telegram переключён на второй выход, но он сейчас не поднят)" else "", site)
+        // Через Москву плохо — сравним со вторым выходом (с 1.10.36).
+        if (!tgViaSecond && ExitSite.isRussian(site) && TelegramChoice.poor(r.verdict)) {
+            runCatching { compareWithSecond(myEpoch, site, r) }
+                .onFailure { TunnelDebug.stage("Telegram: сравнить со вторым выходом не вышло (${it.javaClass.simpleName})") }
+        }
+    }
+
+    /** Строка о проверке медиа в журнал: «тормозит» — ошибкой, с подсказкой, что делать. */
+    private fun reportTelegramMedia(r: TelegramMedia.Fetch, via: String, site: String) {
         val line = "проверка Telegram: " + TelegramMedia.describe(r.verdict, r.kbps, r.maxGapMs) + via +
             (if (r.note.isNotBlank()) " — ${r.note}" else "")
         when (r.verdict) {
@@ -2074,21 +2128,200 @@ class WarpVpnService : VpnService() {
         }
     }
 
+    /** Строка о замере для сравнения: «проверка Telegram через Москву (для сравнения): …». */
+    private fun reportCompare(r: TelegramMedia.Fetch, via: String) {
+        TunnelDebug.stage(
+            "проверка Telegram через $via (для сравнения): " + TelegramMedia.describe(r.verdict, r.kbps, r.maxGapMs) +
+                (if (r.note.isNotBlank()) " — ${r.note}" else "")
+        )
+    }
+
+    /**
+     * Telegram идёт через второй выход: меряем его путь (это и видит человек) и путь через WARP —
+     * адрес замера на это время идёт мимо второго выхода. Второй выход стал медленнее Москвы —
+     * Telegram возвращается через WARP. Ответ «Переключить» действует до конца суток: если Москва
+     * снова затормозит, а второй выход окажется быстрее, Telegram переедет без вопроса.
+     */
+    private fun checkBothWays(myEpoch: Int, site: String) {
+        val label = secondLabel()
+        val second = runTelegramMedia()
+        if (!linkAlive(myEpoch)) return
+        TunnelState.setTgMedia(System.currentTimeMillis(), second.verdict, second.kbps)
+        reportTelegramMedia(second, " (через $label)", site)
+        val warp = probeTelegram(viaSecond = false)
+        if (!linkAlive(myEpoch) || !tgViaSecond) return
+        val city = ExitSite.cityAcc(site).ifBlank { "WARP" }
+        reportCompare(warp, city)
+        if (TelegramChoice.secondWorse(warp.verdict, warp.kbps, second.verdict, second.kbps)) {
+            val moved = setTelegramViaSecond(
+                false,
+                "Telegram: $label медленнее, чем через $city (${TelegramChoice.short(second.verdict, second.kbps)} против " +
+                    "${TelegramChoice.short(warp.verdict, warp.kbps)}) — снова через WARP"
+            )
+            if (moved) TunnelState.setTgMedia(System.currentTimeMillis(), warp.verdict, warp.kbps)
+        }
+    }
+
+    /**
+     * Через Москву медиа тормозит — та же загрузка через второй выход (с 1.10.36). Заметно быстрее —
+     * спрашиваем человека (а если на этой сети он уже ответил «Переключить», переключаем сразу).
+     * Ответил «Оставить» или вопрос уже ждёт ответа — второй выход не меряем: трафик зря.
+     */
+    private fun compareWithSecond(myEpoch: Int, site: String, moscow: TelegramMedia.Fetch) {
+        if (!serviceSettings().tgSecond) return
+        if (dispatcher == null || TunnelState.second != TunnelStatus.SECOND_UP) return
+        val net = memoryNetKind()
+        val choice = TelegramChoiceMemory.choiceOf(this, net)
+        if (choice == TelegramChoice.STAY || choice == TelegramChoice.ASKED) return
+        val label = secondLabel()
+        val second = probeTelegram(viaSecond = true)
+        if (!linkAlive(myEpoch) || tgViaSecond) return
+        reportCompare(second, label)
+        val city = ExitSite.cityAcc(site)
+        val numbers = "через $city ${TelegramChoice.short(moscow.verdict, moscow.kbps)}, " +
+            "через $label ${TelegramChoice.short(second.verdict, second.kbps)}"
+        if (!TelegramChoice.secondHelps(moscow.verdict, moscow.kbps, second.verdict, second.kbps)) {
+            TunnelDebug.stage("Telegram: $numbers — второй выход не быстрее, оставляю через $city")
+            return
+        }
+        if (choice == TelegramChoice.SECOND) {
+            val moved = setTelegramViaSecond(
+                true,
+                "Telegram: $numbers — переключаю на второй выход (ты ответил «Переключить», действует сутки)"
+            )
+            if (moved) TunnelState.setTgMedia(System.currentTimeMillis(), second.verdict, second.kbps)
+            return
+        }
+        askTelegramSwitch(net, site, moscow, second, label)
+        TunnelDebug.stage("Telegram: $numbers — спрашиваю, переключить ли (уведомление «Переключить» / «Оставить»)")
+    }
+
+    /** «второй выход (Нидерланды)» — страна по имени сервера Proton; свой сервер — просто «второй выход». */
+    private fun secondLabel(): String {
+        val name = TunnelState.secondPeer
+        val code = if (name.isBlank()) "" else ProtonFree.codeOf(name, "")
+        val known = code.length == 2 && code.all { it in 'A'..'Z' }
+        return if (known) {
+            getString(R.string.tg_second_country, dev.warpscout.app.SecondProton.countryName(this, code))
+        } else {
+            getString(R.string.tg_second_plain)
+        }
+    }
+
+    /**
+     * Задать вопрос: уведомление с цифрами и кнопками «Переключить» / «Оставить». Канал свой,
+     * обычной важности: канал туннеля самый тихий, в нём вопрос никто бы не увидел. Ответа нет —
+     * три часа не спрашиваем снова (TelegramChoice.ASKED), уведомление уходит само через то же время.
+     */
+    private fun askTelegramSwitch(net: String, site: String, moscow: TelegramMedia.Fetch, second: TelegramMedia.Fetch, label: String) {
+        val city = ExitSite.cityAcc(site)
+        val text = getString(
+            R.string.tg_ask_text,
+            city, TelegramChoice.short(moscow.verdict, moscow.kbps),
+            label, TelegramChoice.short(second.verdict, second.kbps)
+        )
+        TelegramChoiceMemory.note(this, net, TelegramChoice.ASKED)
+        tgAskNet = net
+        TunnelState.setTgAsk(System.currentTimeMillis(), text)
+        runCatching { postTelegramAsk(net, getString(R.string.tg_ask_title, city), text) }
+            .onFailure { TunnelDebug.stage("Telegram: уведомление с вопросом не показалось (${it.javaClass.simpleName}) — спрошу на экране") }
+    }
+
+    private fun postTelegramAsk(net: String, title: String, text: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            notifyManager().createNotificationChannel(
+                NotificationChannel(
+                    TelegramChoiceMemory.ASK_CHANNEL, getString(R.string.tg_ask_channel), NotificationManager.IMPORTANCE_DEFAULT
+                ).apply {
+                    // Видно в строке состояния, но без звука и вибрации: вопрос не срочный.
+                    setSound(null, null)
+                    enableVibration(false)
+                }
+            )
+        }
+        fun answer(act: String, code: Int) = android.app.PendingIntent.getService(
+            this, code,
+            Intent(this, WarpVpnService::class.java).apply {
+                action = act
+                putExtra(EXTRA_NET, net)
+            },
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        val open = android.app.PendingIntent.getActivity(
+            this, 0,
+            Intent(this, dev.warpscout.app.MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        val n = NotificationCompat.Builder(this, TelegramChoiceMemory.ASK_CHANNEL)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            // Лиса в щите, как у уведомлений подбора: пустой значок туннеля здесь не годится.
+            .setSmallIcon(R.drawable.ic_tile_tunnel)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setOnlyAlertOnce(true)
+            .setAutoCancel(true)
+            .setTimeoutAfter(TelegramChoice.ASK_GAP_MS)
+            .setContentIntent(open)
+            .addAction(0, getString(R.string.tg_ask_switch), answer(ACTION_TG_SWITCH, 21))
+            .addAction(0, getString(R.string.tg_ask_stay), answer(ACTION_TG_STAY, 22))
+            .build()
+        notifyManager().notify(NOTIF_ASK_ID, n)
+    }
+
+    /** Снять вопрос: уведомление и отметку в снимке (ответили, выход ушёл за рубеж, туннель выключили). */
+    private fun clearTelegramAsk() {
+        runCatching { notifyManager().cancel(NOTIF_ASK_ID) }
+        if (TunnelState.tgAskAt != 0L || TunnelState.tgAsk.isNotEmpty()) TunnelState.setTgAsk(0L, "")
+    }
+
+    /**
+     * Ответ на вопрос: запомнить на сутки для сети, о которой спрашивали; «Переключить» на той же
+     * сети при работающем туннеле — сразу переключить Telegram (на лету).
+     */
+    private fun handleTelegramAnswer(intent: Intent, startId: Int) {
+        val switch = intent.action == ACTION_TG_SWITCH
+        val net = intent.getStringExtra(EXTRA_NET).orEmpty().ifBlank { tgAskNet }.ifBlank { memoryNetKind() }
+        runCatching { TelegramChoiceMemory.note(this, net, if (switch) TelegramChoice.SECOND else TelegramChoice.STAY) }
+        clearTelegramAsk()
+        val running = plane != null && worker?.isAlive == true && TunnelState.up
+        val here = running && net == memoryNetKind()
+        when {
+            !switch -> TunnelDebug.stage("Telegram: ответ «Оставить» — идёт через выход WARP, сутки на этой сети не спрашиваю")
+            !here -> TunnelDebug.stage("Telegram: ответ «Переключить» запомнен на сутки для этой сети — переключу, когда туннель будет на ней")
+            else -> {
+                val moved = setTelegramViaSecond(
+                    true,
+                    "Telegram: ответ «Переключить» — Telegram через ${secondLabel()} (на сутки для этой сети; " +
+                        "станет медленнее Москвы — верну через WARP)"
+                )
+                if (!moved && !tgViaSecond) {
+                    TunnelDebug.stage("Telegram: ответ «Переключить» запомнен — второго выхода в этой сессии нет, переключу при следующем подключении")
+                }
+            }
+        }
+        if (!running) idleStop(startId)
+    }
+
     /** Что делать, если медиа Telegram тормозит: зависит от площадки и от того, где сейчас Telegram. */
     private fun tgMediaHint(site: String): String {
         val settings = serviceSettings()
         if (!ExitSite.isRussian(site)) {
             return "связь с Telegram есть, медиа тормозит, а выход WARP — не в России: попробуй другую точку"
         }
-        val city = ExitSite.city(site)
+        val city = ExitSite.cityAcc(site)
         if (tgViaSecond && TunnelState.second == TunnelStatus.SECOND_UP) {
-            return "выход WARP через $city, Telegram уже идёт через второй выход — медленный сам второй выход"
+            return "выход WARP через $city, Telegram идёт через второй выход — сравню с путём через $city и, если там быстрее, верну"
         }
         if (tgViaSecond) return "выход WARP через $city: второй выход сейчас не работает — Telegram идёт через WARP"
+        val choice = TelegramChoiceMemory.choiceOf(this, memoryNetKind())
         val fix = when {
-            !settings.tgSecond -> "включи «Telegram через второй выход» в «Автоматике»"
-            secondConfig() == null -> "включи второй выход — Telegram пойдёт через него, пока выход в России"
-            else -> "Telegram пойдёт через второй выход со следующего подключения"
+            !settings.tgSecond -> "включи «Telegram: предлагать второй выход» в «Автоматике» — приложение сравнит скорость и спросит"
+            secondConfig() == null -> "включи второй выход — приложение сравнит скорость и предложит пустить Telegram через него"
+            TunnelState.second != TunnelStatus.SECOND_UP -> "второй выход сейчас не поднят — сравнить не с чем"
+            choice == TelegramChoice.STAY -> "ты ответил «Оставить» — сутки на этой сети Telegram идёт через $city"
+            choice == TelegramChoice.ASKED -> "вопрос про второй выход уже задан — ответ в уведомлении"
+            else -> "сравниваю со вторым выходом"
         }
         val wait = if (settings.abroadSearch) {
             "; точку с выходом за рубежом приложение поищет само — на зарядке с погашенным экраном"
@@ -2106,6 +2339,39 @@ class WarpVpnService : VpnService() {
     private fun runTelegramMedia(): TelegramMedia.Fetch = TelegramMedia.fetch(
         resolve = { host -> java.net.InetAddress.getAllByName(host).mapNotNull { it.hostAddress } }
     )
+
+    /**
+     * Та же загрузка, но другим путём (с 1.10.36): [viaSecond] — через второй выход, иначе — через
+     * WARP. Адрес, к которому идёт загрузка, на время замера ставится в таблицу второго выхода
+     * отдельно (/32 или вырезом из подсетей Telegram); остальной Telegram остаётся, где был. Без
+     * второго выхода в этой сессии или если Telegram и так идёт этим путём — обычная загрузка.
+     */
+    private fun probeTelegram(viaSecond: Boolean): TelegramMedia.Fetch {
+        if (dispatcher == null || viaSecond == tgViaSecond) return runTelegramMedia()
+        try {
+            return TelegramMedia.fetch(resolve = { host ->
+                val all = java.net.InetAddress.getAllByName(host).mapNotNull { it.hostAddress }
+                // Тот же адрес, что выберет сама загрузка: первый IPv4 в сетях Telegram.
+                val ip = all.map { it.trim() }.firstOrNull { TelegramMedia.isTelegramIp(it) }
+                if (ip == null) {
+                    all
+                } else {
+                    synchronized(routerLock) {
+                        probeViaSecond = viaSecond
+                        if (probeHosts.add(ip)) dispatcher?.router = telegramRouter()
+                    }
+                    listOf(ip)
+                }
+            })
+        } finally {
+            synchronized(routerLock) {
+                if (probeHosts.isNotEmpty()) {
+                    probeHosts.clear()
+                    dispatcher?.router = telegramRouter()
+                }
+            }
+        }
+    }
 
     /** GET с коротким телом (trace — пара сотен байт). Без кешей и перенаправлений. */
     private fun httpGetSmall(url: String, timeoutMs: Int): String {
@@ -2401,9 +2667,11 @@ class WarpVpnService : VpnService() {
             TunnelDebug.stage("адреса второго выхода обновлены — применятся при следующем подключении")
             return
         }
-        val router = runCatching { ExitRouter.of(secondExitCidrs(tgViaSecond)) }.getOrNull()
+        // Через telegramRouter: Telegram (если переключён) и идущий замер остаются в таблице.
+        val router = runCatching {
+            synchronized(routerLock) { telegramRouter().also { if (!it.isEmpty) splitter.router = it } }
+        }.getOrNull()
         if (router == null || router.isEmpty) return
-        splitter.router = router
         val split = lastConfigText?.let { text -> runCatching { WgConf.toWarpConfig("WARP", text) }.getOrNull() }
             ?.let { !isFullTunnel(it) } ?: false
         TunnelDebug.stage(
@@ -4701,6 +4969,13 @@ class WarpVpnService : VpnService() {
         /** Адреса второго выхода обновились: сменить таблицу на лету (см. handleSecondRoutes). */
         const val ACTION_SECOND_ROUTES = "dev.warpscout.app.tunnel.SECOND_ROUTES"
 
+        /** Ответ на вопрос про Telegram (с 1.10.36, см. handleTelegramAnswer): «Переключить» / «Оставить». */
+        const val ACTION_TG_SWITCH = "dev.warpscout.app.tunnel.TG_SWITCH"
+        const val ACTION_TG_STAY = "dev.warpscout.app.tunnel.TG_STAY"
+
+        /** Сеть, о которой задан вопрос про Telegram. */
+        const val EXTRA_NET = "net"
+
         /** Старт для проверки в подборе: без автозамера скорости (подбор мерит сам). */
         const val EXTRA_QUIET = "quiet"
 
@@ -4722,6 +4997,9 @@ class WarpVpnService : VpnService() {
         private const val CHANNEL = "warpscout.tunnel.quiet"
         private const val LEGACY_CHANNEL = "warpscout.tunnel"
         private const val NOTIF_ID = 4200
+
+        /** Уведомление с вопросом про Telegram (с 1.10.36): своё, не туннельное. */
+        private const val NOTIF_ASK_ID = 4201
 
         fun start(context: Context, config: WarpConfig, requestedAt: Long = 0L, quiet: Boolean = false) =
             startWithText(context, WgConf.render(config), requestedAt, quiet)
@@ -4792,6 +5070,15 @@ class WarpVpnService : VpnService() {
         fun reloadSecondRoutes(context: Context) {
             runCatching {
                 context.startService(Intent(context, WarpVpnService::class.java).apply { action = ACTION_SECOND_ROUTES })
+            }
+        }
+
+        /** Ответ на вопрос про Telegram с экрана (уведомления выключены — см. MainActivity.maybeAskTelegram). */
+        fun answerTelegram(context: Context, switch: Boolean) {
+            runCatching {
+                context.startService(Intent(context, WarpVpnService::class.java).apply {
+                    action = if (switch) ACTION_TG_SWITCH else ACTION_TG_STAY
+                })
             }
         }
 
