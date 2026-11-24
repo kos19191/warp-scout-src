@@ -392,6 +392,16 @@ class Prefs(private val context: Context) {
         get() = sp.getStringSet("appsUnticked", emptySet()).orEmpty()
         set(v) = sp.edit().putStringSet("appsUnticked", v.toSet()).apply()
 
+    /**
+     * Бета (с 1.10.44-beta4): приложения, которым «второй выход по умолчанию» уже поставлен или решено
+     * не ставить (см. SecondDefaults) — больше их не трогаем: выбрал человек потом «Само» — так и
+     * останется. Попадает в резервную копию; копия из обычной версии этой отметки не несёт, и бета
+     * после восстановления поставит правило тем, у кого в копии выход «Само».
+     */
+    var secondDefaultsSeen: Set<String>
+        get() = sp.getStringSet("secondDefaultsSeen", emptySet()).orEmpty()
+        set(v) = sp.edit().putStringSet("secondDefaultsSeen", v.toSet()).apply()
+
     var appsSelected: Set<String>
         get() = sp.getStringSet("appsSelected", emptySet()).orEmpty()
         set(v) {

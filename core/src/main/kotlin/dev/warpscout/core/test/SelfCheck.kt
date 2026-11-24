@@ -63,6 +63,7 @@ import dev.warpscout.core.tunnel.Icmp6Reject
 import dev.warpscout.core.tunnel.InnerUdpChannel
 import dev.warpscout.core.tunnel.PacketMath
 import dev.warpscout.core.tunnel.AppAuto
+import dev.warpscout.core.tunnel.SecondDefaults
 import dev.warpscout.core.presets.Presets
 import dev.warpscout.core.model.ResourceResult
 
@@ -210,6 +211,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         }
         section("резервная копия: всё, а не только основные настройки (1.10.43.1)") {
             backupFormatChecks()
+        }
+        section("бета: TikTok, ChatGPT, Claude, Gemini, Grok — второй выход по умолчанию (1.10.44-beta4)") {
+            secondDefaultsChecks()
         }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
@@ -1347,6 +1351,82 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         )
         check("новая копия в старой версии: чужих ключей нет", legacy?.keys == main.keys, "${legacy?.keys}")
         check("не копия — null", BackupFormat.parse("[Interface]\nPrivateKey = x") == null && !BackupFormat.isBackup("hello"))
+    }
+
+    /**
+     * 1.10.44-beta4: в бете у TikTok, ChatGPT, Claude, Gemini и Grok выход по умолчанию — «Второй выход»
+     * (24.11: «Добавь по умолчанию тикток и всякие там клауд, гемини, грок, чатгпт через второй туннель
+     * по умолчанию. В бету пока что»). Только официальные приложения, только установленные, выбор
+     * человека сильнее, и один раз на приложение.
+     */
+    private fun secondDefaultsChecks() {
+        val d = SecondDefaults
+        val e = dev.warpscout.core.tunnel.AppExit
+        val a = dev.warpscout.core.lists.AppServices
+        val only = ServiceSettings.APPS_ONLY
+        val except = ServiceSettings.APPS_EXCEPT
+        val all = ServiceSettings.APPS_ALL
+        val tiktok = "com.zhiliaoapp.musically"
+        val chatgpt = "com.openai.chatgpt"
+        val claude = "com.anthropic.claude"
+        val gemini = "com.google.android.apps.bard"
+        val grok = "ai.x.grok"
+        val telegram = "org.telegram.messenger"
+
+        check("сервисы по умолчанию есть в списке сервисов",
+            d.SERVICES.all { t -> a.SERVICES.any { it.title == t } }, "${d.SERVICES}")
+        check("официальные приложения — да",
+            listOf(tiktok, "com.ss.android.ugc.trill", "com.zhiliaoapp.musically.go", chatgpt, claude, gemini, grok).all { d.wants(it) })
+        check("вариант пакета (пересобранный TikTok) — да", d.wants("com.zhiliaoapp.musically.morphe"))
+        check("сторонние «AI-чат» и «скачать из TikTok» по слову в имени — нет",
+            !d.wants("com.aichat.chatgpt.assistant") && !d.wants("com.video.tiktok.downloader") && !d.wants("com.anthropicfan.app"))
+        check("Telegram, Aurora, приложение Google, ngrok, пусто — нет",
+            !d.wants(telegram) && !d.wants("com.aurora.store") && !d.wants(a.GOOGLE_APP) && !d.wants("com.ngrok.app") && !d.wants(""))
+        check("TikTok строгий, остальные по умолчанию — с запасным WARP",
+            a.strictSecond(tiktok) && !a.strictSecond(chatgpt) && !a.strictSecond(claude) && !a.strictSecond(gemini) && !a.strictSecond(grok))
+
+        // Бета из журнала 24.11: «только выбранные», TikTok на «Второй выход» руками, ИИ не отмечены.
+        val installed = listOf(telegram, tiktok, chatgpt, claude, gemini, grok, a.GOOGLE_APP, "com.android.chrome")
+        val p1 = d.plan(installed, mapOf(tiktok to e.SECOND), only, setOf(telegram, tiktok), emptySet(), emptySet())
+        expect("бета: второй выход поставлен ИИ", p1.added, listOf(grok, claude, gemini, chatgpt))
+        check("бета: у всех пятерых «Второй выход»",
+            listOf(tiktok, chatgpt, claude, gemini, grok).all { p1.exits[it] == e.SECOND } && p1.exits.size == 5, "${p1.exits}")
+        check("бета: ИИ отмечены в «только выбранные», прежние на месте",
+            p1.selected == setOf(telegram, tiktok, grok, claude, gemini, chatgpt), "${p1.selected}")
+        expect("бета: отмечены именно новые", p1.ticked, p1.added)
+        expect("бета: TikTok выбран руками — оставлен", p1.kept, listOf(tiktok))
+        check("бета: рассмотрены все пятеро, чужие — нет",
+            p1.seen == setOf(tiktok, chatgpt, claude, gemini, grok), "${p1.seen}")
+        check("бета: приложение Google (спутник Gemini) правила не получает", a.GOOGLE_APP !in p1.exits)
+        check("бета: правила переживают снимок настроек",
+            e.decodeAll(e.encodeAll(p1.exits)) == p1.exits)
+
+        // Один раз на приложение.
+        val p2 = d.plan(installed, p1.exits, only, p1.selected, emptySet(), p1.seen)
+        check("второй раз — ничего не меняется", !p2.changed && p2.exits == p1.exits && p2.selected == p1.selected && p2.kept.isEmpty())
+        val p3 = d.plan(installed, p1.exits - chatgpt, only, p1.selected, emptySet(), p1.seen)
+        check("человек выбрал «Само» — обратно не ставим", !p3.changed && chatgpt !in p3.exits)
+
+        // Выбор человека сильнее.
+        val p4 = d.plan(installed, mapOf(claude to e.WARP), only, setOf(telegram), setOf(grok), emptySet())
+        check("«Всегда WARP» руками — остаётся", p4.exits[claude] == e.WARP && claude in p4.kept)
+        check("галочку сняли руками — не отмечаем и правило не ставим",
+            grok !in p4.exits && grok !in p4.selected && grok in p4.kept && grok in p4.seen)
+        val p5 = d.plan(installed, emptyMap(), except, setOf(tiktok), setOf(chatgpt), emptySet())
+        check("«все, кроме»: исключённый TikTok не трогаем", tiktok !in p5.exits && tiktok in p5.kept)
+        check("«все, кроме»: остальным правило, исключения те же, снятая галочка тут не в счёт",
+            p5.exits[chatgpt] == e.SECOND && p5.exits[grok] == e.SECOND && p5.selected == setOf(tiktok) && p5.ticked.isEmpty())
+        val p6 = d.plan(installed, emptyMap(), all, emptySet(), emptySet(), emptySet())
+        check("«все приложения»: правила у пятерых, отмечать нечего",
+            p6.added.size == 5 && p6.selected.isEmpty() && p6.ticked.isEmpty(), "${p6.added}")
+
+        // Только установленные; поставили позже — правило появится.
+        val p7 = d.plan(listOf(telegram, chatgpt), emptyMap(), only, setOf(telegram), emptySet(), emptySet())
+        check("нет на телефоне — правила нет", p7.added == listOf(chatgpt) && grok !in p7.exits && grok !in p7.seen)
+        val p8 = d.plan(listOf(telegram, chatgpt, grok), p7.exits, only, p7.selected, emptySet(), p7.seen)
+        check("поставили Grok позже — второй выход и отметка", p8.added == listOf(grok) && grok in p8.selected && p8.exits[grok] == e.SECOND)
+        check("пакеты с пробелами и повторами — без дублей",
+            d.plan(listOf(" $grok ", grok), emptyMap(), only, emptySet(), emptySet(), emptySet()).added == listOf(grok))
     }
 
     /** Разбор копии, как в 1.10.40–1.10.43 (прежний Backup.parse): так старая версия прочтёт новую копию. */

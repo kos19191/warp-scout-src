@@ -41,6 +41,7 @@ import dev.warpscout.core.tune.ProgressSink
 import dev.warpscout.core.tune.TuningResult
 import dev.warpscout.core.tunnel.AppExit
 import dev.warpscout.core.tunnel.ExitRouter
+import dev.warpscout.core.tunnel.SecondDefaults
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
@@ -1311,8 +1312,14 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                     rebuildAppsList()
                     updateAppsState()
                 }
-                runCatching { applyDefaultApps() }.onFailure { t ->
+                val shown = runCatching { applyDefaultApps() }.onFailure { t ->
                     TunnelDebug.error("приложения по умолчанию: " + SafeMode.describe(t))
+                }.getOrNull()
+                // Бета (с 1.10.44-beta4): TikTok, ChatGPT, Claude, Gemini, Grok — второй выход по умолчанию.
+                if (BuildConfig.BETA) {
+                    runCatching { applySecondDefaults(shown) }.onFailure { t ->
+                        TunnelDebug.error("второй выход по умолчанию: " + SafeMode.describe(t))
+                    }
                 }
             }
         }.apply { isDaemon = true; name = "warpscout-apps" }.start()
@@ -1331,22 +1338,23 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
      * DefaultApps). Первый раз включаем «только выбранные», если человек сам ничего не выбирал;
      * дальше отмечаем новые приложения из набора: поставили Telegram X — он тоже в туннеле. Галочку,
      * снятую вручную, не возвращаем. Работающий туннель не переподключаем: список приложений
-     * применится при следующем подключении.
+     * применится при следующем подключении. Возвращает текст показанной плашки (null — не показывали):
+     * «второй выход по умолчанию» в бете дописывает свою строку к ней, а не затирает.
      */
-    private fun applyDefaultApps() {
-        if (!uiReady() || appEntries.isEmpty()) return
+    private fun applyDefaultApps(): String? {
+        if (!uiReady() || appEntries.isEmpty()) return null
         val found = DefaultApps.find(appEntries.map { Triple(it.pkg, it.label, it.system) }, packageName)
         val first = !prefs.appsDefaultsDone
         if (first) prefs.appsDefaultsDone = true
-        if (found.isEmpty()) return
+        if (found.isEmpty()) return null
         var modeChanged = false
         if (first && prefs.appsMode == Prefs.APPS_ALL && prefs.appsSelected.isEmpty()) {
             prefs.appsMode = Prefs.APPS_ONLY
             modeChanged = true
         }
-        if (prefs.appsMode != Prefs.APPS_ONLY) return
+        if (prefs.appsMode != Prefs.APPS_ONLY) return null
         val add = found.keys - prefs.appsSelected - prefs.appsUnticked
-        if (add.isEmpty() && !modeChanged) return
+        if (add.isEmpty() && !modeChanged) return null
         prefs.appsSelected = prefs.appsSelected + add
         runCatching { ServiceSettingsStore.syncFromPrefs(this) }
         val names = add.map { labelOfPackage(it) }.sortedBy { it.lowercase() }
@@ -1362,20 +1370,86 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         }
         suppressSettingsReconnect = false
         updateSimple()
-        if (names.isNotEmpty()) {
-            banner(
-                getString(
-                    if (tunnel.supported && tunnel.isUp) R.string.apps_defaults_added_up else R.string.apps_defaults_added,
-                    names.joinToString(", ")
-                )
-            )
+        if (names.isEmpty()) return null
+        val text = getString(
+            if (tunnel.supported && tunnel.isUp) R.string.apps_defaults_added_up else R.string.apps_defaults_added,
+            names.joinToString(", ")
+        )
+        banner(text)
+        return text
+    }
+
+    /** Плашка «второй выход по умолчанию» и когда её показали — см. [markSettingsDirty]. */
+    private var secondDefaultsBanner: String? = null
+    private var secondDefaultsBannerAt = 0L
+
+    /**
+     * Бета (с 1.10.44-beta4): у TikTok, ChatGPT, Claude, Gemini и Grok выход по умолчанию — «Второй
+     * выход», приложение целиком через свой сервер (человек попросил 24.11; правила — SecondDefaults).
+     * Только когда выход приложений есть: второй выход включён, его конфиг читается, Android 10+ — без
+     * второго выхода правило не действует, а отмеченные приложения шли бы через WARP с тем же
+     * российским адресом. Каждое приложение — один раз: выбрал человек потом «Само» — так и останется.
+     * Работающий туннель не переподключаем, как и с набором по умолчанию: правила и отметки — со
+     * следующего подключения. [shown] — плашка, которую только что показал набор по умолчанию: её не
+     * затираем, а дописываем.
+     */
+    private fun applySecondDefaults(shown: String?) {
+        if (!BuildConfig.BETA || !uiReady() || appEntries.isEmpty()) return
+        if (!runCatching { appExitsAvailable() }.getOrDefault(false)) return
+        val seenBefore = prefs.secondDefaultsSeen
+        val plan = SecondDefaults.plan(
+            installed = appEntries.map { it.pkg },
+            exits = prefs.appExits,
+            appsMode = prefs.appsMode,
+            selected = prefs.appsSelected,
+            unticked = prefs.appsUnticked,
+            seen = seenBefore,
+        )
+        if (plan.seen != seenBefore) prefs.secondDefaultsSeen = plan.seen
+        val kept = plan.kept.map { pkg ->
+            labelOfPackage(pkg) + " — " + when (plan.exits[pkg]) {
+                AppExit.SECOND -> "уже второй выход"
+                AppExit.WARP -> "всегда WARP"
+                else -> if (prefs.appsMode == Prefs.APPS_EXCEPT) "исключено из туннеля" else "снято с туннеля руками"
+            }
+        }.sortedBy { it.lowercase() }
+        if (!plan.changed) {
+            if (kept.isNotEmpty()) TunnelDebug.stage("второй выход по умолчанию (бета): выбор человека не тронут — ${kept.joinToString(", ")}")
+            return
         }
+        prefs.appExits = plan.exits
+        if (plan.selected != prefs.appsSelected) prefs.appsSelected = plan.selected
+        runCatching { ServiceSettingsStore.syncFromPrefs(this) }
+        val names = plan.added.map { labelOfPackage(it) }.sortedBy { it.lowercase() }
+        val ticked = plan.ticked.map { labelOfPackage(it) }.sortedBy { it.lowercase() }
+        TunnelDebug.stage(
+            "второй выход по умолчанию (бета): ${names.joinToString(", ")} — целиком через второй выход" +
+                (if (ticked.isNotEmpty()) "; отмечены в «только выбранные»: ${ticked.joinToString(", ")}" else "") +
+                (if (kept.isNotEmpty()) "; выбор человека не тронут: ${kept.joinToString(", ")}" else "")
+        )
+        suppressSettingsReconnect = true
+        runCatching {
+            rebuildAppsList()
+            updateAppsState()
+        }
+        suppressSettingsReconnect = false
+        updateSimple()
+        val text = getString(
+            if (tunnel.supported && tunnel.isUp) R.string.second_defaults_added_up else R.string.second_defaults_added,
+            names.joinToString(", ")
+        )
+        secondDefaultsBanner = text
+        secondDefaultsBannerAt = System.currentTimeMillis()
+        banner(if (shown.isNullOrEmpty()) text else "$shown\n$text")
     }
 
     /** Галочку поставили или сняли руками: снятую с приложения из набора больше не возвращаем. */
     private fun noteAppTick(pkg: String, checked: Boolean) {
         val app = appEntries.firstOrNull { it.pkg == pkg }
-        if (DefaultApps.familyOf(pkg, app?.label.orEmpty(), app?.system ?: false) == null) return
+        // В бете (с 1.10.44-beta4) — и у приложений «второй выход по умолчанию» (SecondDefaults): галочку,
+        // снятую до того, как правило поставилось, правило не вернёт.
+        val secondDefault = BuildConfig.BETA && SecondDefaults.wants(pkg)
+        if (!secondDefault && DefaultApps.familyOf(pkg, app?.label.orEmpty(), app?.system ?: false) == null) return
         prefs.appsUnticked = if (checked) prefs.appsUnticked - pkg else prefs.appsUnticked + pkg
     }
 
@@ -3053,6 +3127,9 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             if (appExitsAvailable() != appExitsShown) {
                 rebuildAppsList()
                 updateAppsState()
+                // Бета (с 1.10.44-beta4): выход приложений появился — сразу «второй выход по умолчанию»,
+                // чтобы первое же подключение со вторым выходом шло уже с ним.
+                if (BuildConfig.BETA && appExitsShown) applySecondDefaults(null)
             }
         }.onFailure { t -> TunnelDebug.error("выход приложений: список не обновился — " + SafeMode.describe(t)) }
         runCatching {
@@ -3943,7 +4020,10 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     private fun markSettingsDirty(why: String) {
         if (suppressSettingsReconnect) return
         TunnelDebug.stage("изменено: $why (не применено)")
-        banner(getString(R.string.banner_unsaved))
+        // Включили второй выход — бета тут же ставит «второй выход по умолчанию» (applySecondDefaults) и
+        // говорит об этом плашкой: «есть несохранённые изменения» её не затирает, а дописывается.
+        val recent = secondDefaultsBanner?.takeIf { System.currentTimeMillis() - secondDefaultsBannerAt < 2_000L }
+        banner(if (recent != null) recent + "\n" + getString(R.string.banner_unsaved) else getString(R.string.banner_unsaved))
     }
 
     private var dirtyLater: Runnable? = null
@@ -5955,7 +6035,14 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         prefs.tunnelSites = now.sites
         if (now.block != start.block) prefs.allowBlockIds = now.block
         prefs.routesMode = now.routes
-        if (now.exits != start.exits) prefs.appExits = now.exits
+        // Выход приложений — тоже только изменённое (с 1.10.44-beta4): пока шторка была открыта, бета
+        // могла поставить «Второй выход» по умолчанию (SecondDefaults) — его не теряем.
+        if (now.exits != start.exits) {
+            val merged = prefs.appExits.toMutableMap()
+            (start.exits.keys - now.exits.keys).forEach { merged.remove(it) }
+            now.exits.forEach { (pkg, rule) -> if (start.exits[pkg] != rule) merged[pkg] = rule }
+            prefs.appExits = merged
+        }
         TunnelDebug.stage(
             "туннелирование (упрощённый экран): " + when (now.appsMode) {
                 Prefs.APPS_ONLY -> "только выбранные приложения (${now.apps.size})"
