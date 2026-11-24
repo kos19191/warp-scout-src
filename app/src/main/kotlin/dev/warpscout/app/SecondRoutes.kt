@@ -153,32 +153,67 @@ object SecondRoutes {
      * но на тот его адрес, что лежит в таблице второго выхода, и с именем сайта в TLS. В 1.10.31
      * адрес выбирала система: не совпал с собранными — запрос шёл через WARP, и экран писал «свой
      * сервер отвечает из России». Строка для [Prefs.secondCheck] — см. ExitCheck.Result.
-     * С сетью и до 7 с — не из UI-потока.
+     * С сетью и до 17 с (до трёх адресов) — не из UI-потока.
      */
     fun checkExit(context: Context, prefs: Prefs): String {
         val now = System.currentTimeMillis()
         val router = ExitRouter.of(ExitRouter.parse(prefs.secondCidrs))
         if (router.isEmpty) return ExitCheck.Result(ExitCheck.FAIL, "адресов второго выхода нет", now).encode()
         // Адрес chatgpt.com — сначала как его видит телефон, потом через DoH (так собирались адреса).
-        val system = runCatching {
-            java.net.InetAddress.getAllByName(CHECK_HOST).mapNotNull { it.hostAddress }
-        }.getOrDefault(emptyList())
-        val ip = ExitCheck.pickRouted(system, router)
-            ?: ExitCheck.pickRouted(runCatching { AllowListPlanner.dohResolve(CHECK_HOST) }.getOrDefault(emptyList()), router)
-            ?: return ExitCheck.Result(ExitCheck.FAIL, "адрес $CHECK_HOST не попал во второй выход — обновите адреса", now).encode()
+        // С 1.10.44-beta3 — до трёх адресов по очереди: первый может не ответить (журнал 24.11, 14:50).
+        val ips = ExitCheck.routedAll(systemAddresses(CHECK_HOST), router)
+            .ifEmpty { ExitCheck.routedAll(runCatching { AllowListPlanner.dohResolve(CHECK_HOST) }.getOrDefault(emptyList()), router) }
+        if (ips.isEmpty()) return ExitCheck.Result(ExitCheck.FAIL, NOT_IN_TABLE, now).encode()
         // Адрес в таблице есть, но не в маршрутах туннеля (раздельный режим, адреса собраны после
         // подключения): запрос ушёл бы мимо туннеля. Так и говорим — нужно переподключение.
-        if (vpnCovers(context, ip) == false) return ExitCheck.Result(ExitCheck.NOT_ROUTED, ip, now).encode()
-        val t0 = android.os.SystemClock.elapsedRealtime()
-        val body = runCatching {
-            ExitCheck.fetchTrace(
-                ip, CHECK_HOST, 7000, "WarpScout/${BuildConfig.VERSION_NAME}",
-                verify = { host, session -> javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier().verify(host, session) }
-            )
+        if (vpnCovers(context, ips.first()) == false) return ExitCheck.Result(ExitCheck.NOT_ROUTED, ips.first(), now).encode()
+        var last: String? = null
+        for ((i, ip) in ips.withIndex()) {
+            if (i > 0 && vpnCovers(context, ip) == false) continue
+            val t0 = android.os.SystemClock.elapsedRealtime()
+            val body = runCatching {
+                ExitCheck.fetchTrace(
+                    ip, CHECK_HOST, if (i == 0) 7000 else 5000, "WarpScout/${BuildConfig.VERSION_NAME}",
+                    verify = { host, session -> javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier().verify(host, session) }
+                )
+            }
+            val ms = (android.os.SystemClock.elapsedRealtime() - t0).toInt()
+            val error = body.exceptionOrNull()?.let { (it.message ?: it.javaClass.simpleName).take(90) }
+            last = ExitCheck.verdict(CfTrace.parse(body.getOrNull()), error, now, ms).encode()
+            // Ответ пришёл (страна, «через WARP», Россия) — это итог. Нет ответа — следующий адрес.
+            if (body.isSuccess) return last
         }
-        val ms = (android.os.SystemClock.elapsedRealtime() - t0).toInt()
-        val error = body.exceptionOrNull()?.let { (it.message ?: it.javaClass.simpleName).take(90) }
-        return ExitCheck.verdict(CfTrace.parse(body.getOrNull()), error, now, ms).encode()
+        return last ?: ExitCheck.Result(ExitCheck.FAIL, NOT_IN_TABLE, now).encode()
+    }
+
+    /** Итог проверки, когда ни одного адреса [CHECK_HOST] в таблице второго выхода нет. */
+    const val NOT_IN_TABLE = "адрес $CHECK_HOST не попал во второй выход — обновите адреса"
+
+    /** Проверка не нашла [CHECK_HOST] в таблице ([NOT_IN_TABLE]). */
+    fun notInTable(encoded: String): Boolean =
+        ExitCheck.decode(encoded)?.let { it.code == ExitCheck.FAIL && it.detail == NOT_IN_TABLE } == true
+
+    private fun systemAddresses(host: String): List<String> = runCatching {
+        java.net.InetAddress.getAllByName(host).mapNotNull { it.hostAddress }
+    }.getOrDefault(emptyList())
+
+    /**
+     * Нынешние адреса [CHECK_HOST], которых нет в таблице второго выхода, — в таблицу (с 1.10.44-beta3).
+     * Cloudflare отдаёт сайту разные адреса, и собранные раз в сутки к вечеру с тем, что видит телефон,
+     * могут не совпасть: журнал 24.11 — с 10:31 до 11:35 проверка 21 раз писала «не попал во второй
+     * выход», пока адреса не обновили кнопкой, и всё это время chatgpt.com шёл через WARP. Сервис меняет
+     * таблицу на лету (см. TunnelController.reloadSecondRoutes). Возвращает, сколько адресов добавлено.
+     */
+    fun addCheckHost(prefs: Prefs): Int {
+        val router = ExitRouter.of(ExitRouter.parse(prefs.secondCidrs))
+        val found = systemAddresses(CHECK_HOST) + runCatching { AllowListPlanner.dohResolve(CHECK_HOST) }.getOrDefault(emptyList())
+        val add = found.map { it.trim() }.distinct()
+            .filter { ExitCheck.isIpLiteral(it) && ExitRouter.ipBytes(it)?.let { b -> router.route(b) != 1 } == true }
+            .map { if (':' in it) "$it/128" else "$it/32" }
+        if (add.isEmpty()) return 0
+        val old = prefs.secondCidrs.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        prefs.secondCidrs = (old + add).distinct().take(MAX_CIDRS).joinToString(", ")
+        return add.size
     }
 
     /**

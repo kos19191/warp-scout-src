@@ -96,6 +96,19 @@ object ExitCheck {
         return routed.firstOrNull { ':' !in it } ?: routed.firstOrNull()
     }
 
+    /**
+     * Все адреса сайта, что идут во второй выход по таблице [router] (с 1.10.44-beta3): IPv4 — первыми,
+     * без повторов, не больше [limit]. Проверка пробует их по очереди: журнал 24.11, 14:50 — первый
+     * подходящий адрес chatgpt.com (8.6.112.0) через второй выход не ответил, и проверка написала «нет
+     * ответа», хотя через минуту по другому адресу всё работало.
+     */
+    fun routedAll(addresses: List<String>, router: ExitRouter, limit: Int = 3): List<String> {
+        val routed = addresses.map { it.trim() }.filter { a ->
+            isIpLiteral(a) && ExitRouter.ipBytes(a)?.let { router.route(it) == 1 } == true
+        }.distinct()
+        return (routed.filter { ':' !in it } + routed.filter { ':' in it }).take(limit)
+    }
+
     private val V4 = Regex("^\\d{1,3}(\\.\\d{1,3}){3}$")
 
     /** Запись адреса IPv4 или IPv6 (а не имя сайта): такую можно разбирать, не спрашивая DNS. */

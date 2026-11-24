@@ -2519,6 +2519,34 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             d.isStalled(t0 + 50_000, 0L, t0, StallDetector.MIN_PACKETS)
         )
 
+        // 1.10.44-beta3: свежая сессия второго выхода без единого ответа — 15 с вместо 45
+        // (журнал 24.11, 14:47: NL-FREE#125 принял рукопожатие и молчал на 392 пакета).
+        check(
+            "свежая сессия: 20 пакетов и 15 с без ответа — сервер данных не пропускает",
+            d.isFreshDead(t0 + StallDetector.FRESH_WINDOW_MS, t0, t0, StallDetector.FRESH_MIN_PACKETS)
+        )
+        check(
+            "свежая сессия: 19 пакетов — ещё рано",
+            !d.isFreshDead(t0 + 60_000, t0, t0, StallDetector.FRESH_MIN_PACKETS - 1)
+        )
+        check(
+            "свежая сессия: за секунду до окна — ещё нет",
+            !d.isFreshDead(t0 + StallDetector.FRESH_WINDOW_MS - 1_000, t0, t0, 300)
+        )
+        check(
+            "свежая сессия: ответ был 5 с назад — жива",
+            !d.isFreshDead(t0 + 20_000, t0 + 15_000, t0, 300)
+        )
+        check(
+            "свежая сессия: правило быстрее общего, но не мягче подозрения",
+            StallDetector.FRESH_WINDOW_MS < StallDetector.WINDOW_MS &&
+                StallDetector.FRESH_WINDOW_MS >= StallDetector.SUSPECT_MS &&
+                StallDetector.FRESH_MIN_PACKETS > StallDetector.SUSPECT_PACKETS
+        )
+        val fresh = d.explainFresh(t0 + 15_000, t0, t0, 392)
+        check("свежая сессия: объяснение — пакеты, секунды и что сервер не пропускает данные",
+            fresh.contains("392") && fresh.contains("15 с") && fresh.contains("данных не пропускает"), fresh)
+
         // Объяснение должно быть понятным человеку и содержать секунды и число пакетов.
         val why = d.explain(t0 + 60_000, t0, t0, 120)
         check("живость: объяснение называет число пакетов", why.contains("120"), why)
@@ -3793,6 +3821,14 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             ExitCheck.pickRouted(listOf("2606:4700:4400::ac40:9bd1", "172.64.155.209"), router), "2606:4700:4400::ac40:9bd1")
         check("выход: ни один адрес не в таблице — null",
             ExitCheck.pickRouted(listOf("172.64.155.209", "мусор", ""), router) == null)
+        // 1.10.44-beta3: проверка пробует несколько адресов по очереди (журнал 24.11, 14:50 — первый не ответил).
+        expect("выход: все адреса из таблицы, IPv4 первыми, без повторов",
+            ExitCheck.routedAll(listOf("2606:4700:4400::ac40:9bd1", "104.18.32.47", "172.64.155.209", "104.18.32.7", "104.18.32.47"), router),
+            listOf("104.18.32.47", "104.18.32.7", "2606:4700:4400::ac40:9bd1"))
+        expect("выход: не больше трёх адресов",
+            ExitCheck.routedAll((1..9).map { "104.18.32.$it" }, router).size, 3)
+        check("выход: ни одного адреса в таблице — пусто",
+            ExitCheck.routedAll(listOf("172.64.155.209", "мусор", ""), router).isEmpty())
 
         val nl = CfTrace.parse("fl=1\nh=chatgpt.com\nip=185.107.56.3\nloc=NL\ncolo=AMS\nwarp=off\n")
         val warp = CfTrace.parse("fl=1\nip=2a09:bac1::1\nloc=RU\ncolo=HEL\nwarp=on\n")

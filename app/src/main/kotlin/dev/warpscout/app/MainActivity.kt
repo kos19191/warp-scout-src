@@ -2936,8 +2936,23 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         binding.textSecondState.text = getString(R.string.second_checking)
         secondProgress(getString(R.string.second_step_check))
         Thread {
-            val res = runCatching { SecondRoutes.checkExit(this, prefs) }.getOrElse { t ->
-                ExitCheck.Result(ExitCheck.FAIL, t.message ?: t.javaClass.simpleName, System.currentTimeMillis()).encode()
+            val check = {
+                runCatching { SecondRoutes.checkExit(this, prefs) }.getOrElse { t ->
+                    ExitCheck.Result(ExitCheck.FAIL, t.message ?: t.javaClass.simpleName, System.currentTimeMillis()).encode()
+                }
+            }
+            var res = check()
+            // Адресов chatgpt.com в таблице нет (с 1.10.44-beta3): нынешние — в таблицу, сервис меняет её на
+            // лету, и проверка — ещё раз. Раньше строка «не попал во второй выход» повторялась при каждом
+            // подключении, пока адреса не обновят кнопкой, а chatgpt.com всё это время шёл через WARP.
+            if (SecondRoutes.notInTable(res)) {
+                val added = runCatching { SecondRoutes.addCheckHost(prefs) }.getOrDefault(0)
+                if (added > 0) {
+                    TunnelDebug.stage("второй выход: адресов ${SecondRoutes.CHECK_HOST} в таблице не было — добавил $added, проверяю ещё раз")
+                    runCatching { tunnel.reloadSecondRoutes() }
+                    runCatching { Thread.sleep(1_500L) }
+                    res = check()
+                }
             }
             runOnUiThread {
                 secondCheckRunning = false

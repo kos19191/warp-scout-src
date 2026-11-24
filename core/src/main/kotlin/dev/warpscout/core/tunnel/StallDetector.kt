@@ -61,6 +61,29 @@ object StallDetector {
     fun isSuspect(now: Long, lastRxAt: Long, burstStartAt: Long, sentPackets: Int): Boolean =
         isStalled(now, lastRxAt, burstStartAt, sentPackets, SUSPECT_MS, SUSPECT_PACKETS)
 
+    /**
+     * Свежая сессия, по которой ещё не пришло ни байта данных (с 1.10.44-beta3; включает вызывающий —
+     * для второго выхода). Журнал 24.11, 14:47: бесплатный сервер Proton (NL-FREE#125) принял рукопожатие,
+     * а на 392 пакета не ответил ничем, и 45 с — пока не сработало общее правило — TikTok стоял без
+     * интернета, а сравнение Telegram решило, что второй выход «не быстрее». Живой сервер на первые же
+     * соединения (TCP SYN) отвечает за доли секунды, поэтому, пока данных не было вовсе, ждём меньше.
+     */
+    const val FRESH_WINDOW_MS = 15_000L
+
+    /** Сколько пакетов должно уйти по свежей сессии без единого ответа. */
+    const val FRESH_MIN_PACKETS = 20
+
+    /** Свежая сессия не пропускает данные: [FRESH_MIN_PACKETS] пакетов и [FRESH_WINDOW_MS] без ответа. */
+    fun isFreshDead(now: Long, lastRxAt: Long, burstStartAt: Long, sentPackets: Int): Boolean =
+        isStalled(now, lastRxAt, burstStartAt, sentPackets, FRESH_WINDOW_MS, FRESH_MIN_PACKETS)
+
+    /** Строка в журнал для [isFreshDead]. */
+    fun explainFresh(now: Long, lastRxAt: Long, burstStartAt: Long, sentPackets: Int): String {
+        val anchor = maxOf(lastRxAt, burstStartAt)
+        val silent = if (anchor <= 0L) 0L else (now - anchor) / 1000
+        return "сервер принял рукопожатие, но данных не пропускает: $sentPackets пакетов отправлено, ответа нет $silent с"
+    }
+
     /** Человеческое объяснение для журнала: по нему видно, что именно решило дело. */
     fun explain(now: Long, lastRxAt: Long, burstStartAt: Long, sentPackets: Int): String {
         val anchor = maxOf(lastRxAt, burstStartAt)

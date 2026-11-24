@@ -132,6 +132,12 @@ class DataPlane(
      * пока не придёт пакет, и просыпается сразу, когда он пришёл.
      */
     private val tunReady: ((Long) -> Boolean)? = null,
+    /**
+     * Свежую сессию без данных признавать мёртвой быстрее (с 1.10.44-beta3, см.
+     * [StallDetector.isFreshDead]): сервис включает это для второго выхода — там следующий сервер
+     * ждёт в списке, а TikTok без второго выхода стоит без интернета.
+     */
+    private val freshStall: Boolean = false,
     private val log: (String) -> Unit = {},
     /**
      * Зовётся, когда сокет перестал отправлять пакеты (ENETUNREACH/EPERM после смены сети или
@@ -157,6 +163,11 @@ class DataPlane(
     /** Почему handshake не состоялся (null — причина не задокументирована, например пользователь остановил). */
     @Volatile
     var failureReason: String? = null
+        private set
+
+    /** Сессию остановило правило «свежая, а данных нет» ([freshStall]): сервер их не пропускает. */
+    @Volatile
+    var freshDead: Boolean = false
         private set
 
     /** Сколько раз сессия успешно пересогласовывалась после старта. */
@@ -976,6 +987,15 @@ class DataPlane(
             val anchor = maxOf(lastRxAt, burstStartAt)
             val quiet = if (anchor > 0L) (now - anchor) / 1000 else 0L
             runCatching { onSuspect?.invoke("ушло $sent пакетов, ответа нет $quiet с") }
+        }
+        // По сессии ещё не пришло ни байта данных — ждём меньше (с 1.10.44-beta3, только где включено).
+        if (freshStall && bytesDown == 0L && StallDetector.isFreshDead(now, lastRxAt, burstStartAt, sent)) {
+            stallReported = true
+            freshDead = true
+            val reason = StallDetector.explainFresh(now, lastRxAt, burstStartAt, sent)
+            log(reason)
+            onFatal?.invoke(reason)
+            return
         }
         if (!StallDetector.isStalled(now, lastRxAt, burstStartAt, sent)) return
         stallReported = true

@@ -1482,6 +1482,9 @@ class WarpVpnService : VpnService() {
                     // Сессия умерла (rekey не проходит, ответов нет) — останавливаем её: перебор
                     // возьмёт этот же сервер ещё раз или следующий. Раньше она числилась «поднятой»
                     // до переподключения всего туннеля, а сайты второго выхода не открывались.
+                    // Сервер принял рукопожатие, а данных не пропускает — следующий через 15 с, а не 45
+                    // (с 1.10.44-beta3; журнал 24.11, 14:47: NL-FREE#125 молчал на 392 пакета).
+                    freshStall = true,
                     onFatal = { reason ->
                         TunnelDebug.stage("второй выход ($label): $reason")
                         runCatching { self?.stop() }
@@ -1584,6 +1587,7 @@ class WarpVpnService : VpnService() {
                     attempt++
                     var lived = 0L
                     var wasUp = false
+                    var noData = false
                     if (plan != null && base != null) {
                         val dp = buildSecond(plan, candCfg, label, base)
                         val owns = synchronized(life) {
@@ -1603,6 +1607,7 @@ class WarpVpnService : VpnService() {
                         runCatching { dp.run() }
                         lived = System.currentTimeMillis() - startedAt
                         wasUp = dp.handshakeOk
+                        noData = dp.freshDead
                         totalUp += dp.bytesUp
                         totalDown += dp.bytesDown
                     }
@@ -1620,11 +1625,14 @@ class WarpVpnService : VpnService() {
                     val next = secondList[index % secondList.size]
                     val nextLabel = next.first.ifBlank { next.second.endpoint.render() }
                     TunnelDebug.stage(
-                        if (wasUp) "второй выход: сессия на $label закончилась — подключаю $nextLabel"
-                        else "второй выход: $label не ответил — пробую $nextLabel"
+                        when {
+                            noData -> "второй выход: $label не пропускает данные — подключаю $nextLabel"
+                            wasUp -> "второй выход: сессия на $label закончилась — подключаю $nextLabel"
+                            else -> "второй выход: $label не ответил — пробую $nextLabel"
+                        }
                     )
                     try {
-                        Thread.sleep(if (wasUp) 2_000L else 500L)
+                        Thread.sleep(if (wasUp && !noData) 2_000L else 500L)
                     } catch (e: InterruptedException) {
                         break
                     }
@@ -2576,6 +2584,10 @@ class WarpVpnService : VpnService() {
     /** Медиа проверяем не чаще раза в 30 минут (256 КБ на проверку) — или сразу, если сменилась площадка. */
     private val TG_MEDIA_GAP_MS = 30 * 60_000L
 
+    /** Повтор сравнения Telegram, когда второй выход не загрузил вовсе: через 3 мин, потом через 6 (с 1.10.44-beta3). */
+    private val TG_RECHECK_MS = 3 * 60_000L
+    private val TG_RECHECK_MAX = 2
+
     /**
      * Замер другим путём идёт сейчас: адреса замера — через второй выход ([probeViaSecond]) или мимо
      * него, через WARP. Остальной Telegram остаётся, где был: живые соединения при замере не
@@ -2870,6 +2882,14 @@ class WarpVpnService : VpnService() {
         val city = ExitSite.cityAcc(site)
         val numbers = "через $city ${TelegramChoice.short(moscow.verdict, moscow.kbps)}, " +
             "через $label ${TelegramChoice.short(second.verdict, second.kbps)}"
+        // Через второй выход не загрузилось вовсе — это не «не быстрее», а «сервер сейчас не пропускает
+        // данные» (с 1.10.44-beta3). Журнал 24.11, 14:47: сравнение пришлось на умиравший NL-FREE#125, вывод
+        // «оставляю через Москву» держался бы полчаса, хотя через минуту второй выход (Румыния) давал 3,4 Мбит/с.
+        if (second.verdict == TelegramMedia.FAIL) {
+            scheduleTelegramRecheck("Telegram: $numbers — второй выход сейчас не пропускает данные")
+            return
+        }
+        tgRecheckCount = 0
         if (!TelegramChoice.secondHelps(moscow.verdict, moscow.kbps, second.verdict, second.kbps)) {
             TunnelDebug.stage("Telegram: $numbers — второй выход не быстрее, оставляю через $city")
             return
@@ -2884,6 +2904,37 @@ class WarpVpnService : VpnService() {
         }
         askTelegramSwitch(net, site, moscow, second, label)
         TunnelDebug.stage("Telegram: $numbers — спрашиваю, переключить ли (уведомление «Переключить» / «Оставить»)")
+    }
+
+    /** Сколько раз подряд сравнение Telegram откладывали из-за неработающего второго выхода (с 1.10.44-beta3). */
+    @Volatile
+    private var tgRecheckCount = 0
+
+    /**
+     * Сравнить Telegram со вторым выходом ещё раз — через 3 мин, потом через 6 (с 1.10.44-beta3): второй
+     * выход к тому времени обычно уже на другом сервере. Дальше — как обычно, раз в 30 мин. Повтор идёт
+     * через проверку связи: она сама решит, нужно ли ещё (экран, медленная связь, Telegram уже переключён).
+     */
+    private fun scheduleTelegramRecheck(line: String) {
+        if (tgRecheckCount >= TG_RECHECK_MAX) {
+            TunnelDebug.stage("$line; следующая проверка — как обычно, через 30 мин")
+            return
+        }
+        tgRecheckCount++
+        val delay = TG_RECHECK_MS * tgRecheckCount
+        TunnelDebug.stage("$line — сравню ещё раз через ${delay / 60_000} мин")
+        Thread {
+            try {
+                Thread.sleep(delay)
+            } catch (e: InterruptedException) {
+                return@Thread
+            }
+            if (!wanted || tgViaSecond) return@Thread
+            // Проверка медиа — при ближайшей проверке связи; сейчас — если туннель тот же и жив.
+            tgMediaCheckedAt = 0L
+            val now = epoch.get()
+            if (linkAlive(now)) startLinkCheck(now, "повторное сравнение Telegram", 0L, reconnectOnFail = false)
+        }.apply { isDaemon = true; name = "warpscout-tg-recheck" }.start()
     }
 
     /** «второй выход (Нидерланды)» — страна по имени сервера Proton; свой сервер — просто «второй выход». */

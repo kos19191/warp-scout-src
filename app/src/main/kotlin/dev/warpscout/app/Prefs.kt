@@ -811,14 +811,19 @@ class Prefs(private val context: Context) {
     /**
      * Маршруты — весь трафик выбранных приложений, потому что у кого-то из них выход «Второй выход»
      * (с 1.10.44-beta1, см. [featSecondWhole]): режим «только выбранные», маршруты неполные (сайты из
-     * списков, мои сайты или «браузер — только к нужным сайтам») и правило действует. В режимах «все
-     * приложения» и «все, кроме» так не делаем: там весь трафик — это весь телефон.
+     * списков, мои сайты, «браузер — только к нужным сайтам», с 1.10.44-beta3 — и «всё, кроме российских
+     * сетей») и правило действует. В режимах «все приложения» и «все, кроме» так не делаем: там весь
+     * трафик — это весь телефон.
+     *
+     * «Всё, кроме российских сетей» (журнал 24.11, 14:44–15:24): TikTok шёл через второй выход (Румыния),
+     * но соединения к серверам в российских сетях — кешам CDN у операторов, которые подсказывает DNS через
+     * московскую площадку WARP, — шли мимо туннеля, с российского адреса оператора.
      */
     fun secondWholeActive(): Boolean {
         if (!featSecondWhole || appsMode != APPS_ONLY) return false
         if (secondExitApps().isEmpty()) return false
         val browser = runCatching { browserSitesWanted() }.getOrDefault(false)
-        return routesMode == 2 || routesMode == 3 || browser
+        return routesMode == 1 || routesMode == 2 || routesMode == 3 || browser
     }
 
     /** Приложения «Второй выход» по названиям — для строки маршрутов и экрана. */
@@ -932,8 +937,9 @@ class Prefs(private val context: Context) {
      */
     fun routesNote(): String {
         if (runCatching { secondWholeActive() }.getOrDefault(false)) {
+            val rest = if (routesMode == 1) "российские сети" else "сайты не из списков"
             return "весь трафик выбранных приложений вместо «${routesModeName()}»: на «Второй выход» стоят " +
-                "${secondWholeTitles()} — они идут целиком; у остальных выбранных сайты не из списков идут через WARP, " +
+                "${secondWholeTitles()} — они идут целиком; у остальных выбранных $rest идут через WARP, " +
                 "а не мимо туннеля"
         }
         val parts = routeParts()
