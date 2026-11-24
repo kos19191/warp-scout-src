@@ -1449,15 +1449,6 @@
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
                             android:text="@string/btn_refresh_lists" />
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnBuildRoutes"
-                            style="@style/Widget.Material3.Button.TonalButton"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_marginStart="8dp"
-                            android:layout_weight="1"
-                            android:text="@string/btn_build_routes" />
                     </LinearLayout>
                     </LinearLayout>
 

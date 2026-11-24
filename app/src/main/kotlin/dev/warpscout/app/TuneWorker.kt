@@ -62,7 +62,8 @@ class TuneWorker(appContext: Context, params: WorkerParameters) : Worker(appCont
         }
         // 0) Маршруты по спискам: если выбран этот режим и кеш протух — обновляем ДО подбора,
         //    иначе проверки ресурсов будут гоняться по чужим/старым доменам и честно всё завалют.
-        if (prefs.routesMode == 2) {
+        //    С 1.10.43 — и при «Браузер — только к нужным сайтам»: там списки тоже задают маршруты.
+        if (prefs.routesMode == 2 || runCatching { prefs.browserSitesWanted() }.getOrDefault(false)) {
             val repo = AllowListsRepo(context)
             if (repo.isStale()) {
                 val ids = repo.wantedIds(prefs)

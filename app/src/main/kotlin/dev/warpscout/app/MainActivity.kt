@@ -447,7 +447,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         prefs.secondDomains = binding.editSecondDomains.text?.toString()?.trim().orEmpty()
         prefs.pinnedEndpoint = binding.editServer.text?.toString()?.trim().orEmpty()
         // Готовые маршруты (allowedIpsText, адреса своих сайтов) с экрана больше не читаются:
-        // их пишут только сборки — «Собрать маршруты», «Найти адреса сайтов», «Сохранить и применить».
+        // их пишут только сборки — «Обновить списки», «Найти адреса сайтов», «Сохранить и применить».
         prefs.tunnelSites = binding.editTunnelSites.text?.toString().orEmpty()
         prefs.secondViaWarp = binding.switchSecondViaWarp.isChecked
         if (secondChecks.isNotEmpty()) {
@@ -792,8 +792,9 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             val value = text?.toString().orEmpty()
             if (value == prefs.tunnelSites) return@doAfterTextChanged
             prefs.tunnelSites = value
-            // Вписали сайты — значит, через туннель должны идти они; стёрли всё — снова все сайты.
-            if (value.isNotBlank() && prefs.routesMode != 3) binding.spinnerRoutes.setSelection(3)
+            // Вписали сайты — значит, через туннель должны идти они; стёрли всё — снова все сайты. В
+            // режиме браузера свои сайты и так в деле — режим не трогаем (с 1.10.43, browserHoldsRoutes).
+            if (value.isNotBlank() && prefs.routesMode != 3 && !browserHoldsRoutes()) binding.spinnerRoutes.setSelection(3)
             else if (value.isBlank() && prefs.routesMode == 3) binding.spinnerRoutes.setSelection(0)
             updateSitesState()
             updateTunnelSummary()
@@ -951,7 +952,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                 binding.btnBuildSites.isEnabled = true
                 result.onSuccess { n ->
                     if (n > 0) {
-                        if (prefs.routesMode != 3) binding.spinnerRoutes.setSelection(3)
+                        if (prefs.routesMode != 3 && !browserHoldsRoutes()) binding.spinnerRoutes.setSelection(3)
                         toast(getString(R.string.sites_built, n))
                         markSettingsDirty(getString(R.string.dirty_sites))
                     } else {
@@ -982,6 +983,16 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
 
     /** Подпись отмеченных списков и правил сборки (см. Prefs.listsSignature). */
     private fun listsSignature(): String = prefs.listsSignature()
+
+    /**
+     * Сайты сейчас — это сайты браузера (с 1.10.43): «только выбранные», среди них браузер, включено
+     * «Браузер — только к нужным сайтам», а режим сайтов — «все» или «всё, кроме российских сетей».
+     * Тогда списки и «Мои сайты» задают, куда браузер идёт через туннель, и их правка не должна
+     * переключать режим. Раньше галочка списка (и «Собрать маршруты») ставила «Только сайты из
+     * списков», а правка своих сайтов — «Только мои сайты»: режим браузера выключался, и «Мои сайты»
+     * (или списки) молча выпадали из маршрутов.
+     */
+    private fun browserHoldsRoutes(): Boolean = runCatching { prefs.browserSitesWanted() }.getOrDefault(false)
 
     /** Маршруты по спискам (сеть: не из UI-потока): недостающие списки скачиваются сами. */
     private fun buildListsSync(): String {
@@ -1880,8 +1891,6 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         binding.btnPickServer.setOnClickListener { pickServerFromReport() }
 
         binding.btnRefreshLists.setOnClickListener { refreshLists() }
-
-        binding.btnBuildRoutes.setOnClickListener { buildRoutes() }
 
         binding.btnTunnelRefresh.setOnClickListener { updateTunnelDiagnostics() }
 
@@ -3429,10 +3438,11 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                 text = list.title
                 isChecked = list.id in want
                 setOnClickListener {
-                    // Отметили список — через туннель должны идти сайты из списков (с 1.10.31).
+                    // Отметили список — через туннель должны идти сайты из списков (с 1.10.31). В режиме
+                    // браузера списки и так в деле — режим не трогаем (с 1.10.43, browserHoldsRoutes).
                     prefs.allowBlockIds = listChecks.filter { it.value.isChecked && it.key in BLOCK_IDS }.map { it.key }.toSet()
                     prefs.allowDirectIds = listChecks.filter { it.value.isChecked && it.key in DIRECT_IDS }.map { it.key }.toSet()
-                    if (prefs.routesMode != 2) binding.spinnerRoutes.setSelection(2)
+                    if (prefs.routesMode != 2 && !browserHoldsRoutes()) binding.spinnerRoutes.setSelection(2)
                     refreshRoutesState()
                     updateTunnelSummary()
                     markSettingsDirty(getString(R.string.dirty_lists))
@@ -3449,9 +3459,11 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             append(getString(R.string.routes_state_off, prefs.routesModeName(), getString(R.string.lists_cached, cached.size)))
             val age = cached.values.map { it.fetchedAt }.maxOrNull() ?: 0L
             if (age > 0L) append(" · ").append(dev.warpscout.core.lists.AllowLists.freshnessOf(age))
-            if (prefs.routesMode == 2 && prefs.allowedIpsText.isBlank()) {
+            // Сайты из списков в деле и в режиме браузера (с 1.10.43).
+            val listsInUse = prefs.routesMode == 2 || browserHoldsRoutes()
+            if (listsInUse && prefs.allowedIpsText.isBlank()) {
                 append("\n").append(getString(R.string.routes_none_yet))
-            } else if (prefs.routesMode == 2 && prefs.listsBuiltSig != listsSignature()) {
+            } else if (listsInUse && prefs.listsBuiltSig != listsSignature()) {
                 append("\n").append(getString(R.string.routes_lists_changed))
             }
             if (cached.isEmpty()) append("\n").append(getString(R.string.routes_download_hint))
@@ -3459,54 +3471,83 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         binding.textRoutesState.text = state
     }
 
+    /** Идёт «Обновить списки» — второй раз не запускаем. */
+    @Volatile
+    private var listsRefreshing = false
+
+    /**
+     * «Обновить списки» (с 1.10.43 — одна кнопка вместо «Скачать списки» и «Собрать маршруты»):
+     * скачать свежие списки и сразу пересобрать по ним адреса — маршруты по спискам (если сайты из
+     * списков в деле: «Только сайты из списков» или браузер — только к нужным сайтам) и сети
+     * выбранных приложений. Туннель не трогаем: новые адреса поднимутся со следующим подключением,
+     * сразу — по «Сохранить и применить» (оно увидит, что всё собрано, и только применит).
+     *
+     * Раньше скачанные списки не шли в дело, пока не нажмёшь ещё и «Собрать маршруты»: «Сохранить и
+     * применить» пересобирает только несобранное или собранное под другие отметки. А «Собрать
+     * маршруты» вдобавок ставило режим «Только сайты из списков» и этим выключало режим браузера.
+     */
     private fun refreshLists() {
-        val ids = (listChecks.filter { it.value.isChecked }.keys + DIRECT_IDS).toList()
-        if (ids.isEmpty()) {
-            toast(getString(R.string.routes_need_lists))
+        if (listsRefreshing || preparingRoutes || browserPrepRunning) {
+            toast(getString(R.string.lists_busy))
             return
         }
+        runCatching { persistUi() }
+        val block = prefs.allowBlockIds.ifEmpty { dev.warpscout.core.lists.AllowLists.DEFAULT_BLOCK_IDS.toSet() }
+        val ids = (block + prefs.allowDirectIds + DIRECT_IDS + prefs.appNetsLists()).distinct()
+        listsRefreshing = true
         binding.btnRefreshLists.isEnabled = false
         binding.textRoutesState.setText(R.string.state_working)
         Thread {
             val res = lists.refresh(ids) { line -> runOnUiThread { sink().log(line) } }
-            runOnUiThread {
-                binding.btnRefreshLists.isEnabled = true
-                res.onSuccess { n ->
-                    toast(getString(R.string.lists_refreshed, n, ids.size))
-                    updateServerNote()
-                }.onFailure { toast(getString(R.string.lists_failed, it.message ?: it.javaClass.simpleName)) }
-                refreshRoutesState()
-            }
-        }.apply { isDaemon = true }.start()
-    }
-
-    private fun buildRoutes() {
-        persistUi()
-        if (lists.cached().isEmpty()) {
-            toast(getString(R.string.routes_need_lists))
-            return
-        }
-        binding.btnBuildRoutes.isEnabled = false
-        binding.textRoutesState.text = getString(R.string.routes_expanding)
-        Thread {
-            val result = runCatching { lists.buildPlan(prefs) { line -> runOnUiThread { sink().log(line) } } }
-            runOnUiThread {
-                binding.btnBuildRoutes.isEnabled = true
-                result.onSuccess { r ->
-                    val summary = lists.savePlan(prefs, r.plan)
-                    prefs.listsBuiltSig = listsSignature()
-                    binding.spinnerRoutes.setSelection(2)
-                    toast(getString(R.string.routes_built, summary))
-                    if (r.missing().isNotEmpty()) {
-                        sink().log("не скачано: ${r.missing().joinToString(", ") { it.id }} — нажми «Скачать списки»")
-                    }
-                }.onFailure {
-                    toast(it.message ?: it.javaClass.simpleName)
+            val useLists = prefs.routesMode == 2 || browserHoldsRoutes()
+            val useApps = prefs.appNetsLists().isNotEmpty()
+            var summary = ""
+            val errors = ArrayList<String>()
+            if (res.isSuccess && (useLists || useApps)) {
+                runOnUiThread { if (uiReady()) binding.textRoutesState.setText(R.string.routes_expanding) }
+                if (useLists) {
+                    runCatching { buildListsSync() }
+                        .onSuccess { summary = it }
+                        .onFailure { errors += (it.message ?: it.javaClass.simpleName) }
                 }
-                refreshRoutesState()
-                updateTunnelSummary()
+                if (useApps) {
+                    runCatching { buildAppNetsSync() }
+                        .onSuccess { ok -> if (!ok) errors += getString(R.string.app_nets_failed) }
+                        .onFailure { errors += (it.message ?: it.javaClass.simpleName) }
+                }
+                // Сети приложений сервис берёт из снимка настроек — переписываем его сразу.
+                runCatching { dev.warpscout.app.status.ServiceSettingsStore.syncFromPrefs(this) }
+                TunnelDebug.stage(
+                    "обновить списки: " + (if (summary.isNotEmpty()) "маршруты — $summary" else "маршруты по спискам не в деле") +
+                        (if (errors.isNotEmpty()) "; не собралось: " + errors.joinToString("; ") else "")
+                )
             }
-        }.apply { isDaemon = true }.start()
+            runOnUiThread {
+                listsRefreshing = false
+                if (!uiReady()) return@runOnUiThread
+                runCatching {
+                    binding.btnRefreshLists.isEnabled = true
+                    res.onSuccess { n ->
+                        when {
+                            errors.isNotEmpty() -> banner(
+                                getString(R.string.lists_rebuild_failed, n, ids.size, errors.joinToString("; ").take(160)),
+                                error = true
+                            )
+                            useLists || useApps -> banner(
+                                getString(
+                                    R.string.lists_rebuilt, n, ids.size,
+                                    summary.ifEmpty { getString(R.string.lists_rebuilt_apps) }
+                                )
+                            )
+                            else -> toast(getString(R.string.lists_refreshed, n, ids.size))
+                        }
+                        updateServerNote()
+                    }.onFailure { toast(getString(R.string.lists_failed, it.message ?: it.javaClass.simpleName)) }
+                    refreshRoutesState()
+                    updateTunnelSummary()
+                }.onFailure { t -> TunnelDebug.error("обновить списки: " + SafeMode.describe(t)) }
+            }
+        }.apply { isDaemon = true; name = "warpscout-lists" }.start()
     }
 
     /** Выбор сервера из отчёта: endpoint + шум + балл, как в таблице, только тапабельно. */
