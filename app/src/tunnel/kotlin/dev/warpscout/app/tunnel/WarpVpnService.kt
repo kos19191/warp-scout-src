@@ -222,7 +222,10 @@ class WarpVpnService : VpnService() {
             batteryText().let { if (it.isEmpty()) "" else ", $it" } +
             energyText().let { if (it.isEmpty()) "" else ", $it" }
         val threads = threadCpuLine()
-        val tail = if (threads.isBlank()) "" else ", $threads"
+        // Кто ушёл во второй выход по правилу приложения за интервал (с 1.10.44-beta1): по этой части
+        // строки видно, ходит ли TikTok через второй выход на самом деле и сколько.
+        val usage = runCatching { dispatcher?.appExits?.secondUsageText(sinceLast = true).orEmpty() }.getOrDefault("")
+        val tail = (if (threads.isBlank()) "" else ", $threads") + (if (usage.isBlank()) "" else ", во второй выход (вверх): $usage")
         // Тихий подбор для Wi-Fi проверяем здесь: строка статистики пишется раз в ~5 минут и при
         // погашенном экране. Сама проверка — в своём потоке: этот поток — таймер data plane.
         if (screenOffAt > 0L && !quietScanRunning) {
@@ -1114,6 +1117,7 @@ class WarpVpnService : VpnService() {
         TunnelState.tgSecond = tgViaSecond
         probeHosts.clear()
         siteSaid = ""
+        tgFarSaid = false
         // Говорим и про выключенный второй выход: иначе «две цепочки рукопожатий в журнале»
         // невозможно объяснить, не заглядывая в настройки.
         TunnelDebug.stage(if (multiExit) "второй выход включён" else "второй выход выключен")
@@ -1948,6 +1952,17 @@ class WarpVpnService : VpnService() {
     private var lastLinkCheckAt = 0L
     private val LINK_SUSPECT_GAP_MS = 2 * 60_000L
 
+    /** Когда последний раз переподнимали туннель из-за «трафик идёт мимо» (с 1.10.44-beta1). */
+    @Volatile
+    private var bypassHealAt = 0L
+
+    /** Последний удачный замер после подъёма: когда, на какой точке и сети (с 1.10.44-beta1, см. UP_SPEED_GAP_MS). */
+    @Volatile
+    private var upSpeedAt = 0L
+
+    @Volatile
+    private var upSpeedKey = ""
+
     /** Проверка уже идёт — вторую параллельно не запускаем. */
     private val linkCheckBusy = java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -1995,6 +2010,24 @@ class WarpVpnService : VpnService() {
                 if (!linkAlive(myEpoch)) return@Thread
                 TunnelState.setLink(System.currentTimeMillis(), result.web, result.webMs, result.tg, result.tgMs, result.exit)
                 reportLink(reason, result)
+                // Трафик идёт мимо туннеля (с 1.10.44-beta1). Журнал 24.11, 13:38–13:41: после подбора туннель
+                // «работал» (rekey проходили), а проверка трижды писала «ответ пришёл мимо WARP» и «Telegram не
+                // отвечает» — три минуты всё шло мимо, пока человек не нажал «Сохранить и применить».
+                // Переподнимаем сами, не чаще раза в 15 минут — по кругу не пойдём.
+                if (!quietSession && wanted && linkAlive(myEpoch) && result.web == TunnelStatus.LINK_BYPASS &&
+                    result.webNote == BYPASS_WARP_NOTE && result.tg == TunnelStatus.LINK_FAIL
+                ) {
+                    val now = System.currentTimeMillis()
+                    if (bypassHealAt <= 0L || now - bypassHealAt !in 0 until BYPASS_HEAL_GAP_MS) {
+                        bypassHealAt = now
+                        restartAfterNetworkChange(
+                            "трафик идёт мимо туннеля (ответ пришёл мимо WARP, Telegram не отвечает)",
+                            R.string.status_reconnect_silent
+                        )
+                        return@Thread
+                    }
+                    TunnelDebug.stage("трафик снова мимо туннеля — переподнимал меньше 15 минут назад, жду")
+                }
                 // Площадка выхода (с 1.10.34): в память — по ней перебор ставит выход за рубежом
                 // раньше московского. Выход за рубежом — Telegram снова через WARP; на второй выход
                 // его с 1.10.36 переключает только ответ человека (см. checkTelegramMedia).
@@ -2046,6 +2079,13 @@ class WarpVpnService : VpnService() {
                     // тогда, когда приложения переподключаются, а «встал» там чаще радио, чем фильтр.
                     if (slowRadio()) {
                         noteSlowRadio("замер скорости после подъёма пропускаю — он занял бы весь канал")
+                    } else if (upSpeedRecent()) {
+                        // С 1.10.44-beta1: журнал 24.11 — 44 замера по 512 КБ за 4 часа, почти все после
+                        // переподъёмов из-за смены сети, ровно когда Telegram и остальные переподключаются.
+                        TunnelDebug.stage(
+                            "замер скорости после подъёма пропускаю: на этой точке и сети он прошёл " +
+                                "${(System.currentTimeMillis() - upSpeedAt) / 60_000} мин назад"
+                        )
                     } else {
                         startSpeedTest(myEpoch, "после подъёма", full = false, delayMs = 400L)
                     }
@@ -2095,7 +2135,7 @@ class WarpVpnService : VpnService() {
                 webMs = (android.os.SystemClock.elapsedRealtime() - t0).toInt()
                 exit = trace.summary()
                 web = if (trace.viaWarp) TunnelStatus.LINK_OK else TunnelStatus.LINK_BYPASS
-                if (!trace.viaWarp) webNote = "ответ пришёл мимо WARP"
+                if (!trace.viaWarp) webNote = BYPASS_WARP_NOTE
             } else {
                 webNote = body.exceptionOrNull()
                     ?.let { "${it.javaClass.simpleName}: ${it.message.orEmpty().take(60)}" }
@@ -2178,6 +2218,9 @@ class WarpVpnService : VpnService() {
         val byUid = HashMap<Int, Int>()
         val names = HashMap<Int, String>()
         val missing = ArrayList<String>()
+        // «Только второй выход» (с 1.10.44-beta1): TikTok с выходом «Второй выход» при упавшем втором
+        // выходе не уходит в WARP — см. AppServices.strictSecond.
+        val strict = HashSet<Int>()
         rules.forEach { (pkg, rule) ->
             val info = runCatching {
                 @Suppress("DEPRECATION")
@@ -2189,6 +2232,7 @@ class WarpVpnService : VpnService() {
             }
             byUid[info.uid] = AppExit.stronger(byUid[info.uid] ?: AppExit.AUTO, rule)
             names[info.uid] = runCatching { packageManager.getApplicationLabel(info).toString() }.getOrDefault(pkg)
+            if (rule == AppExit.SECOND && dev.warpscout.core.lists.AppServices.strictSecond(pkg)) strict += info.uid
         }
         if (byUid.isEmpty() && !auto) {
             TunnelDebug.stage("выход по приложениям: выбранных приложений нет на телефоне (${missing.joinToString(", ")})")
@@ -2201,6 +2245,12 @@ class WarpVpnService : VpnService() {
                 } + (if (missing.isNotEmpty()) "; нет на телефоне: ${missing.joinToString(", ")}" else "")
             )
         }
+        if (strict.isNotEmpty()) {
+            TunnelDebug.stage(
+                "выход по приложениям: ${strict.mapNotNull { names[it] }.sorted().joinToString(", ")} — только через второй " +
+                    "выход: если он ляжет, приложение подождёт его, а через WARP не пойдёт (TikTok запоминает регион по адресу)"
+            )
+        }
         return AppExitTable(
             byUid,
             owner = { proto, local, remote ->
@@ -2208,6 +2258,7 @@ class WarpVpnService : VpnService() {
             },
             names = names,
             log = { line -> TunnelDebug.stage(line) },
+            strict = strict,
         )
     }
 
@@ -2658,6 +2709,12 @@ class WarpVpnService : VpnService() {
                 else -> " (через WARP — так выбрано)"
             }
             reportTelegramMedia(r, via, site)
+            // Telegram закреплён за WARP, WARP выходит через Россию, медиа не грузится (с 1.10.44-beta1):
+            // журнал 24.11, 13:41 — так и было, а в журнале стояла обычная строка. Говорим уведомлением.
+            if (tgFixed == AppExit.WARP && ExitSite.isRussian(site) && TelegramChoice.poor(r.verdict)) {
+                runCatching { warnTelegramPinnedWarp(site, r) }
+            }
+            if (tgViaSecond && secondUp) runCatching { noteTelegramFar() }
             return
         }
         val r = runTelegramMedia()
@@ -2678,8 +2735,85 @@ class WarpVpnService : VpnService() {
         when (r.verdict) {
             TelegramMedia.OK -> TunnelDebug.ok(line)
             TelegramMedia.SLOW, TelegramMedia.STALL -> TunnelDebug.error(line, tgMediaHint(site))
+            // «Не грузится» при Telegram, закреплённом за WARP с выходом через Россию (с 1.10.44-beta1), —
+            // тоже ошибка с подсказкой: само приложение Telegram оттуда не уведёт.
+            TelegramMedia.FAIL ->
+                if (tgFixed == AppExit.WARP && ExitSite.isRussian(site)) TunnelDebug.error(line, tgMediaHint(site))
+                else TunnelDebug.stage(line)
             else -> TunnelDebug.stage(line)
         }
+    }
+
+    /** Когда последний раз предупреждали «Telegram закреплён за WARP, а медиа не грузится» (с 1.10.44-beta1). */
+    @Volatile
+    private var tgPinnedWarnAt = 0L
+
+    /** Про далёкую страну второго выхода для Telegram — один раз за сессию (с 1.10.44-beta1). */
+    @Volatile
+    private var tgFarSaid = false
+
+    /**
+     * Telegram закреплён за WARP («Туннелирование», строка Telegram), а WARP выходит через Россию, и
+     * медиа не грузится: уведомление раз в 6 часов. Сам выход не меняем — его выбрал человек.
+     */
+    private fun warnTelegramPinnedWarp(site: String, r: TelegramMedia.Fetch) {
+        val now = System.currentTimeMillis()
+        if (tgPinnedWarnAt > 0L && now - tgPinnedWarnAt in 0 until TG_PINNED_WARN_GAP_MS) return
+        tgPinnedWarnAt = now
+        val city = ExitSite.cityAcc(site).ifBlank { "Россию" }
+        val result = TelegramChoice.short(r.verdict, r.kbps)
+        TunnelDebug.stage("Telegram закреплён за WARP, а выход WARP — через $city: медиа $result — предупреждаю уведомлением")
+        postTelegramNote(getString(R.string.tg_pinned_title), getString(R.string.tg_pinned_text, city, result))
+    }
+
+    /**
+     * Telegram идёт через второй выход в далёкой стране (США, Канада, Мексика, Япония, Сингапур): серверы
+     * Telegram у российских номеров — в Амстердаме (медиа — cdn4.telesco.pe, 149.154.164–167), и путь
+     * Москва → Америка → Амстердам в разы длиннее, чем через Нидерланды. Журнал 24.11: второй выход США,
+     * медиа 1,5–2,1 Мбит/с. Строка в журнал — раз за сессию; страну выбирает человек.
+     */
+    private fun noteTelegramFar() {
+        if (tgFarSaid || !tgViaSecond) return
+        val name = TunnelState.secondPeer
+        val code = if (name.isBlank()) "" else ProtonFree.codeOf(name, "")
+        if (code !in TG_FAR_COUNTRIES) return
+        tgFarSaid = true
+        TunnelDebug.stage(
+            "Telegram идёт через ${secondLabel()}: его серверы — в Амстердаме, и путь Москва → " +
+                "${dev.warpscout.app.SecondProton.countryName(this, code)} → Амстердам в разы длиннее; для Telegram страна " +
+                "второго выхода «Нидерланды» (или «Любая — ближние первыми») обычно в 2–3 раза быстрее"
+        )
+    }
+
+    /** Уведомление о Telegram без кнопок (с 1.10.44-beta1): канал вопросов, своё место — вопрос не затирается. */
+    private fun postTelegramNote(title: String, text: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            notifyManager().createNotificationChannel(
+                NotificationChannel(
+                    TelegramChoiceMemory.ASK_CHANNEL, getString(R.string.tg_ask_channel), NotificationManager.IMPORTANCE_DEFAULT
+                ).apply {
+                    setSound(null, null)
+                    enableVibration(false)
+                }
+            )
+        }
+        val open = android.app.PendingIntent.getActivity(
+            this, 0,
+            Intent(this, dev.warpscout.app.MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        val n = NotificationCompat.Builder(this, TelegramChoiceMemory.ASK_CHANNEL)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setSmallIcon(R.drawable.ic_tile_tunnel)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setOnlyAlertOnce(true)
+            .setAutoCancel(true)
+            .setTimeoutAfter(TG_PINNED_WARN_GAP_MS)
+            .setContentIntent(open)
+            .build()
+        runCatching { notifyManager().notify(NOTIF_TG_NOTE_ID, n) }
     }
 
     /** Строка о замере для сравнения: «проверка Telegram через Москву (для сравнения): …». */
@@ -2702,6 +2836,7 @@ class WarpVpnService : VpnService() {
         if (!linkAlive(myEpoch)) return
         TunnelState.setTgMedia(System.currentTimeMillis(), second.verdict, second.kbps)
         reportTelegramMedia(second, " (через $label)", site)
+        runCatching { noteTelegramFar() }
         val warp = probeTelegram(viaSecond = false)
         if (!linkAlive(myEpoch) || !tgViaSecond) return
         val city = ExitSite.cityAcc(site).ifBlank { "WARP" }
@@ -3094,6 +3229,17 @@ class WarpVpnService : VpnService() {
      * Замер в своём потоке. [full] — по нажатию (до 10 МБ / 6 с), иначе короткий (полмегабайта).
      * Короткий, «замёрзший» дважды подряд, — повод сменить точку (если это не выключено).
      */
+    /** Точка и сеть — для «замер после подъёма недавно прошёл» (с 1.10.44-beta1). */
+    private fun speedKey(): String = "${TunnelState.endpoint}|${memoryNetKind()}"
+
+    /** Удачный замер после подъёма был меньше [UP_SPEED_GAP_MS] назад на той же точке и сети. */
+    private fun upSpeedRecent(): Boolean {
+        val at = upSpeedAt
+        if (at <= 0L) return false
+        val age = System.currentTimeMillis() - at
+        return age in 0 until UP_SPEED_GAP_MS && upSpeedKey == speedKey()
+    }
+
     private fun startSpeedTest(myEpoch: Int, reason: String, full: Boolean, delayMs: Long) {
         if (!speedBusy.compareAndSet(false, true)) return
         val thread = Thread({
@@ -3118,6 +3264,15 @@ class WarpVpnService : VpnService() {
                 }
                 TunnelState.setSpeed(System.currentTimeMillis(), state, r.kbps, r.ttfbMs, r.bytes, full)
                 reportSpeed(reason, r, full)
+                // Удачный замер после подъёма — на 10 минут хватит той же точке на той же сети (с 1.10.44-beta1).
+                if (!full && reason == "после подъёма") {
+                    if (state == TunnelStatus.SPEED_OK) {
+                        upSpeedAt = System.currentTimeMillis()
+                        upSpeedKey = speedKey()
+                    } else {
+                        upSpeedAt = 0L
+                    }
+                }
                 if (state == TunnelStatus.SPEED_FROZEN && !full) {
                     freezeStreak += 1
                     val settings = serviceSettings()
@@ -3893,6 +4048,14 @@ class WarpVpnService : VpnService() {
         runCatching { d?.stop() }
         // Сколько стоил выход по приложениям в этой сессии (с 1.10.39) — строка в журнал.
         d?.appExits?.let { table -> if (table.lookups > 0) runCatching { TunnelDebug.stage(table.summary()) } }
+        // Пакеты «только второй выход» (TikTok, с 1.10.44-beta1), придержанные без второго выхода.
+        d?.let { disp ->
+            if (disp.strictHeld > 0) {
+                runCatching {
+                    TunnelDebug.stage("второй выход не работал — пакетов «только второй выход» придержано: ${disp.strictHeld} (в WARP не пускал)")
+                }
+            }
+        }
         // Диспетчера нет — Telegram через второй выход больше не идёт (с 1.10.34).
         if (tgViaSecond) {
             tgViaSecond = false
@@ -5677,6 +5840,24 @@ class WarpVpnService : VpnService() {
 
         /** Уведомление с вопросом про Telegram (с 1.10.36): своё, не туннельное. */
         private const val NOTIF_ASK_ID = 4201
+
+        /** Уведомление «Telegram закреплён за WARP, а медиа не грузится» (с 1.10.44-beta1). */
+        private const val NOTIF_TG_NOTE_ID = 4202
+
+        /** Не чаще раза в 6 часов — об одном и том же. */
+        private const val TG_PINNED_WARN_GAP_MS = 6 * 60 * 60_000L
+
+        /** Страны второго выхода, далёкие от серверов Telegram в Амстердаме (с 1.10.44-beta1). */
+        private val TG_FAR_COUNTRIES = setOf("US", "CA", "MX", "JP", "SG")
+
+        /** Пометка проверки связи «ответ пришёл, но не через WARP» — по ней узнаём «трафик мимо туннеля». */
+        private const val BYPASS_WARP_NOTE = "ответ пришёл мимо WARP"
+
+        /** «Трафик мимо туннеля» переподнимаем не чаще раза в 15 минут (с 1.10.44-beta1). */
+        private const val BYPASS_HEAL_GAP_MS = 15 * 60_000L
+
+        /** Замер после подъёма не повторяем, если на той же точке и сети он был так недавно и прошёл (с 1.10.44-beta1). */
+        private const val UP_SPEED_GAP_MS = 10 * 60_000L
 
         fun start(context: Context, config: WarpConfig, requestedAt: Long = 0L, quiet: Boolean = false) =
             startWithText(context, WgConf.render(config), requestedAt, quiet)

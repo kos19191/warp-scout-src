@@ -1007,6 +1007,57 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         expect("Aurora: её адреса — Google Play", a.listsFor(listOf("com.aurora.store")), listOf("google-play"))
         check("Aurora: список Google Play есть", AllowLists.byId["google-play"] != null)
         check("Aurora: чужой пакет со словом aurora — не она", a.serviceOf("com.aurora.weather") == null)
+
+        // «Только второй выход» (с 1.10.44-beta1): TikTok при упавшем втором выходе в WARP не уходит.
+        expect("TikTok: «только второй выход»",
+            a.strictSecond("com.zhiliaoapp.musically") to a.strictSecond("com.ss.android.ugc.trill"), true to true)
+        check("TikTok: остальные — с запасным WARP", !a.strictSecond("com.aurora.store") && !a.strictSecond("org.telegram.messenger"))
+        val tiktok = 10400
+        val strictLogs = ArrayList<String>()
+        val st = dev.warpscout.core.tunnel.AppExitTable(
+            mapOf(tiktok to e.SECOND, aurora to e.SECOND),
+            owner = { _, local, _ -> if (local.port in 48000..48099) tiktok else aurora },
+            names = mapOf(tiktok to "TikTok", aurora to "Aurora Store"), log = { strictLogs += it },
+            strict = setOf(tiktok),
+        )
+        val tk = pkt(48000, "23.1.2.3")
+        expect("TikTok: во второй выход", st.decide(tk, tk.size, 0), 1)
+        check("TikTok: пометка «только второй выход»", st.lastStrict)
+        val au = pkt(48500, "142.250.1.1")
+        expect("Aurora: во второй выход", st.decide(au, au.size, 0), 1)
+        check("Aurora: без пометки — запасной WARP остаётся", !st.lastStrict)
+        check("TikTok: в журнале — что подождёт второй выход", strictLogs.any { it.contains("TikTok") && it.contains("через WARP не пойдёт") })
+        st.decide(tk, tk.size, 0)
+        expect("счётчик второго выхода: TikTok — два пакета, Aurora — один",
+            st.secondUsage(sinceLast = true).associate { it.first to it.second }, mapOf("TikTok" to 2L, "Aurora Store" to 1L))
+        check("счётчик второго выхода: за интервал — с нуля", st.secondUsage(sinceLast = true).isEmpty())
+        check("счётчик второго выхода: в сводке сессии", st.summary().contains("TikTok 2 пак."))
+        expect("размер для журнала: КБ и МБ",
+            dev.warpscout.core.tunnel.AppExitTable.sizeText(2048) + " / " + dev.warpscout.core.tunnel.AppExitTable.sizeText(1572864),
+            "2 КБ / 1,5 МБ")
+        fun runStrict(list: List<ByteArray>, closeSecond: Boolean): Triple<Long, Long, Long> {
+            val q = ArrayDeque(list)
+            val lanes3 = listOf(PacketQueueIn("основной"), PacketQueueIn("второй"))
+            if (closeSecond) lanes3[1].close()
+            val d = dev.warpscout.core.tunnel.TunDispatcher(
+                object : java.io.InputStream() {
+                    override fun read(): Int = -1
+                    override fun read(b: ByteArray, off: Int, len: Int): Int {
+                        val p = q.removeFirstOrNull() ?: return -1
+                        System.arraycopy(p, 0, b, off, p.size)
+                        return p.size
+                    }
+                },
+                ExitRouter.EMPTY, lanes3
+            )
+            d.appExits = st
+            d.run()
+            return Triple(d.sentPrimary, d.sentSecondary, d.strictHeld)
+        }
+        expect("диспетчер: второй выход лёг — TikTok придержан, Aurora — через WARP",
+            runStrict(listOf(pkt(48001, "23.1.2.3"), pkt(48501, "142.250.1.1")), closeSecond = true), Triple(1L, 0L, 1L))
+        expect("диспетчер: второй выход работает — оба во второй",
+            runStrict(listOf(pkt(48002, "23.1.2.3"), pkt(48502, "142.250.1.1")), closeSecond = false), Triple(0L, 2L, 0L))
     }
 
     /** Маршруты из частей: сайты для браузера, сети выбранных приложений, прежние режимы. */

@@ -522,6 +522,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         binding.switchFeatAbroad.isChecked = prefs.featAbroadSearch
         binding.switchFeatTgSecond.isChecked = prefs.featTgSecond
         binding.switchFeatAppAuto.isChecked = prefs.featAppAuto
+        binding.switchFeatSecondWhole.isChecked = prefs.featSecondWhole
         renderAppAuto()
     }
 
@@ -578,6 +579,13 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             renderAppAuto()
             // Включили — первый замер сразу: сервис меряет после проверки связи.
             if (it && tunnel.supported && tunnel.isUp) runCatching { tunnel.requestLinkCheck() }
+        })
+        // «Второй выход» — приложение целиком (с 1.10.44-beta1): это маршруты туннеля — они меняются
+        // при подключении, поэтому говорим, как применить сразу.
+        bind(binding.switchFeatSecondWhole, getString(R.string.feat_second_whole_short), { prefs.featSecondWhole }, {
+            prefs.featSecondWhole = it
+            runCatching { updateTunnelSummary() }
+            if (tunnel.supported && tunnel.isUp) banner(getString(R.string.feat_second_whole_apply))
         })
     }
 
@@ -884,7 +892,10 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             val liveRoutes = runCatching { routeCount(prefs.allowedIps()) }.getOrDefault(0)
             val browserWanted = runCatching { prefs.browserSitesWanted() }.getOrDefault(false)
             val browserActive = browserWanted && runCatching { prefs.browserSitesActive() }.getOrDefault(false)
+            // «Второй выход» — приложение целиком (с 1.10.44-beta1): маршруты — весь трафик выбранных.
+            val whole = runCatching { prefs.secondWholeActive() }.getOrDefault(false)
             val routes = when {
+                whole -> getString(R.string.tunnel_sum_routes_whole)
                 browserActive -> getString(R.string.tunnel_sum_routes_browser, liveRoutes)
                 prefs.routesMode == 1 -> getString(R.string.tunnel_sum_routes_preset)
                 prefs.routesMode == 2 -> if (listRoutes == 0) getString(R.string.tunnel_sum_routes_all)
@@ -895,21 +906,24 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             }
             val text = buildString {
                 append(getString(R.string.tunnel_sum, apps, routes))
+                if (whole) {
+                    append("\n").append(getString(R.string.tunnel_second_whole, prefs.secondWholeTitles()))
+                }
                 if (prefs.appsMode == Prefs.APPS_ONLY && selected == 0) {
                     append("\n").append(getString(R.string.tunnel_warn_apps_empty))
                 }
-                if ((prefs.routesMode == 2 && listRoutes == 0) || (prefs.routesMode == 3 && sitesRoutes == 0)) {
+                if (!whole && ((prefs.routesMode == 2 && listRoutes == 0) || (prefs.routesMode == 3 && sitesRoutes == 0))) {
                     append("\n").append(getString(R.string.tunnel_warn_routes_empty))
                 }
                 // Браузер выбран, а сети выбранных приложений ещё не собраны — пока браузер идёт целиком.
-                if (browserWanted && !browserActive) {
+                if (browserWanted && !browserActive && !whole) {
                     append("\n").append(getString(R.string.tunnel_browser_pending))
                 }
                 // Сайты выбраны не все (с 1.10.35): известные сервисы идут целиком по своим сетям, а о
                 // приложениях, чьих сетей мы не знаем, — предупреждаем: они идут только к выбранным
                 // сайтам (так решил человек 23.11).
-                val partial = browserActive ||
-                    ((prefs.routesMode == 2 && listRoutes > 0) || (prefs.routesMode == 3 && sitesRoutes > 0))
+                val partial = !whole && (browserActive ||
+                    ((prefs.routesMode == 2 && listRoutes > 0) || (prefs.routesMode == 3 && sitesRoutes > 0)))
                 if (prefs.appsMode == Prefs.APPS_ONLY && selected > 0 && partial) {
                     val whole = dev.warpscout.core.lists.AppServices.titlesFor(prefs.appsSelected)
                     if (whole.isNotEmpty()) {
@@ -1056,6 +1070,9 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
      * Telegram, Instagram, YouTube идут через туннель целиком только с ними.
      */
     private fun routeNeeds(): RouteNeeds {
+        // «Второй выход» — приложение целиком (с 1.10.44-beta1): маршруты — весь трафик выбранных
+        // приложений, собирать адреса сайтов и сети приложений для них не нужно.
+        if (runCatching { prefs.secondWholeActive() }.getOrDefault(false)) return RouteNeeds(false, false, false)
         val browser = runCatching { prefs.browserSitesWanted() }.getOrDefault(false)
         val sites = (prefs.routesMode == 3 || browser) && prefs.tunnelSites.isNotBlank() &&
             (prefs.tunnelSitesSig != prefs.tunnelSites.trim() || prefs.tunnelSitesCidrs.isBlank())

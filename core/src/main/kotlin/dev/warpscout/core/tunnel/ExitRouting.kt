@@ -290,6 +290,17 @@ class TunDispatcher(
     var dropped: Long = 0L
         private set
 
+    /**
+     * Пакеты приложений «только второй выход» (TikTok, с 1.10.44-beta1, см. [AppExitTable.lastStrict]),
+     * придержанные, пока второй выход не работал: в WARP их не отдаём.
+     */
+    @Volatile
+    var strictHeld: Long = 0L
+        private set
+
+    /** Про придержанные пакеты в журнал — один раз за сессию. */
+    private var strictSaid = false
+
     fun stop() {
         stopped = true
         lanes.forEach { runCatching { it.close() } }
@@ -320,7 +331,24 @@ class TunDispatcher(
             }
             val byAddress = router.route(dst)
             val pin = if (anyPinned) pinnedLane(packet, n) else -1
-            val wanted = if (pin >= 0) pin else appExits?.decide(packet, n, byAddress) ?: byAddress
+            val table = appExits
+            val wanted = if (pin >= 0) pin else table?.decide(packet, n, byAddress) ?: byAddress
+            // «Только второй выход» (TikTok, с 1.10.44-beta1): второй выход лёг — пакет не уходит в
+            // WARP, а придерживается (приложение повторит само). Иначе TikTok увидел бы российский адрес
+            // московской площадки WARP и снова запомнил бы регион.
+            if (pin < 0 && wanted == 1 && table != null && table.lastStrict &&
+                (lanes.size < 2 || lanes[1].isClosed())
+            ) {
+                strictHeld++
+                if (!strictSaid) {
+                    strictSaid = true
+                    log(
+                        "${table.strictNames()}: второй выход сейчас не работает — пакеты придерживаю, " +
+                            "через WARP не пускаю (иначе увидит российский адрес и запомнит регион)"
+                    )
+                }
+                continue
+            }
             // Если второй выход отказал (сессию не поднял или умер), его подсети не теряются:
             // трафик возвращается в основной туннель — регион будет не тот, зато сайт работает.
             // Так же и приложения с «Второй выход» (решил человек 23.11): идут через WARP.

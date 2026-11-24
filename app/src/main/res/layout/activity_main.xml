@@ -686,6 +686,21 @@
                     android:textAppearance="?attr/textAppearanceBodySmall"
                     android:visibility="gone" />
 
+                <!-- 1.10.44-beta1: «Второй выход» — приложение целиком (TikTok без утечек мимо туннеля). -->
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatSecondWhole"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_second_whole" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:layout_marginBottom="6dp"
+                    android:text="@string/feat_second_whole_note"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
                 <!-- ── что туннелируем и как (переехало из вкладки «Туннель») ── -->
 
 

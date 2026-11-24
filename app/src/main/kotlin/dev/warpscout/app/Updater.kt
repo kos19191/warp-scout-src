@@ -92,6 +92,8 @@ object Updater {
     data class Direct(val uri: Uri, val name: String, val size: Long, val verified: Boolean?)
 
     fun check(currentVersion: String, buildRev: String, flavor: String): Check {
+        // Бета (с 1.10.44-beta1) — отдельное приложение: ей предлагаются только беты, обычные версии — нет.
+        if (BuildConfig.BETA) return checkBeta(currentVersion, buildRev, flavor)
         val viaApi = runCatching { latestFromApi(flavor) }
         val release = viaApi.getOrNull() ?: latestFromWeb(flavor)
         if (release.apkUrl.isBlank()) return Check.NoAsset(release.tag, apkName(release.version, flavor))
@@ -107,6 +109,65 @@ object Updater {
             }
         }
         return Check.Latest(currentVersion)
+    }
+
+    /**
+     * Бета: свежая бета — первая (самая новая) из релизов с тегом «v…-betaN». Обычные версии бете не
+     * предлагаются: это другое приложение (applicationId с «.beta»), его APK встал бы рядом, а не поверх.
+     * Только через API: страница releases/latest пре-релизов не показывает.
+     */
+    private fun checkBeta(currentVersion: String, buildRev: String, flavor: String): Check {
+        val release = latestBetaFromApi(flavor)
+        if (release.apkUrl.isBlank()) return Check.NoAsset(release.tag, apkName(release.version, flavor))
+        val cmp = compareBeta(release.version, currentVersion)
+        if (cmp > 0) return Check.Newer(release)
+        if (cmp < 0) return Check.Latest(currentVersion)
+        if (buildRev.length >= 7 && buildRev.all { it in '0'..'9' || it in 'a'..'f' }) {
+            val sha = runCatching { tagCommit(release.tag) }.getOrNull()
+            if (sha != null && sha.length >= 7 && !sha.startsWith(buildRev)) return Check.Rebuild(release, sha.take(7))
+        }
+        return Check.Latest(currentVersion)
+    }
+
+    private fun latestBetaFromApi(flavor: String): Release {
+        val body = runCatching { get("$API/releases?per_page=30", api = true) }.getOrElse {
+            error("бета: GitHub API сейчас не отвечает (без входа — 60 запросов в час на адрес), попробуй позже")
+        }
+        val items = (parseJson(body) as? JsonVal.Arr)?.items.orEmpty().mapNotNull { it as? JsonVal.Obj }
+        val json = items.firstOrNull { o -> o.str("tag_name").orEmpty().contains("-beta") && o.bool("draft") != true }
+            ?: error("бета: на странице релизов пока нет бета-версий")
+        val tag = json.str("tag_name").orEmpty()
+        val version = tag.removePrefix("v")
+        val assets = json.arr("assets")?.items.orEmpty().mapNotNull { it as? JsonVal.Obj }
+        val want = apkName(version, flavor)
+        val apk = assets.firstOrNull { it.str("name") == want }
+            ?: assets.firstOrNull { it.str("name").orEmpty().endsWith("-$flavor.apk") }
+        val sums = assets.firstOrNull { it.str("name") == "SHA256SUMS.txt" }
+        return Release(
+            tag = tag,
+            version = version,
+            apkName = apk?.str("name") ?: want,
+            apkUrl = apk?.str("browser_download_url").orEmpty(),
+            size = apk?.num("size")?.toLong() ?: 0L,
+            sumsUrl = sums?.str("browser_download_url"),
+        )
+    }
+
+    /**
+     * «1.10.44-beta2» против «1.10.44-beta1»: сначала числа версии, потом номер беты. Версия без беты
+     * новее любой своей беты (1.10.44 > 1.10.44-beta3).
+     */
+    fun compareBeta(a: String, b: String): Int {
+        fun split(v: String): Pair<String, Int> {
+            val t = v.trim().removePrefix("v")
+            val base = t.substringBefore("-beta")
+            val n = if (t.contains("-beta")) t.substringAfter("-beta").takeWhile { it.isDigit() }.toIntOrNull() ?: 0 else Int.MAX_VALUE
+            return base to n
+        }
+        val (ab, an) = split(a)
+        val (bb, bn) = split(b)
+        val d = compareVersions(ab, bb)
+        return if (d != 0) d else an.compareTo(bn)
     }
 
     /** «1.10.31» против «1.10.30»: по числам, недостающие части — нули. */

@@ -116,6 +116,14 @@ object AppServices {
         return SERVICES.firstOrNull { s -> s.hints.any { p.contains(it) } }
     }
 
+    /**
+     * Приложение «только второй выход» (с 1.10.44-beta1): если у него выход «Второй выход», упавший
+     * второй выход не заменяется WARP. TikTok решает, какую ленту показывать, по адресу и запоминает
+     * его: один заход с российского адреса московской площадки WARP — и свежие видео снова не
+     * открываются, даже когда второй выход вернётся.
+     */
+    fun strictSecond(pkg: String): Boolean = serviceOf(pkg)?.title == "TikTok"
+
     /** Списки для набора приложений — без повторов, в порядке [SERVICES]. */
     fun listsFor(packages: Collection<String>): List<String> {
         val found = packages.mapNotNull { serviceOf(it) }.toSet()

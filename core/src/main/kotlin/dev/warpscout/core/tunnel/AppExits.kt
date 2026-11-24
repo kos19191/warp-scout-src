@@ -141,6 +141,8 @@ class FlowKey private constructor(
  * @param rules  uid → [AppExit.WARP] или [AppExit.SECOND] (остальное — «Само»)
  * @param owner  чьё соединение: (протокол, свой адрес, адрес назначения) → uid; меньше нуля — не знаю
  * @param names  uid → название приложения для журнала
+ * @param strict uid приложений «только второй выход» (с 1.10.44-beta1, TikTok): их правило
+ *               [AppExit.SECOND] без запасного пути через WARP — см. [lastStrict]
  */
 class AppExitTable(
     rules: Map<Int, Int>,
@@ -149,6 +151,7 @@ class AppExitTable(
     private val log: (String) -> Unit = {},
     private val maxFlows: Int = 4096,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val strict: Set<Int> = emptySet(),
 ) {
     private val rules: Map<Int, Int> = rules.filterValues { it == AppExit.WARP || it == AppExit.SECOND }
     private val anyWarp = this.rules.values.any { it == AppExit.WARP }
@@ -204,7 +207,27 @@ class AppExitTable(
 
     val isEmpty: Boolean get() = rules.isEmpty() && auto.isEmpty()
 
-    /** Соединение → правило его приложения. Старые вытесняются: соединение спросим ещё раз. */
+    /**
+     * Последний [decide] отправил пакет приложения «только второй выход» во второй выход (с
+     * 1.10.44-beta1, см. [strict]). TikTok запоминает регион по адресу: стоит ему один раз сходить
+     * через московский WARP — и лента снова «российская», даже когда второй выход вернётся. Поэтому
+     * диспетчер такой пакет при упавшем втором выходе не отдаёт в WARP, а придерживает. Пишет и
+     * читает один поток — диспетчер tun.
+     */
+    var lastStrict: Boolean = false
+        private set
+
+    /**
+     * Во второй выход по правилу приложения: uid → [пакетов, байт] (с 1.10.44-beta1). Только то, что
+     * приложение отправило (из tun) — ответы диспетчер не видит, но и по этим цифрам ясно, ходит ли
+     * TikTok через второй выход и сколько. Пишет диспетчер, читает строка статистики.
+     */
+    private val perUid = java.util.concurrent.ConcurrentHashMap<Int, LongArray>()
+
+    /** Отметки для [secondUsage] «за интервал»: uid → [пакетов, байт] на прошлый вызов. */
+    private val marks = HashMap<Int, LongArray>()
+
+    /** Соединение → правило его приложения и uid (см. [encode]). Старые вытесняются: соединение спросим ещё раз. */
     private val flows = object : LinkedHashMap<FlowKey, Int>(256, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<FlowKey, Int>?): Boolean = size > maxFlows
     }
@@ -254,6 +277,7 @@ class AppExitTable(
      * новое соединение, а ответы DNS от страны выхода почти не зависят.
      */
     fun decide(p: ByteArray, len: Int, base: Int): Int {
+        lastStrict = false
         if (disabled) return base
         // Часы — только пока доживают соединения снятого правила (см. lingerSecond): это редкость.
         if ((lingerSecond || lingerWarp) && clock() > lingerUntil) {
@@ -265,15 +289,23 @@ class AppExitTable(
         return try {
             val key = FlowKey.of(p, len) ?: return base
             if (key.dport == 53 || key.sport == 53) return base
-            val rule = flows[key] ?: lookup(key, p, len).also { flows[key] = it }
+            val code = flows[key] ?: lookup(key, p, len).also { flows[key] = it }
+            val rule = code and RULE_MASK
             when (rule) {
                 AppExit.WARP -> {
                     if (base != 0) movedToWarp++
                     0
                 }
 
-                AppExit.SECOND -> {
+                AppExit.SECOND, SECOND_STRICT -> {
                     if (base != 1) movedToSecond++
+                    if (rule == SECOND_STRICT) lastStrict = true
+                    val uid = (code ushr RULE_BITS) - 1
+                    if (uid >= 0) {
+                        val n = perUid.getOrPut(uid) { LongArray(2) }
+                        n[0]++
+                        n[1] += len.toLong()
+                    }
                     1
                 }
 
@@ -306,17 +338,54 @@ class AppExitTable(
             }
             return AppExit.AUTO
         }
-        val rule = rules[uid] ?: return autoRule(uid, key, p, len)
+        val rule = rules[uid] ?: return encode(uid, autoRule(uid, key, p, len))
+        val effective = if (rule == AppExit.SECOND && uid in strict) SECOND_STRICT else rule
         if (announced.add(uid)) {
             val name = names[uid] ?: "uid $uid"
             log(
-                when (rule) {
+                when (effective) {
+                    SECOND_STRICT -> "выход по приложениям: $name — целиком и только через второй выход (так выбрано): " +
+                        "если второй выход ляжет, $name подождёт его, через WARP не пойдёт"
                     AppExit.SECOND -> "выход по приложениям: $name — целиком через второй выход (так выбрано)"
                     else -> "выход по приложениям: $name — всегда через WARP, второй выход для него выключен (так выбрано)"
                 }
             )
         }
-        return rule
+        return encode(uid, effective)
+    }
+
+    /** Правило и uid в одном числе — так таблица соединений помнит и то и другое без лишних объектов. */
+    private fun encode(uid: Int, rule: Int): Int = ((uid + 1) shl RULE_BITS) or (rule and RULE_MASK)
+
+    /** Названия приложений «только второй выход» — для строки журнала диспетчера. */
+    fun strictNames(): String = strict.mapNotNull { names[it] }.distinct().sorted().joinToString(", ").ifBlank { "TikTok" }
+
+    /**
+     * Что ушло во второй выход по правилу приложения: (название, пакетов, байт), больше всего — первым.
+     * [sinceLast] — за интервал с прошлого такого вызова (строка статистики раз в 5 минут), иначе — за сессию.
+     */
+    fun secondUsage(sinceLast: Boolean): List<Triple<String, Long, Long>> {
+        val out = ArrayList<Triple<String, Long, Long>>()
+        synchronized(marks) {
+            perUid.forEach { (uid, n) ->
+                val packets = n[0]
+                val bytes = n[1]
+                val m = if (sinceLast) marks.getOrPut(uid) { LongArray(2) } else null
+                val dp = packets - (m?.get(0) ?: 0L)
+                val db = bytes - (m?.get(1) ?: 0L)
+                if (m != null) {
+                    m[0] = packets
+                    m[1] = bytes
+                }
+                if (dp > 0) out += Triple(names[uid] ?: "uid $uid", dp, db)
+            }
+        }
+        return out.sortedByDescending { it.third }
+    }
+
+    /** «TikTok 1520 пак. (0,3 МБ), ChatGPT 12 пак. (4 КБ)» — пусто, если во второй выход по правилам ничего не ушло. */
+    fun secondUsageText(sinceLast: Boolean): String = secondUsage(sinceLast).joinToString(", ") { (name, packets, bytes) ->
+        "$name $packets пак. (${sizeText(bytes)})"
     }
 
     /**
@@ -336,11 +405,26 @@ class AppExitTable(
         return "выход по приложениям: запросов владельца $lookups (не названо $misses), в среднем ${avg} мкс, " +
             "дольше всего ${maxLookupNanos / 1000} мкс; пакетов через второй выход по правилу $movedToSecond, " +
             "через WARP по правилу $movedToWarp" + (if (auto.isNotEmpty()) "; автовыбор: правил ${auto.size}" else "") +
+            secondUsageText(false).let { if (it.isEmpty()) "" else "; во второй выход по правилам (вверх): $it" } +
             if (disabled) " — выключено: Android не отвечает" else ""
     }
 
     companion object {
         const val FAIL_LIMIT = 64L
+
+        /** Внутреннее правило «только второй выход» (с 1.10.44-beta1): в настройках его нет, это [AppExit.SECOND] + [strict]. */
+        const val SECOND_STRICT = 3
+
+        /** Сколько младших бит числа в таблице соединений занимает правило (см. [encode]). */
+        const val RULE_BITS = 4
+        const val RULE_MASK = (1 shl RULE_BITS) - 1
+
+        /** «512 Б», «48 КБ», «1,4 МБ» — для строк журнала. */
+        fun sizeText(bytes: Long): String = when {
+            bytes < 1024 -> "$bytes Б"
+            bytes < 1024 * 1024 -> "${bytes / 1024} КБ"
+            else -> String.format(java.util.Locale("ru"), "%.1f МБ", bytes / 1048576.0)
+        }
 
         /** Сколько доживают соединения снятого автоправила (см. lingerSecond). */
         const val LINGER_MS = 10 * 60_000L

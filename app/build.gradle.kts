@@ -11,8 +11,8 @@ android {
         applicationId = "dev.warpscout.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 70
-        versionName = "1.10.43"
+        versionCode = 71
+        versionName = "1.10.44-beta1"
         // Номер сборки (короткий хеш коммита из CI): по этой метке в журнале видно, какая именно
         // сборка стоит на телефоне. Локально — «local».
         // С 1.10.41 каждая сборка для телефона получает НОВЫЙ номер версии. Пересборку с тем же
@@ -25,7 +25,13 @@ android {
             "BUILD_REV",
             "\"" + (System.getenv("GITHUB_SHA")?.take(7) ?: "local") + "\""
         )
+        // Бета (с 1.10.44-beta1): версия вида «1.10.44-beta1». Ставится отдельным приложением рядом с
+        // обычным («WarpScout β», applicationId с «.beta» на конце), обновляется только бетами из
+        // пре-релизов и обычную версию на телефоне не трогает.
+        buildConfigField("boolean", "BETA", versionName.orEmpty().contains("-beta").toString())
     }
+
+    val beta = defaultConfig.versionName.orEmpty().contains("-beta")
 
     flavorDimensions += "mode"
     productFlavors {
@@ -38,14 +44,14 @@ android {
             buildConfigField("boolean", "TUNNEL_SUPPORTED", "true")
             // scout открывается расширенным экраном — всеми вкладками, как раньше.
             buildConfigField("boolean", "DEFAULT_SIMPLE", "false")
-            resValue("string", "app_name", "WarpScout")
+            resValue("string", "app_name", if (beta) "WarpScout β (scout)" else "WarpScout")
         }
         create("tunnel") {
             dimension = "mode"
             buildConfigField("boolean", "TUNNEL_SUPPORTED", "true")
             // tunnel открывается упрощённым: кнопка подключения, резервная точка, проверка связи.
             buildConfigField("boolean", "DEFAULT_SIMPLE", "true")
-            resValue("string", "app_name", "WarpScout (tunnel)")
+            resValue("string", "app_name", if (beta) "WarpScout β" else "WarpScout (tunnel)")
             // чтобы обе сборки можно было держать на телефоне одновременно и сравнивать
             applicationIdSuffix = ".tunnel"
         }
@@ -79,6 +85,8 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
+            // Бета — отдельное приложение: «dev.warpscout.app.tunnel.beta» рядом с «dev.warpscout.app.tunnel».
+            if (beta) applicationIdSuffix = ".beta"
             // Один и тот же ключ на всех сборках — иначе обновление «поверх» не ставится.
             if (file("debug.keystore").exists()) {
                 signingConfig = signingConfigs.getByName("pinned")
@@ -86,6 +94,7 @@ android {
         }
         release {
             isMinifyEnabled = true
+            if (beta) applicationIdSuffix = ".beta"
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Подпись релиза: либо переменные окружения, либо debug-ключ (см. README).
             val ks = file("release.keystore")

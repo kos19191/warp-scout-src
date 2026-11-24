@@ -614,6 +614,26 @@ class Prefs(private val context: Context) {
             pushToService()
         }
 
+    /**
+     * «Второй выход» — приложение целиком, без утечек (с 1.10.44-beta1, см. [secondWholeActive]).
+     *
+     * Журнал 24.11: TikTok стоял на «Второй выход», а свежие видео не открывались. Маршруты были
+     * «сайты из списков»: в туннель попадали только адреса из списков и сети приложений, собранные
+     * один раз через DoH. TikTok ходит к сотням адресов, которых там нет (его серверы и CDN меняются
+     * под каждый запрос), и эти соединения шли мимо туннеля — с российского адреса оператора; первые
+     * шесть минут сети TikTok вообще не собрались («не скачались списки tiktok»). Android решает
+     * сначала по приложению, потом по адресам, и адреса у туннеля общие: целиком приложение идёт,
+     * только если маршруты — весь трафик. Поэтому, пока у кого-то стоит «Второй выход», маршруты —
+     * весь трафик выбранных приложений; остальным выбранным сайты не из списков идут через WARP, а не
+     * мимо туннеля. По умолчанию включено.
+     */
+    var featSecondWhole: Boolean
+        get() = sp.getBoolean("featSecondWhole", true)
+        set(v) {
+            sp.edit().putBoolean("featSecondWhole", v).apply()
+            pushToService()
+        }
+
     /** Перед переключением на выбранную точку спрашивать её пробой (рабочий туннель не трогая). */
     var featProbeBeforeSwitch: Boolean
         get() = sp.getBoolean("featProbeBeforeSwitch", true)
@@ -788,6 +808,30 @@ class Prefs(private val context: Context) {
      */
     fun browserSitesActive(): Boolean = browserSitesWanted() && appNetsReady()
 
+    /**
+     * Маршруты — весь трафик выбранных приложений, потому что у кого-то из них выход «Второй выход»
+     * (с 1.10.44-beta1, см. [featSecondWhole]): режим «только выбранные», маршруты неполные (сайты из
+     * списков, мои сайты или «браузер — только к нужным сайтам») и правило действует. В режимах «все
+     * приложения» и «все, кроме» так не делаем: там весь трафик — это весь телефон.
+     */
+    fun secondWholeActive(): Boolean {
+        if (!featSecondWhole || appsMode != APPS_ONLY) return false
+        if (secondExitApps().isEmpty()) return false
+        val browser = runCatching { browserSitesWanted() }.getOrDefault(false)
+        return routesMode == 2 || routesMode == 3 || browser
+    }
+
+    /** Приложения «Второй выход» по названиям — для строки маршрутов и экрана. */
+    fun secondWholeTitles(): String {
+        val pm = context.packageManager
+        return secondExitApps().map { pkg ->
+            runCatching {
+                @Suppress("DEPRECATION")
+                pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+            }.getOrDefault(pkg)
+        }.sorted().joinToString(", ")
+    }
+
     /** Маршруты по спискам собраны под нынешние отметки. */
     fun listsReady(): Boolean = allowedIpsText.isNotBlank() && listsBuiltSig == listsSignature()
 
@@ -816,6 +860,8 @@ class Prefs(private val context: Context) {
     }
 
     fun allowedIps(): String {
+        // «Второй выход» — приложение целиком (с 1.10.44-beta1): весь трафик выбранных приложений.
+        if (runCatching { secondWholeActive() }.getOrDefault(false)) return onlyUsable("0.0.0.0/0, ::/0")
         val parts = routeParts()
         return onlyUsable(parts.all())
     }
@@ -885,6 +931,11 @@ class Prefs(private val context: Context) {
      * каком режиме поднялся туннель и добавились ли сети Google для видео YouTube.
      */
     fun routesNote(): String {
+        if (runCatching { secondWholeActive() }.getOrDefault(false)) {
+            return "весь трафик выбранных приложений вместо «${routesModeName()}»: на «Второй выход» стоят " +
+                "${secondWholeTitles()} — они идут целиком; у остальных выбранных сайты не из списков идут через WARP, " +
+                "а не мимо туннеля"
+        }
         val parts = routeParts()
         val split = dev.warpscout.core.config.SplitRoutes
         val name = routesModeName()

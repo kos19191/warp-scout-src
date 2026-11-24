@@ -365,6 +365,11 @@ jobs:
             if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then TAG="${GITHUB_REF_NAME}"; else TAG="latest-preview"; fi
           fi
           echo "тег: $TAG"
+          # Бета (с 1.10.44-beta1): тег вида v1.10.44-beta1 — пре-релиз, «Latest» не становится. Обычная
+          # версия смотрит только на releases/latest (пре-релизы туда не попадают) и бету себе не ставит;
+          # «пять последних» считает только теги версий vX.Y.Z — беты их не вытесняют.
+          BETA=0
+          if [[ "$TAG" == *-beta* ]]; then BETA=1; fi
 
           # Описание релиза — только про сам релиз: что лежит в файлах, что нужно для установки и
           # обновления, что приложение делает. Без пересказа правок и истории версий: изменения живут в
@@ -404,16 +409,45 @@ jobs:
             echo "Собрано автоматически из коммита \`${GITHUB_SHA:0:7}\`, прогон: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           } > notes.md
 
+          if [ "$BETA" = "1" ]; then
+            {
+              echo "**Бета WarpScout $VERSION — для проверки, не обычное обновление.**"
+              echo
+              echo "Ставится отдельным приложением **«WarpScout β»** рядом с обычным WarpScout и его не трогает:"
+              echo "applicationId с «.beta» на конце (\`dev.warpscout.app.tunnel.beta\`, \`dev.warpscout.app.beta\`)."
+              echo "VPN в Android работает один: перед проверкой отключите туннель в обычном приложении (и «Постоянную VPN»"
+              echo "для него в настройках Android, если включена), после — наоборот. Настройки переносятся бекапом:"
+              echo "в обычном приложении «Сохранить резервную копию», в бете — «Восстановить из копии» → «Выбрать файл…»."
+              echo
+              echo "Обычная версия бету себе не предлагает; бета проверяет обновления только среди бет."
+              echo
+              echo "| Файл | Что внутри | applicationId |"
+              echo "|---|---|---|"
+              echo "| \`WarpScout-$VERSION-tunnel.apk\` | бета, открывается упрощённым экраном | \`dev.warpscout.app.tunnel.beta\` |"
+              echo "| \`WarpScout-$VERSION-scout.apk\` | бета, открывается расширенным экраном | \`dev.warpscout.app.beta\` |"
+              echo "| \`SHA256SUMS.txt\` | контрольные суммы SHA-256 обоих APK | |"
+              echo
+              echo "Что в бете и как устроено — в [README](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/README.md), раздел «Бета»."
+              echo "Собрано автоматически из коммита \`${GITHUB_SHA:0:7}\`, прогон: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            } > notes.md
+          fi
+          TITLE="WarpScout $VERSION"
+          PRE=()
+          if [ "$BETA" = "1" ]; then
+            TITLE="WarpScout $VERSION (бета)"
+            PRE=(--prerelease --latest=false)
+          fi
+
           if gh release view "$TAG" > /dev/null 2>&1; then
             # Описание и заголовок тоже обновляем: иначе у перезалитого релиза остаются
             # заметки и ссылка на прогон от предыдущей сборки.
-            gh release edit "$TAG" --title "WarpScout $VERSION" --notes-file notes.md
+            gh release edit "$TAG" --title "$TITLE" --notes-file notes.md "${PRE[@]}"
             gh release upload "$TAG" out/*.apk out/SHA256SUMS.txt --clobber
             echo "обновил существующий релиз $TAG"
           else
             if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
               gh release create "$TAG" out/*.apk out/SHA256SUMS.txt \
-                --title "WarpScout $VERSION" --notes-file notes.md --verify-tag
+                --title "$TITLE" --notes-file notes.md --verify-tag "${PRE[@]}"
             else
               gh release create "$TAG" out/*.apk out/SHA256SUMS.txt \
                 --title "WarpScout $VERSION ($TAG)" --notes-file notes.md --target "$GITHUB_SHA"

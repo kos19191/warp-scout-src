@@ -456,6 +456,10 @@
     <string name="feat_app_auto_short">выход для приложений — сам (эксперимент)</string>
     <string name="app_auto_note">Для приложений с выходом «Само» — YouTube, Instagram, Facebook, WhatsApp, X, Discord, ChatGPT, Claude, TikTok: раз в 30 минут при включённом экране туннель открывает их сайт через WARP и через второй выход (по 100 КБ) и ведёт приложение туда, где сервис работает. Переезжают только новые соединения, идущие не рвутся. Telegram — как раньше, своей проверкой медиа. Нужен второй выход.</string>
     <string name="app_auto_none">Замеров ещё не было: они пойдут после подключения, при включённом экране.</string>
+    <string name="feat_second_whole">«Второй выход» — приложение целиком: весь трафик выбранных приложений в туннель (бета)</string>
+    <string name="feat_second_whole_short">«Второй выход» — приложение целиком</string>
+    <string name="feat_second_whole_note">Для TikTok и всех, у кого стоит «Второй выход». При «сайты из списков» в туннель попадали только адреса из списков, и TikTok ходил мимо туннеля — с российского адреса оператора, отсюда старые видео. Пока у кого-то стоит «Второй выход», туннель берёт весь трафик выбранных приложений: эти приложения идут через второй выход целиком, а у остальных выбранных сайты не из списков идут через WARP, а не мимо туннеля. TikTok, если второй выход ляжет, ждёт его и через WARP не ходит. Только в режиме «только выбранные приложения».</string>
+    <string name="feat_second_whole_apply">Маршруты поменяются при следующем подключении — сразу: «Сохранить и применить».</string>
     <!-- DNS: адреса по имени -->
     <string name="dns_by_name_pending">адрес по имени %1$s (ещё не получен)</string>
     <string name="dns_fallback_note">У «%1$s» ещё нет адреса — пока имя не разрешится, в конфиг идёт Cloudflare.</string>
@@ -479,6 +483,8 @@
     <string name="conn_link_tg_media"> · Telegram: связь есть, медиа тормозит</string>
     <!-- Вопрос «пустить Telegram через второй выход?» (с 1.10.36): уведомление и окно на экране -->
     <string name="tg_ask_channel">Вопросы: Telegram и второй выход</string>
+    <string name="tg_pinned_title">Telegram закреплён за WARP — медиа не грузится</string>
+    <string name="tg_pinned_text">Выход WARP сейчас через %1$s, а там медиа Telegram режут фильтры (проверка: %2$s). В «Туннелировании» у Telegram стоит «WARP» — поставь «Само» (или «Второй выход»): тогда Telegram пойдёт через второй выход, когда через %1$s плохо.</string>
     <string name="tg_ask_title">Telegram тормозит через %1$s</string>
     <string name="tg_ask_dialog_title">Telegram тормозит</string>
     <string name="tg_ask_text">Через %1$s: %2$s. Через %3$s: %4$s. Переключить Telegram? Ответ — на сутки для этой сети; если второй выход станет медленнее, Telegram вернётся сам.</string>
@@ -532,6 +538,8 @@
     <string name="tunnel_sum_apps_only">только выбранные приложения (%1$d)</string>
     <string name="tunnel_sum_apps_except">все приложения, кроме %1$d</string>
     <string name="tunnel_sum_routes_all">все сайты</string>
+    <string name="tunnel_sum_routes_whole">весь трафик выбранных приложений (из-за «Второй выход»)</string>
+    <string name="tunnel_second_whole">На «Второй выход» стоят: %1$s — они идут через второй выход целиком, поэтому туннель берёт весь трафик выбранных приложений; у остальных выбранных сайты не из списков идут через WARP, а не мимо туннеля. Выключается в «Автоматике»: «Второй выход» — приложение целиком.</string>
     <string name="tunnel_sum_routes_preset">всё, кроме российских сетей</string>
     <string name="tunnel_sum_routes_lists">сайты из списков (маршрутов: %1$d)</string>
     <string name="tunnel_sum_routes_sites">мои сайты (маршрутов: %1$d)</string>
