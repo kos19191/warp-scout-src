@@ -895,7 +895,7 @@ class WarpVpnService : VpnService() {
         // и выглядело это ровно как «туннель запускается, потом без ошибок ничего не происходит».
         Thread({
             if (epoch.get() == bootEpoch && wanted && !destroyed) {
-                startVpn(text, startId)
+                startVpnSafely(text, startId)
                 if (selfDriven) superviseStart()
             }
         }, "warpscout-vpn-boot").apply { isDaemon = true }.start()
@@ -940,6 +940,36 @@ class WarpVpnService : VpnService() {
         cancelWaits()
         unwatchNetwork()
         closeAll()
+    }
+
+    /**
+     * [startVpn] под присмотром (с 1.10.42). Исключение в потоке подъёма роняло весь процесс туннеля:
+     * журнал 24.11, 08:23:22 — «Socket is closed» при переподъёме после смены сети, и туннель лежал,
+     * пока система не перезапустит сервис. Теперь сбой — строка в журнале и запись в «падениях» (без
+     * падения), а переподнимает туннель обычная логика: ожидание попытки, перебор точек, медленный режим.
+     */
+    private fun startVpnSafely(text: String, startId: Int) {
+        try {
+            startVpn(text, startId)
+        } catch (e: Exception) {
+            starting = false
+            TunnelState.busy = false
+            runCatching {
+                TunnelDebug.error(
+                    "подъём сорвался: ${e.javaClass.simpleName}: ${e.message?.take(160).orEmpty()}",
+                    "туннель переподнимется сам; если повторяется — пришли журнал"
+                )
+            }
+            runCatching {
+                val stack = java.io.StringWriter()
+                    .also { sw -> java.io.PrintWriter(sw).use { e.printStackTrace(it) } }
+                    .toString()
+                dev.warpscout.app.CrashLog.note(
+                    this,
+                    "сбой подъёма без падения · поток ${Thread.currentThread().name}\n${stack.take(2500)}"
+                )
+            }
+        }
     }
 
     private fun startVpn(text: String, startId: Int) {
@@ -1218,11 +1248,36 @@ class WarpVpnService : VpnService() {
             TunnelDebug.stage("выход по приложениям: второго выхода в этой сессии нет — приложения с «Второй выход» идут через WARP")
         }
 
+        // Канал — до data plane и под присмотром (с 1.10.42). С той минуты, как сокет стал «нашим»
+        // (udpSocket = socket выше), его может закрыть closeAll() другого потока: новая смена сети,
+        // «Отключить». Настройка закрытого сокета бросает «Socket is closed», и раньше это роняло
+        // весь процесс туннеля (журнал 24.11, 08:23:22, поток warpscout-net-restart). Теперь
+        // сменённая попытка молча уступает следующей, а несменённая честно сообщает об отказе.
+        val udpChannel = try {
+            SocketUdpChannel(socket, cfg.endpoint, 0)
+        } catch (e: Exception) {
+            synchronized(life) {
+                if (tun === pfd) tun = null
+                if (udpSocket === socket) udpSocket = null
+                if (splitter != null && dispatcher === splitter) dispatcher = null
+            }
+            runCatching { splitter?.stop() }
+            runCatching { secondSock?.close() }
+            runCatching { socket.close() }
+            runCatching { pfd.close() }
+            if (alive()) {
+                fail("сокет закрылся во время подъёма (${e.javaClass.simpleName}: ${e.message?.take(80).orEmpty()})", startId, myEpoch)
+            } else {
+                TunnelDebug.stage("подъём уступил следующей попытке: сокет уже закрыт")
+                abandon()
+            }
+            return
+        }
         val plane = DataPlane(
             // Таймаут приёма 0 — ждать пакет бесконечно. Было 1500 мс: в тишине поток просыпался
             // 40 раз в минуту только чтобы посмотреть на часы, и процесс не уходил в глубокий сон.
             // Остановка и смена сети будят его закрытием сокета, а не таймаутом.
-            udp = SocketUdpChannel(socket, cfg.endpoint, 0),
+            udp = udpChannel,
             tunInput = tunIn,
             tunOutput = primaryOut,
             config = cfg,
@@ -1456,11 +1511,26 @@ class WarpVpnService : VpnService() {
                 // Внутри WARP второму выходу нужен работающий основной туннель: его инициации
                 // идут через WARP. Пока WARP не ответил, они пропали бы впустую.
                 if (inner) {
-                    val primaryUp = runCatching { handshake.await(30, TimeUnit.SECONDS) }.getOrDefault(false)
-                    if (!primaryUp || myEpoch != epoch.get() || stopped.get()) {
+                    // Ждём кусками и бросаем, как только попытку сменили (с 1.10.42). При переборе точек
+                    // каждая сменённая попытка раньше ждала свои 30 с и потом писала «основной туннель
+                    // не поднялся» — уже после «туннель поднят» следующей (журнал 24.11, 09:46:31 и
+                    // 09:46:36), и по журналу выходило, будто второй выход сломан.
+                    val waitUntil = System.currentTimeMillis() + 30_000L
+                    var primaryUp = false
+                    while (!primaryUp && alive() && System.currentTimeMillis() < waitUntil) {
+                        primaryUp = try {
+                            handshake.await(500, TimeUnit.MILLISECONDS)
+                        } catch (e: InterruptedException) {
+                            break
+                        }
+                    }
+                    if (!primaryUp || !alive()) {
                         runCatching { lane2.close() }
-                        TunnelDebug.stage("второй выход не запущен: основной туннель не поднялся")
-                        if (myEpoch == epoch.get()) TunnelState.second = TunnelStatus.SECOND_FAILED
+                        // Сменённой попытке сказать нечего: второй выход поднимет следующая.
+                        if (alive()) {
+                            TunnelDebug.stage("второй выход не запущен: основной туннель не поднялся")
+                            TunnelState.second = TunnelStatus.SECOND_FAILED
+                        }
                         return@Thread
                     }
                 }
@@ -1478,7 +1548,11 @@ class WarpVpnService : VpnService() {
                     val base: UdpChannel?
                     if (attempt == 0) {
                         plan = secondPlan
-                        base = innerChannel ?: secondSock?.let { SocketUdpChannel(it, candCfg.endpoint, 0) }
+                        // Сокет могли закрыть, пока шёл подъём (новая смена сети): тогда канала нет, и
+                        // это обычная неудача сервера, а не падение процесса (с 1.10.42).
+                        base = innerChannel ?: secondSock?.let { sock ->
+                            runCatching { SocketUdpChannel(sock, candCfg.endpoint, 0) }.getOrNull()
+                        }
                     } else {
                         plan = planSecondExit(cfg, candCfg)?.takeIf { !inner || (it.local4 != null && it.remote4 != null) }
                         base = when {
@@ -1497,7 +1571,7 @@ class WarpVpnService : VpnService() {
                                     prev
                                 }
                                 runCatching { old?.close() }
-                                SocketUdpChannel(sock, candCfg.endpoint, 0)
+                                runCatching { SocketUdpChannel(sock, candCfg.endpoint, 0) }.getOrNull()
                             }
                         }
                     }
@@ -3908,7 +3982,7 @@ class WarpVpnService : VpnService() {
             // сети, ручное «Подключить». Тогда подниматься нельзя: два подъёма подряд оставляли два
             // data plane в одном экземпляре (журнал 23:14:01, эпохи 73 и 74).
             if (epoch.get() != myEpoch || destroyed || !wanted) return@Thread
-            startVpn(startText, lastStartId)
+            startVpnSafely(startText, lastStartId)
             // Номер попытки, которую только что запустили. Если он не «наш следующий», подъём
             // перехватили, и решать за чужую попытку этот поток не должен.
             val attemptEpoch = epoch.get()
@@ -4627,6 +4701,15 @@ class WarpVpnService : VpnService() {
             copy
         }
         cycleTried.clear()
+        // Поднялась точка, которая в этом же цикле молчала, — значит, молчала не она, а сеть
+        // (с 1.10.42; то же правило, что у дозора). Журнал 24.11, 09:45:55–09:46:09: четыре точки
+        // подряд не ответили, а через полминуты первая из них подняла туннель за 118 мс. Все четыре
+        // тогда ушли в конец перебора — вместе с рабочей, на которой туннель и стоял.
+        val upNow = currentEndpointLine().orEmpty()
+        if (upNow.isNotEmpty() && silent.contains(upNow)) {
+            TunnelDebug.stage("в этом цикле молчала и точка, что поднялась ($upNow), — молчала сеть, порядок перебора не трогаю")
+            return
+        }
         silent.distinct().forEach { sentryMarkDead(it) }
         if (silent.isNotEmpty()) {
             TunnelDebug.stage("промолчавшие в этом цикле — в конец перебора: ${silent.distinct().joinToString(", ")}")

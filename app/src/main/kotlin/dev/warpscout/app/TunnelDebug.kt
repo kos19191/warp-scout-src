@@ -32,10 +32,14 @@ object TunnelDebug {
      * строки обоих процессов: сервис пишет этапы подъёма и rekey, интерфейс — подбор и ошибки.
      * Дописывание строки — одна запись в конец (O_APPEND), поэтому два процесса не перемешивают
      * половины строк; размер ограничен, старое вытесняется.
+     *
+     * С 1.10.42 — до мегабайта, а при переполнении остаются последние ~640 КБ (около суток). Было
+     * 256 КБ и 120 строк после ротации: журнал 24.11 начинался с 09:40 — ночь на Wi-Fi и поездка
+     * по LTE ушли целиком, хотя разобрать хотели именно их.
      */
     private const val JOURNAL = "tunnel-journal.log"
-    private const val JOURNAL_MAX_BYTES = 256 * 1024
-    private const val JOURNAL_KEEP_LINES = 120
+    private const val JOURNAL_MAX_BYTES = 1024 * 1024
+    private const val JOURNAL_KEEP_BYTES = 640 * 1024
     private const val DUMP_LIMIT_BYTES = 24 * 1024
 
     @Volatile
@@ -171,12 +175,25 @@ object TunnelDebug {
         }
     }
 
-    /** Журнал вырос: оставляем хвост, чтобы файл не рос бесконечно. */
+    /**
+     * Журнал вырос: оставляем хвост — последние [JOURNAL_KEEP_BYTES], с первой целой строки (без
+     * половины строки и половины буквы в начале), чтобы файл не рос бесконечно.
+     */
     private fun rotate(file: File) {
-        val tail = runCatching { file.readLines().takeLast(JOURNAL_KEEP_LINES) }.getOrDefault(emptyList())
+        val tail = runCatching {
+            val length = file.length()
+            val from = (length - JOURNAL_KEEP_BYTES).coerceAtLeast(0L)
+            java.io.RandomAccessFile(file, "r").use { raf ->
+                raf.seek(from)
+                val buffer = ByteArray((length - from).toInt())
+                raf.readFully(buffer)
+                val start = if (from == 0L) 0 else buffer.indexOf('\n'.code.toByte()) + 1
+                buffer.copyOfRange(start.coerceIn(0, buffer.size), buffer.size)
+            }
+        }.getOrDefault(ByteArray(0))
         val tmp = File(file.parentFile, file.name + ".tmp")
         runCatching {
-            tmp.writeText(tail.joinToString("\n", postfix = "\n"))
+            tmp.writeBytes(tail)
             if (!tmp.renameTo(file)) {
                 file.delete()
                 tmp.renameTo(file)
@@ -195,7 +212,7 @@ object TunnelDebug {
     private fun readJournal(): String {
         val file = journal ?: return ""
         // Читаем только хвост файла: журнал открыт на экране и перечитывается часто, а целиком
-        // он может занимать четверть мегабайта — это лишние чтения с флеша на ровном месте.
+        // он может занимать мегабайт — это лишние чтения с флеша на ровном месте.
         val text = runCatching {
             if (!file.exists()) return ""
             val length = file.length()
@@ -247,7 +264,7 @@ object TunnelDebug {
      * Журнал целиком — для выгрузки в файл. В буфер обмена идёт только хвост ([dump], 24 КБ):
      * длинный текст режут и буфер, и мессенджеры, поэтому присланные журналы начинались с
      * середины строки и без начала аварии. Файлу этот предел не нужен: весь журнал — до
-     * четверти мегабайта.
+     * мегабайта (с 1.10.42; раньше — четверть).
      */
     fun fullDump(): String {
         val file = journal
