@@ -117,6 +117,19 @@ object ConfigShortlist {
         return wifi + mobile
     }
 
+    /**
+     * Сколько точек в тексте файла тройки — для «Что внутри копии» (с 1.10.43.1): свежих для Wi-Fi,
+     * свежих для мобильной сети (как в [load]: не старше недели, до трёх на группу) и всего записей.
+     */
+    fun countIn(raw: String, now: Long = System.currentTimeMillis()): Triple<Int, Int, Int> {
+        val all = raw.split(SEPARATOR).mapNotNull { block -> parse(block.trim()) }
+            .filter { it.endpoint.isNotBlank() && it.configText.isNotBlank() }
+        val fresh = all.filter { now - it.savedAt <= MAX_AGE_MS }
+        val wifi = fresh.count { group(it.network) == GROUP_WIFI }.coerceAtMost(MAX)
+        val mobile = fresh.count { group(it.network) == GROUP_MOBILE }.coerceAtMost(MAX)
+        return Triple(wifi, mobile, all.size)
+    }
+
     /** Тройка одной группы сетей ([GROUP_WIFI] или [GROUP_MOBILE]). */
     fun forGroup(context: Context, which: String): List<Entry> =
         load(context).filter { group(it.network) == which }

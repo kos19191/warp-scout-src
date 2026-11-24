@@ -1,5 +1,6 @@
 package dev.warpscout.core.test
 
+import dev.warpscout.core.backup.BackupFormat
 import dev.warpscout.core.config.ConfTarget
 import dev.warpscout.core.config.SplitRoutes
 import dev.warpscout.core.config.WgConf
@@ -206,6 +207,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         }
         section("шум «как Chrome»: первый пакет QUIC целиком (1.10.40)") {
             chromeQuicChecks()
+        }
+        section("резервная копия: всё, а не только основные настройки (1.10.43.1)") {
+            backupFormatChecks()
         }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
@@ -1264,6 +1268,109 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
     private fun section(name: String, block: () -> Unit) {
         println("— $name")
         runCatching(block).onFailure { reportFail("$name: исключение ${it.javaClass.simpleName}: ${it.message}") }
+    }
+
+    /**
+     * 1.10.43.1: резервная копия — всё, а не только основные настройки (24.11: «я загрузил, а там
+     * половины данных нет» — в бете не оказалось троек точек, памяти и списков). Формат должен
+     * переносить настройки, файлы и ключи точно, а старые копии и старые версии — читаться как раньше.
+     */
+    private fun backupFormatChecks() {
+        fun b64(s: String) = java.util.Base64.getEncoder().encodeToString(s.toByteArray())
+        val conf = "[Interface]\nPrivateKey = abc\\def\nAddress = 172.16.0.2/32\n\n[Peer]\nEndpoint = 1.2.3.4:500"
+        val main = linkedMapOf<String, Any?>(
+            "lastConfigText" to conf,
+            "tricky" to "C:\\new\\x",
+            "mtu" to 1280,
+            "lastTunedAt" to 1763900000000L,
+            "secondExitOn" to true,
+            "ratio" to 0.5f,
+            "appsSelected" to setOf("com.zhiliaoapp.musically", "org.telegram.messenger"),
+            "empty" to "",
+        )
+        val files = mapOf(
+            "shortlist.txt" to "endpoint=1.2.3.4:500\nconf=xyz\n---\n".toByteArray(),
+            "allowlists/tiktok.lst" to "tiktok.com\ntiktokv.com\n".toByteArray(),
+            "bin.dat" to ByteArray(256) { it.toByte() },
+        )
+        val data = BackupFormat.Data(
+            main = main,
+            prefs = mapOf("dns-book" to mapOf("ip:dns.google" to "8.8.8.8,8.8.4.4", "at:dns.google" to 5L)),
+            files = files,
+            vault = mapOf("account" to "{\"id\":\"x\",\"token\":\"t\"}\nline2"),
+            notes = linkedMapOf(
+                "reason" to "подключение 8.35.211.1:4233",
+                "at" to "1763900000000",
+                "app" to "dev.warpscout.app.tunnel 1.10.43.1",
+            ),
+        )
+        val text = BackupFormat.render(data)
+        val back = BackupFormat.parse(text)
+        check("копия: заголовок прежний — старые версии её узнают", text.startsWith(BackupFormat.HEADER + "\n") && BackupFormat.isBackup(text))
+        check("копия: формат 2", back?.format == 2, "${back?.format}")
+        check("копия: основные настройки точно (строки, числа, флаги, наборы)", back?.main == main, "${back?.main}")
+        check("копия: «\\n» внутри текста (C:\\new) не становится переводом строки", back?.main?.get("tricky") == "C:\\new\\x")
+        check("копия: другие файлы настроек (dns-book)", back?.prefs?.get("dns-book") == data.prefs["dns-book"], "${back?.prefs}")
+        check(
+            "копия: файлы байт в байт (точки, списки, двоичные)",
+            back != null && back.files.size == files.size && files.all { (k, v) -> back.files[k]?.contentEquals(v) == true },
+            "${back?.files?.keys}"
+        )
+        check("копия: ключ аккаунта", back?.vault == data.vault)
+        check("копия: когда и почему записана", back?.notes?.get("reason") == "подключение 8.35.211.1:4233" && back.notes["at"] == "1763900000000")
+        val crlf = "\uFEFF" + text.replace("\n", "\r\n")
+        val back2 = BackupFormat.parse(crlf)
+        check("копия: BOM и CRLF после облака не мешают", back2?.main == main && back2.files.keys == files.keys)
+        val cr = BackupFormat.parse(BackupFormat.render(BackupFormat.Data(mapOf("c" to "a\r\nb"))))
+        check("копия: CR в значении выбрасывается (как раньше), перевод строки остаётся", cr?.main?.get("c") == "a\nb", "${cr?.main}")
+        val evil = BackupFormat.HEADER + "\n# format: 2\ns:k=v\nfile:../x=" + b64("x") + "\nfile:/etc/x=" + b64("x") +
+            "\nfile:a/../../b=" + b64("x") + "\nfile:ok.txt=" + b64("x") + "\np:../p|s:a=b\nvault:a/b=" + b64("x") + "\n"
+        val ev = BackupFormat.parse(evil)
+        check("копия: пути с «..» и абсолютные отбрасываются", ev?.files?.keys == setOf("ok.txt"), "${ev?.files?.keys}")
+        check("копия: имена настроек и ключей без «/» и «..»", ev?.prefs?.isEmpty() == true && ev.vault.isEmpty() && BackupFormat.safeName("dns-book"))
+        val renderedEvil = BackupFormat.render(BackupFormat.Data(mapOf("k" to "v"), files = mapOf("../x" to byteArrayOf(1), "ok" to byteArrayOf(2))))
+        check("копия: опасный путь не записывается", !renderedEvil.contains("file:../x") && renderedEvil.contains("file:ok="))
+        val old = "# WarpScout backup v1\n# reason: вручную\n# at: 1763900000000\n" +
+            "s:lastConfigText=[Interface]\\nPrivateKey = k\n" +
+            "set:appsSelected=a.b\u0001c\\nd\ni:mtu=1280\nb:secondExitOn=true\n"
+        val ob = BackupFormat.parse(old)
+        check("старая копия: формат 1, настройки читаются", ob?.format == 1 && ob.main["mtu"] == 1280 && ob.main["secondExitOn"] == true, "${ob?.main}")
+        check("старая копия: конфиг с переводами строк", ob?.main?.get("lastConfigText") == "[Interface]\nPrivateKey = k")
+        check("старая копия: элементы наборов как есть", ob?.main?.get("appsSelected") == setOf("a.b", "c\\nd"), "${ob?.main?.get("appsSelected")}")
+        check("старая копия: файлов и ключей в ней нет", ob?.files?.isEmpty() == true && ob.vault.isEmpty())
+        val legacy = legacyBackupParse(text)
+        check(
+            "новая копия в старой версии: основные настройки на месте",
+            legacy?.get("mtu") == 1280 && legacy["lastConfigText"] == conf && legacy["appsSelected"] == main["appsSelected"] &&
+                legacy["secondExitOn"] == true,
+            "${legacy?.get("lastConfigText")}"
+        )
+        check("новая копия в старой версии: чужих ключей нет", legacy?.keys == main.keys, "${legacy?.keys}")
+        check("не копия — null", BackupFormat.parse("[Interface]\nPrivateKey = x") == null && !BackupFormat.isBackup("hello"))
+    }
+
+    /** Разбор копии, как в 1.10.40–1.10.43 (прежний Backup.parse): так старая версия прочтёт новую копию. */
+    private fun legacyBackupParse(text: String): Map<String, Any?>? {
+        val lines = text.removePrefix("\uFEFF").lines().map { it.removeSuffix("\r") }
+        if (lines.firstOrNull()?.trim() != "# WarpScout backup v1") return null
+        val values = LinkedHashMap<String, Any?>()
+        lines.drop(1).forEach { line ->
+            if (line.isBlank() || line.startsWith("#")) return@forEach
+            val type = line.substringBefore(':', "")
+            val body = line.substringAfter(':', "")
+            val key = body.substringBefore('=', "")
+            val raw = body.substringAfter('=', "")
+            if (key.isEmpty()) return@forEach
+            when (type) {
+                "s" -> values[key] = raw.replace("\\n", "\n").replace("\\\\", "\\")
+                "i" -> raw.toIntOrNull()?.let { values[key] = it }
+                "l" -> raw.toLongOrNull()?.let { values[key] = it }
+                "b" -> values[key] = raw.toBoolean()
+                "f" -> raw.toFloatOrNull()?.let { values[key] = it }
+                "set" -> values[key] = raw.split('\u0001').filter { it.isNotEmpty() }.toSet()
+            }
+        }
+        return values
     }
 
     private fun check(name: String, condition: Boolean, detail: String = "") {
