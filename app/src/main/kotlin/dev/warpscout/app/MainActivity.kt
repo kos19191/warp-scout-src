@@ -148,6 +148,28 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         }
     }
 
+    /** Копия, которую человек сохраняет через окно «Сохранить как» (см. [exportBackupAs]). */
+    private var pendingBackupExport: File? = null
+
+    /**
+     * «Сохранить как» для резервной копии (с 1.10.43.1) — когда в «Загрузки/WarpScout» записать не
+     * вышло: Android 8–9 без разрешения на память или прошивка не дала записать. Место выбирает
+     * человек, окно открывается в «Загрузках».
+     */
+    private val createBackupDoc = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val uri = result.data?.data
+        val file = pendingBackupExport ?: Backup.newest(this)
+        pendingBackupExport = null
+        if (result.resultCode == android.app.Activity.RESULT_OK && uri != null && file != null && ::binding.isInitialized) {
+            runCatching { writeBackupTo(uri, file) }.onFailure { t ->
+                TunnelDebug.error("бекап: «Сохранить как» — " + SafeMode.describe(t))
+                banner(getString(R.string.backup_export_fail, SafeMode.describe(t)), error = true)
+            }
+        }
+    }
+
     /** Одна строка списка приложений: только то, что нужно для показа и сохранения. */
     private data class AppEntry(val pkg: String, val label: String, val system: Boolean)
     private var selectedTab = 0
@@ -2038,22 +2060,9 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         }
 
         binding.btnBackup.setOnClickListener {
-            persistUi()
-            val file = Backup.save(this, getString(R.string.backup_note_manual))
-            if (file == null) {
-                toast(getString(R.string.backup_failed))
-                return@setOnClickListener
-            }
-            toast(getString(R.string.backup_saved, file.name))
-            // Отдать файл наружу: «Сохранить в Drive», «Отправить в Telegram» — что угодно.
-            runCatching {
-                val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
-                val send = Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_STREAM, uri)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-                startActivity(Intent.createChooser(send, getString(R.string.backup_share_title)))
+            runCatching { saveBackupForUser() }.onFailure { t ->
+                TunnelDebug.error("бекап: сохранение — " + SafeMode.describe(t))
+                banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
             }
         }
 
@@ -2468,7 +2477,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
 
     private fun showResult(result: TuningResult) {
         showPage(TAB_START)
-        runCatching { Backup.save(this, getString(R.string.backup_note_tuned, result.best?.endpoint?.render().orEmpty())) }
+        runCatching { Backup.saveAsync(this, getString(R.string.backup_note_tuned, result.best?.endpoint?.render().orEmpty())) }
         binding.textStatus.setText(R.string.status_done)
         val took = humanDuration(System.currentTimeMillis() - runStartedAt)
         val hhmm = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
@@ -3852,7 +3861,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                         banner(getString(R.string.banner_connect_ok, used.endpoint.render()))
                     }
                     // Бекап «на всякий случай»: после каждого удачного подключения, молча.
-                    runCatching { Backup.save(this, getString(R.string.backup_note_connected, used.endpoint.render())) }
+                    runCatching { Backup.saveAsync(this, getString(R.string.backup_note_connected, used.endpoint.render())) }
                     // Ручное подключение тоже наполняет кеш: следующая «Подбор» начнётся с этой точки.
                     runCatching { TuningCache.save(this, used.endpoint, used.junk.name) }
                     probeExitRegion()
@@ -5301,33 +5310,155 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     // ------------------------------------------------ бекап: восстановление (с 1.10.40)
 
     /**
-     * «Восстановить из копии». Есть копия в приложении — спрашиваем про неё, рядом «Выбрать файл…»
-     * (может быть нужна другая, например с прошлого телефона). Нет — а после переустановки её нет
-     * всегда — сразу открываем выбор файла, а не пишем «Бекапов пока нет» и всё.
+     * «Восстановить из копии». Есть копии — список: последняя копия этого приложения, последняя в
+     * «Загрузках/WarpScout» и «Выбрать файл…» (копия обычного приложения для беты, с прошлого телефона).
+     * Нет — а после переустановки их нет всегда — сразу открываем выбор файла, а не пишем «Бекапов пока
+     * нет» и всё.
      */
     private fun restoreFromBackup() {
-        val file = Backup.newest(this)
-        if (file == null) {
+        val inApp = Backup.newest(this)
+        val inDownloads = Backup.downloads(this).firstOrNull()?.takeIf { it.name != inApp?.name }
+        if (inApp == null && inDownloads == null) {
             toast(getString(R.string.backup_none))
             openBackupPicker()
             return
         }
-        val details = runCatching { Backup.describe(file.readText()) }.getOrNull()
-        confirmRestore(file.name, details, pickOther = true) { Backup.restore(this, file) }
+        // Что можно восстановить: последняя копия этого приложения, последняя из «Загрузок/WarpScout»
+        // (если она другая) и любой файл. В бете своя копия появляется после первого же подключения —
+        // раньше «Восстановить из копии» сразу предлагала её, и копию из обычного приложения легко было
+        // не заметить за кнопкой «Выбрать файл…».
+        val titles = ArrayList<String>()
+        val actions = ArrayList<() -> Unit>()
+        if (inApp != null) {
+            val details = runCatching { Backup.describe(inApp.readText()) }.getOrNull() ?: inApp.name
+            titles += getString(R.string.backup_choice_app, details)
+            actions += {
+                val text = inApp.readText()
+                confirmRestore(inApp.name, text, pickOther = false) { Backup.restoreText(this, text) }
+            }
+        }
+        if (inDownloads != null) {
+            val date = java.text.SimpleDateFormat("dd.MM.yyyy HH:mm", java.util.Locale.getDefault()).format(java.util.Date(inDownloads.modifiedMs))
+            titles += getString(R.string.backup_choice_downloads, Backup.FOLDER, date)
+            actions += { loadBackupFile(inDownloads.uri, inDownloads.name) }
+        }
+        titles += getString(R.string.backup_choice_file, Backup.FOLDER)
+        actions += { openBackupPicker() }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(R.string.backup_choice_title)
+            .setItems(titles.toTypedArray()) { _, which ->
+                runCatching { actions[which]() }.onFailure { t ->
+                    TunnelDebug.error("бекап: " + SafeMode.describe(t))
+                    banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
-    /** Системное окно выбора файла — сразу в «Загрузках», куда копию обычно и сохраняют. */
+    /**
+     * «Сохранить резервную копию» (с 1.10.43.1): копия — в приложении и в «Загрузках/WarpScout», откуда
+     * её откроет «Восстановить из копии» → «Выбрать файл…» — и в бете, и после переустановки. До
+     * 1.10.43.1 кнопка только открывала «Поделиться»: копия оказывалась там, куда её отправили, а в ней
+     * были только основные настройки (24.11: «я загрузил, а там половины данных нет»).
+     */
+    private fun saveBackupForUser() {
+        persistUi()
+        val file = Backup.save(this, getString(R.string.backup_note_manual))
+        if (file == null) {
+            toast(getString(R.string.backup_failed))
+            return
+        }
+        val where = Backup.saveToDownloads(this, file)
+        if (where == null) {
+            TunnelDebug.stage("бекап: в «Загрузки» не записался — предлагаю «Сохранить как»")
+            exportBackupAs(file)
+            return
+        }
+        TunnelDebug.stage("бекап: сохранён — $where, ${file.length() / 1024} КБ")
+        showBackupSaved(file, where)
+    }
+
+    /** Окно «Сохранить как» (сразу в «Загрузках»); его нет — остаётся «Поделиться». */
+    private fun exportBackupAs(file: File) {
+        pendingBackupExport = file
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = Backup.MIME
+            putExtra(Intent.EXTRA_TITLE, file.name)
+            putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI, backupFolderUri())
+        }
+        if (runCatching { createBackupDoc.launch(intent) }.isFailure) {
+            pendingBackupExport = null
+            TunnelDebug.error("бекап: окно «Сохранить как» не открылось — отдаю через «Поделиться»")
+            shareBackup(file)
+        }
+    }
+
+    /** Записать копию в место, выбранное в окне «Сохранить как». В своём потоке: это может быть Диск. */
+    private fun writeBackupTo(uri: Uri, file: File) {
+        Thread {
+            val written = runCatching {
+                contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } } != null
+            }
+            val where = displayName(uri) ?: file.name
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (written.getOrDefault(false)) {
+                    TunnelDebug.stage("бекап: сохранён через «Сохранить как» — $where")
+                    runCatching { showBackupSaved(file, where) }
+                } else {
+                    val why = written.exceptionOrNull()?.let { SafeMode.describe(it) } ?: "файл не открылся"
+                    TunnelDebug.error("бекап: «Сохранить как» — $why")
+                    banner(getString(R.string.backup_export_fail, why), error = true)
+                }
+            }
+        }.apply { isDaemon = true; name = "warpscout-backup-export" }.start()
+    }
+
+    /** «Копия сохранена»: где лежит, что внутри и как восстановить; отправить — по кнопке. */
+    private fun showBackupSaved(file: File, where: String) {
+        val inside = runCatching { Backup.contents(this, file.readText()) }.getOrNull().orEmpty()
+        banner(getString(R.string.backup_saved_where, where))
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(R.string.backup_saved_title)
+            .setMessage(getString(R.string.backup_saved_message, where, inside, Backup.FOLDER))
+            .setPositiveButton(android.R.string.ok, null)
+            .setNeutralButton(R.string.backup_share) { _, _ -> shareBackup(file) }
+            .show()
+    }
+
+    /** Отдать копию наружу: Диск, Telegram — что угодно. */
+    private fun shareBackup(file: File) {
+        runCatching {
+            val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(send, getString(R.string.backup_share_title)))
+        }.onFailure { toast(getString(R.string.share_failed)) }
+    }
+
+    /** Папка копий для окон выбора: «Загрузки/WarpScout», если она уже есть, иначе «Загрузки». */
+    private fun backupFolderUri(): Uri = android.provider.DocumentsContract.buildDocumentUri(
+        "com.android.externalstorage.documents",
+        if (Backup.downloadsFolderExists()) "primary:Download/${Backup.FOLDER}" else "primary:Download"
+    )
+
+    /**
+     * Системное окно выбора файла — сразу в «Загрузках/WarpScout», куда копию кладёт «Сохранить
+     * резервную копию» (с 1.10.43.1; папки ещё нет — в «Загрузках»). Через «Внутреннюю память», а не
+     * через «Загрузки» окна: файл, записанный другим приложением (обычным WarpScout для беты), Samsung
+     * оттуда не отдаёт (журнал 23.11, см. [offerOtherPicker]).
+     */
     private fun openBackupPicker() {
         // Тип у .bak бывает любой (text/plain, application/octet-stream) — показываем все файлы.
         val open = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
-            putExtra(
-                android.provider.DocumentsContract.EXTRA_INITIAL_URI,
-                android.provider.DocumentsContract.buildDocumentUri(
-                    "com.android.externalstorage.documents", "primary:Download"
-                )
-            )
+            putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI, backupFolderUri())
         }
         // Прошивка без системного окна документов — тогда любое приложение, которое отдаёт файлы.
         val get = Intent(Intent.ACTION_GET_CONTENT).apply {
@@ -5348,9 +5479,9 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
      * что это наш файл (первая строка — заголовок бекапа), и показываем, когда и почему он записан;
      * применяем — только после «Восстановить».
      */
-    private fun loadBackupFile(uri: Uri) {
+    private fun loadBackupFile(uri: Uri, knownName: String? = null) {
         Thread {
-            val fileName = displayName(uri) ?: uri.lastPathSegment ?: "файл"
+            val fileName = knownName ?: displayName(uri) ?: uri.lastPathSegment ?: "файл"
             val read = runCatching { readBackupBytes(uri) }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
@@ -5398,7 +5529,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         }
         val details = Backup.describe(text)
         TunnelDebug.stage("бекап: выбран файл «$fileName»" + (details?.let { " ($it)" } ?: ""))
-        confirmRestore(fileName, details, pickOther = false) { Backup.restoreText(this, text) }
+        confirmRestore(fileName, text, pickOther = false) { Backup.restoreText(this, text) }
     }
 
     /**
@@ -5436,14 +5567,17 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     }.getOrNull()
 
     /**
-     * Вопрос «Восстановить настройки?»: имя файла и, если есть, когда и почему он записан. [pickOther] —
-     * кнопка «Выбрать файл…» рядом с копией из приложения.
+     * Вопрос «Восстановить настройки?»: имя файла, когда и почему он записан и что внутри (точки,
+     * второй выход, приложения — с 1.10.43.1). [pickOther] — кнопка «Выбрать файл…».
      */
-    private fun confirmRestore(name: String, details: String?, pickOther: Boolean, doRestore: () -> Int) {
+    private fun confirmRestore(name: String, text: String, pickOther: Boolean, doRestore: () -> Backup.Result?) {
+        val details = runCatching { Backup.describe(text) }.getOrNull()
+        val inside = runCatching { Backup.contents(this, text) }.getOrNull()
         val label = "«$name»" + (details?.let { " ($it)" } ?: "")
+        val message = getString(R.string.backup_restore_message, label) + (inside?.let { "\n\n$it" } ?: "")
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle(R.string.backup_restore_title)
-            .setMessage(getString(R.string.backup_restore_message, label))
+            .setMessage(message)
             .setPositiveButton(R.string.backup_restore_ok) { _, _ ->
                 runCatching { applyRestore(name, doRestore) }.onFailure { t ->
                     TunnelDebug.error("бекап: восстановление — " + SafeMode.describe(t))
@@ -5457,14 +5591,22 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         dialog.show()
     }
 
-    private fun applyRestore(name: String, doRestore: () -> Int) {
-        val applied = doRestore()
-        if (applied <= 0) {
-            toast(getString(R.string.backup_failed))
+    private fun applyRestore(name: String, doRestore: () -> Backup.Result?) {
+        val result = doRestore()
+        if (result == null) {
+            TunnelDebug.error("бекап: «$name» не восстановился")
+            banner(getString(R.string.backup_restore_failed, name), error = true)
             return
         }
-        TunnelDebug.stage("бекап: восстановлено из «$name» — настроек $applied")
-        toast(getString(R.string.backup_restored, name, applied))
+        val old = result.format < 2
+        TunnelDebug.stage(
+            "бекап: восстановлено из «$name» — ${result.text()}" +
+                if (old) " (копия старого формата: только основные настройки)" else ""
+        )
+        banner(
+            getString(if (old) R.string.backup_restored_old else R.string.backup_restored, name, result.text()),
+            error = old
+        )
         suppressSettingsReconnect = true
         runCatching { fillFromPrefs() }
         suppressSettingsReconnect = false
@@ -5476,6 +5618,12 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         runCatching { rebuildAppsList() }
         runCatching { refreshRoutesState() }
         runCatching { updateEndpointNote() }
+        // Тройки точек, резервная точка и ключи — из восстановленных файлов (с 1.10.43.1).
+        runCatching { renderShortlist() }
+        runCatching { showKeys() }
+        runCatching { renderAppAuto() }
+        runCatching { updateTunnelSummary() }
+        runCatching { updateSimple() }
     }
 
     // ------------------------------------------------ приложения (упрощённый экран)
@@ -6232,8 +6380,11 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         /** Сколько приложений рисуем сразу: остальные — через поиск (иначе экран «залипает»). */
         const val APP_ROWS_LIMIT = 60
 
-        /** Бекап из выбранного файла — не больше 4 МБ: настоящий весит десятки килобайт (с 1.10.40). */
-        const val BACKUP_FILE_LIMIT = 4 * 1024 * 1024
+        /**
+         * Бекап из выбранного файла — не больше 8 МБ (с 1.10.40; с 1.10.43.1 в копии ещё точки, память и
+         * списки — обычно сотни килобайт, файлы в неё берутся не больше чем на 4 МБ).
+         */
+        const val BACKUP_FILE_LIMIT = 8 * 1024 * 1024
         const val STATE_TAB = "warpscout.tab"
 
         /** Пауза между переездом ползунка «Расширенный режим» и сменой вида. */
