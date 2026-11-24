@@ -61,6 +61,7 @@ import dev.warpscout.core.tunnel.ExitNat
 import dev.warpscout.core.tunnel.Icmp6Reject
 import dev.warpscout.core.tunnel.InnerUdpChannel
 import dev.warpscout.core.tunnel.PacketMath
+import dev.warpscout.core.tunnel.AppAuto
 import dev.warpscout.core.presets.Presets
 import dev.warpscout.core.model.ResourceResult
 
@@ -193,6 +194,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         }
         section("выход по приложениям: «Само» / «Всегда WARP» / «Второй выход» (1.10.39)") {
             appExitChecks()
+        }
+        section("автовыбор выхода для приложений и приложения по точкам (1.10.43)") {
+            appAutoChecks()
         }
         section("обновления: GitHub через туннель, вставшая загрузка, докачка (1.10.40)") {
             updateDownloadChecks()
@@ -649,6 +653,207 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
      * приложения и отключать второй канал для них» — Telegram через второй выход не грузил медиа, а
      * убрать его оттуда можно было, только выключив второй выход целиком.
      */
+    private fun appAutoChecks() {
+        val a = dev.warpscout.core.tunnel.AppAuto
+        val e = dev.warpscout.core.tunnel.AppExit
+        fun m(ok: Boolean, kbps: Int = -1, ms: Long = 500, unknown: Boolean = false) = AppAuto.Measure(ok, kbps, ms, unknown = unknown)
+
+        // Решение: открывается одним путём — им; обоими — WARP, второй выход — только если заметно лучше.
+        expect("автовыбор: через WARP открывается, через второй нет — WARP", a.decide(m(true), m(false), e.AUTO), e.AUTO)
+        expect("автовыбор: через WARP не открывается, через второй да — второй выход", a.decide(m(false), m(true), e.AUTO), e.SECOND)
+        expect("автовыбор: не открывается никак — как обычно", a.decide(m(false), m(false), e.SECOND), e.AUTO)
+        expect("автовыбор: замер не показателен — как было", a.decide(m(false, unknown = true), m(true), e.SECOND), e.SECOND)
+        expect("автовыбор: оба открылись, второй втрое быстрее — второй выход", a.decide(m(true, 1_000), m(true, 3_000), e.AUTO), e.SECOND)
+        expect("автовыбор: оба открылись, второй в полтора раза быстрее — WARP", a.decide(m(true, 2_000), m(true, 3_000), e.AUTO), e.AUTO)
+        expect("автовыбор: вдвое быстрее, но разница меньше мегабита — WARP", a.decide(m(true, 400), m(true, 900), e.AUTO), e.AUTO)
+        expect("автовыбор: был второй, WARP догнал (90 %) — WARP", a.decide(m(true, 2_700), m(true, 3_000), e.SECOND), e.AUTO)
+        expect("автовыбор: был второй, WARP на 60 % — остаётся второй", a.decide(m(true, 1_800), m(true, 3_000), e.SECOND), e.SECOND)
+        expect("автовыбор: по времени — WARP 3 с, второй 1 с — второй выход", a.decide(m(true, ms = 3_000), m(true, ms = 1_000), e.AUTO), e.SECOND)
+        expect("автовыбор: по времени — 1,2 с против 0,8 с — WARP", a.decide(m(true, ms = 1_200), m(true, ms = 800), e.AUTO), e.AUTO)
+        check("автовыбор: Telegram не трогаем — у него своя проверка медиа", !a.covers("Telegram") && a.covers("Instagram") && !a.covers("Нечто"))
+        check(
+            "автовыбор: замеры названы как сервисы в AppServices",
+            a.PROBES.all { p -> dev.warpscout.core.lists.AppServices.SERVICES.any { it.title == p.service } }
+        )
+        expect("настройки сервиса: автовыбор переживает JSON", ServiceSettings.fromJson(ServiceSettings(appAuto = true).toJson())?.appAuto, true)
+        expect("настройки сервиса: старый снимок — автовыбор выключен", ServiceSettings.fromJson("{}")?.appAuto, false)
+
+        // Итог для экрана: файл между процессами.
+        val st = AppAuto.Status(
+            1_700_000_000_000L, "DME", "второй выход (США)",
+            listOf(
+                AppAuto.Row(
+                    "Instagram", e.SECOND, AppAuto.Measure(false, -1, 6_000, "HTTP 403|блок"),
+                    AppAuto.Measure(true, 640, 900, "96 КБ"), "через WARP не открывается"
+                )
+            )
+        )
+        val back = AppAuto.Status.decode(st.encode())
+        check(
+            "итог автовыбора: файл читается обратно",
+            back != null && back.rows.size == 1 && back.rows[0].exit == e.SECOND && back.rows[0].second.kbps == 640 &&
+                back.site == "DME" && back.rows[0].warp.note == "HTTP 403/блок",
+            back.toString()
+        )
+        check("итог автовыбора: чужой файл — null", AppAuto.Status.decode("мусор") == null && AppAuto.Status.decode("") == null)
+        val lines = a.statusLines(st)
+        check(
+            "итог автовыбора: словами",
+            lines.first().contains("WARP через Москву") && lines.any { it.startsWith("Instagram: WARP ✗") && it.contains("→ второй выход") },
+            lines.toString()
+        )
+
+        // Замер: свой сокет, перенаправления, отказ по стране, «мимо туннеля», вставшие данные.
+        val plain = AppAuto.Opener { ip, _, port, timeoutMs ->
+            java.net.Socket().apply { connect(java.net.InetSocketAddress(ip, port), timeoutMs) }
+        }
+        val local: (String) -> List<String> = { listOf("127.0.0.1") }
+        val page = ByteArray(64 * 1024) { 'a'.code.toByte() }
+        val server = HttpLoopback { path, _, out ->
+            when (path) {
+                "/page" -> {
+                    out.write("HTTP/1.1 200 OK\r\nContent-Length: ${page.size}\r\n\r\n".toByteArray())
+                    out.write(page)
+                }
+                "/go" -> out.write("HTTP/1.1 302 Found\r\nLocation: /page\r\nContent-Length: 0\r\n\r\n".toByteArray())
+                "/deny" -> out.write("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".toByteArray())
+                "/trace-ru" -> out.write("HTTP/1.1 200 OK\r\n\r\nfl=1\nloc=RU\ntls=TLSv1.3\n".toByteArray())
+                "/trace-nl" -> out.write("HTTP/1.1 200 OK\r\n\r\nfl=1\nloc=NL\n".toByteArray())
+                "/stall" -> {
+                    out.write("HTTP/1.1 200 OK\r\nContent-Length: 98304\r\n\r\n".toByteArray())
+                    out.write(ByteArray(8_000))
+                    out.flush()
+                    Thread.sleep(1_200)
+                }
+                else -> out.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".toByteArray())
+            }
+        }
+        try {
+            val base = "http://svc.test:${server.port}"
+            fun get(
+                path: String,
+                blocked: Set<String> = emptySet(),
+                inTunnel: (String) -> Boolean = { true },
+                resolve: (String) -> List<String> = local,
+                read: Int = 3_000,
+            ) = a.fetch(AppAuto.Probe("Тест", base + path, blocked), resolve = resolve, inTunnel = inTunnel, opener = plain, readTimeoutMs = read)
+            val ok = get("/page")
+            check("замер: страница 64 КБ — открылась, скорость посчитана", ok.ok && ok.kbps > 0 && !ok.unknown, ok.toString())
+            val moved = get("/go")
+            check("замер: перенаправление проходим сами", moved.ok && moved.kbps > 0, moved.toString())
+            val deny = get("/deny")
+            check("замер: 403 — не открылась", !deny.ok && !deny.unknown && deny.note.contains("403"), deny.toString())
+            val ru = get("/trace-ru", setOf("RU"))
+            check("замер: страна из списка отказа — не открылась", !ru.ok && !ru.unknown && ru.note.contains("RU"), ru.toString())
+            val nl = get("/trace-nl", setOf("RU"))
+            check("замер: страна вне списка — открылась", nl.ok && nl.note.contains("NL"), nl.toString())
+            val outside = get("/page", inTunnel = { false })
+            check("замер: адрес мимо туннеля — не показателен", outside.unknown && !outside.ok, outside.toString())
+            val noName = get("/page", resolve = { emptyList() })
+            check("замер: имя не разрешилось — не показателен", noName.unknown, noName.toString())
+            val stall = get("/stall", read = 300)
+            check("замер: данные встали посреди ответа — не открылась", !stall.ok && !stall.unknown, stall.toString())
+        } finally {
+            server.close()
+        }
+
+        // Автоправила таблицы: только новые соединения, только IPv4; снятое правило — доживание.
+        val insta = 10400
+        val other = 10500
+        var asked = 0
+        var now = 1_000_000L
+        val whose = HashMap<Int, Int>()
+        val t = dev.warpscout.core.tunnel.AppExitTable(
+            emptyMap(), owner = { _, local, _ -> asked++; whose[local.port] ?: -1 }, clock = { now }
+        )
+        fun syn(sport: Int, dst: String) = tcpSyn4("172.16.0.2", dst, 1360).also { PacketMath.put16(it, 20, sport) }
+        listOf(41000, 41001, 41002, 41003, 41004, 40001).forEach { whose[it] = insta }
+        whose[42000] = other
+        val early = syn(41000, "157.240.1.174")
+        expect("автоправила: пока их нет — по адресу и без вопросов системе", t.decide(early, early.size, 0) to asked, 0 to 0)
+        t.setAuto(mapOf(insta to e.SECOND))
+        check("автоправила: таблица не пустая", !t.isEmpty)
+        val fresh = syn(41001, "157.240.1.174")
+        expect("автоправила: новое соединение Instagram — во второй выход", t.decide(fresh, fresh.size, 0), 1)
+        val running = syn(41002, "157.240.1.175").also { it[33] = 0x10 }
+        expect("автоправила: уже идущее соединение TCP — остаётся, где было", t.decide(running, running.size, 0), 0)
+        val quic = udp4("172.16.0.2", 41003, "157.240.1.176", 443, ByteArray(4))
+        expect("автоправила: QUIC (UDP) — во второй выход", t.decide(quic, quic.size, 0), 1)
+        val v6 = tcpSyn6("2606:4700:110::2", "2a03:2880::1")
+        expect("автоправила: IPv6 — по адресу", t.decide(v6, v6.size, 0), 0)
+        val o = syn(42000, "8.8.8.8")
+        expect("автоправила: другое приложение — по адресу", t.decide(o, o.size, 0), 0)
+        val manual = dev.warpscout.core.tunnel.AppExitTable(mapOf(insta to e.WARP), owner = { _, local, _ -> whose[local.port] ?: -1 })
+        manual.setAuto(mapOf(insta to e.SECOND))
+        check("автоправила: при ручном «Всегда WARP» не действуют", manual.autoRules().isEmpty())
+        t.setAuto(emptyMap())
+        expect("снятое правило: открытое по нему соединение доживает на втором выходе", t.decide(fresh, fresh.size, 0), 1)
+        val after = syn(41004, "157.240.1.177")
+        expect("снятое правило: новое соединение — по адресу", t.decide(after, after.size, 0), 0)
+        now += dev.warpscout.core.tunnel.AppExitTable.LINGER_MS + 1
+        val askedBefore = asked
+        expect("снятое правило: через 10 минут — по адресу и без вопросов", t.decide(fresh, fresh.size, 0) to asked, 0 to askedBefore)
+
+        // Диспетчер: соединение замера закреплено за выходом, приложение к тому же адресу — по адресу.
+        val q = ArrayDeque(listOf(syn(43000, "157.240.1.174"), syn(43001, "157.240.1.174")))
+        val tunIn = object : java.io.InputStream() {
+            override fun read(): Int = -1
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                val p = q.removeFirstOrNull() ?: return -1
+                System.arraycopy(p, 0, b, off, p.size)
+                return p.size
+            }
+        }
+        val disp = dev.warpscout.core.tunnel.TunDispatcher(tunIn, ExitRouter.EMPTY, listOf(PacketQueueIn("основной"), PacketQueueIn("второй")))
+        disp.pin(43000, "157.240.1.174", 443, 1)
+        disp.run()
+        expect("замер: своё соединение — во второй выход, чужое к тому же адресу — по адресу", disp.sentSecondary to disp.sentPrimary, 1L to 1L)
+        disp.unpin(43000, "157.240.1.174", 443)
+
+        // Шаг 1: приложения по точкам.
+        fun cand(host: String, site: String?, vararg res: Pair<String, Pair<Boolean, Long>>): Candidate {
+            val cfg = WarpConfig(
+                name = "тест",
+                account = WarpAccount("a=", "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=", "172.16.0.2", "2606::1"),
+                endpoint = Endpoint(host, 2408),
+                junk = JunkLibrary.tlsFixed(),
+                allowedIps = "0.0.0.0/0, ::/0"
+            )
+            val es = EndpointStats(cfg.endpoint, emptyList(), Verdict.HANDSHAKE_OK, 1, 1)
+            val results = res.map { (id, r) ->
+                dev.warpscout.core.model.ResourceResult(ResourceCheck(id, "https://$id.test/", id = id), r.first, elapsedMs = r.second)
+            }
+            val ok = results.count { it.ok }
+            return Candidate(cfg, es, Scoring.evaluate(es, true, ok, results.size, site = site), emptyList(), ok, results.size, 10_000, results, site)
+        }
+        val p1 = cand("1.1.1.1", "DME", "youtube" to (true to 400L), "instagram" to (false to 6_000L), "x" to (true to 300L))
+        val p2 = cand("2.2.2.2", "DME", "youtube" to (true to 450L), "instagram" to (true to 900L), "x" to (true to 320L))
+        val p3 = cand("3.3.3.3", "HEL", "youtube" to (true to 2_400L), "instagram" to (true to 950L), "x" to (true to 310L))
+        val report = dev.warpscout.core.model.TuningReport("s", "f", "тест", listOf(p1, p2, p3), emptyList(), 3)
+        val (pts, rows) = a.byPoint(report)
+        expect("по точкам: три проверенные точки", pts.size, 3)
+        val yt = rows.first { it.service == "youtube" }
+        check("по точкам: YouTube — лучше ① и ② (через ③ 2,4 с)", yt.best == listOf(0, 1) && !yt.same, yt.toString())
+        val ig = rows.first { it.service == "instagram" }
+        check("по точкам: Instagram — ② и ③, через ① не открылся", ig.best == listOf(1, 2) && !ig.same, ig.toString())
+        val xx = rows.first { it.service == "x" }
+        check("по точкам: X — одинаково (разница меньше разброса)", xx.same && xx.best.size == 3, xx.toString())
+        val text = a.byPointText(report)
+        check(
+            "по точкам: раздел отчёта",
+            text.contains("Приложения по точкам") && text.contains("≈ одинаково") && text.contains("лучше ②, ③") && text.contains("Итог: разница есть"),
+            text
+        )
+        val lone = dev.warpscout.core.model.TuningReport("s", "f", "тест", listOf(p1), emptyList(), 1)
+        check("по точкам: одна точка — сравнивать не с чем", a.byPointText(lone).contains("одна точка"))
+        val flat = dev.warpscout.core.model.TuningReport(
+            "s", "f", "тест", listOf(cand("4.4.4.4", "DME", "x" to (true to 300L)), cand("5.5.5.5", "DME", "x" to (true to 420L))), emptyList(), 2
+        )
+        check("по точкам: разницы нет — так и пишем", a.byPointText(flat).contains("разницы между точками нет"))
+        val withSecond = a.byPointText(report, st, 1_700_000_000_000L + 60_000L)
+        check("по точкам: свежий замер второго выхода — строкой", withSecond.contains("второй выход (США)") && withSecond.contains("Instagram ✓"), withSecond)
+    }
+
     private fun appExitChecks() {
         val e = dev.warpscout.core.tunnel.AppExit
         // Снимок: «пакет|правило», «Само» не хранится.

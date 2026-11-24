@@ -41,6 +41,7 @@ import dev.warpscout.core.net.TelegramMedia
 import dev.warpscout.core.net.UdpSocketFactory
 import dev.warpscout.core.net.WarpDefaults
 import dev.warpscout.core.net.WgProber
+import dev.warpscout.core.state.ServiceSettings
 import dev.warpscout.core.state.TunnelStatus
 import dev.warpscout.core.tune.NoiseBook
 import dev.warpscout.core.tunnel.DataGate
@@ -52,6 +53,7 @@ import dev.warpscout.core.tunnel.TunDispatcher
 import dev.warpscout.core.tunnel.SocketUdpChannel
 import dev.warpscout.core.tunnel.AppExit
 import dev.warpscout.core.tunnel.AppExitTable
+import dev.warpscout.core.tunnel.AppAuto
 import dev.warpscout.core.tunnel.AwgChannel
 import dev.warpscout.core.tunnel.ExitNat
 import dev.warpscout.core.tunnel.InnerUdpChannel
@@ -1237,7 +1239,7 @@ class WarpVpnService : VpnService() {
         }
         if (splitter != null) {
             // Выход по приложениям (с 1.10.39): правило приложения перекрывает решение по адресу.
-            splitter.appExits = runCatching { buildAppExits(exitRules) }
+            splitter.appExits = runCatching { buildAppExits(exitRules, auto = !quietSession && serviceSettings().appAuto) }
                 .onFailure { TunnelDebug.stage("выход по приложениям: не включился (${it.javaClass.simpleName}) — у всех «Само»") }
                 .getOrNull()
             this.dispatcher = splitter
@@ -2021,6 +2023,10 @@ class WarpVpnService : VpnService() {
                 ) {
                     runCatching { checkTelegramMedia(myEpoch, site) }
                 }
+                // Автовыбор выхода для приложений (эксперимент, с 1.10.43): замер — в своём потоке.
+                if (!quietSession && result.web == TunnelStatus.LINK_OK && linkAlive(myEpoch)) {
+                    runCatching { appAutoAfterLink(myEpoch, site) }
+                }
                 if (!linkAlive(myEpoch)) return@Thread
                 val settings = serviceSettings()
                 if (result.web == TunnelStatus.LINK_FAIL && reconnectOnFail && wanted && linkAlive(myEpoch) && quietSession) {
@@ -2156,12 +2162,16 @@ class WarpVpnService : VpnService() {
     /**
      * Таблица выхода по приложениям на эту сессию (см. AppExitTable): пакеты → uid установленных
      * приложений. null — правил нет или Android старше 10: владельца соединения система сообщает VPN
-     * только с Android 10 (ConnectivityManager.getConnectionOwnerUid).
+     * только с Android 10 (ConnectivityManager.getConnectionOwnerUid). [auto] — включён автовыбор
+     * выхода (эксперимент, с 1.10.43): таблица нужна и без ручных правил — автоправила ставит замер.
      */
-    private fun buildAppExits(rules: Map<String, Int>): AppExitTable? {
-        if (rules.isEmpty()) return null
+    private fun buildAppExits(rules: Map<String, Int>, auto: Boolean = false): AppExitTable? {
+        if (rules.isEmpty() && !auto) return null
         if (Build.VERSION.SDK_INT < 29) {
-            TunnelDebug.stage("выход по приложениям: нужен Android 10 или новее — у всех приложений «Само»")
+            TunnelDebug.stage(
+                if (rules.isEmpty()) "автовыбор выхода: нужен Android 10 или новее — выключен"
+                else "выход по приложениям: нужен Android 10 или новее — у всех приложений «Само»"
+            )
             return null
         }
         val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return null
@@ -2180,15 +2190,17 @@ class WarpVpnService : VpnService() {
             byUid[info.uid] = AppExit.stronger(byUid[info.uid] ?: AppExit.AUTO, rule)
             names[info.uid] = runCatching { packageManager.getApplicationLabel(info).toString() }.getOrDefault(pkg)
         }
-        if (byUid.isEmpty()) {
+        if (byUid.isEmpty() && !auto) {
             TunnelDebug.stage("выход по приложениям: выбранных приложений нет на телефоне (${missing.joinToString(", ")})")
             return null
         }
-        TunnelDebug.stage(
-            "выход по приложениям: " + byUid.entries.joinToString(", ") { (uid, rule) ->
-                "${names[uid]} — " + if (rule == AppExit.SECOND) "второй выход" else "WARP"
-            } + (if (missing.isNotEmpty()) "; нет на телефоне: ${missing.joinToString(", ")}" else "")
-        )
+        if (byUid.isNotEmpty()) {
+            TunnelDebug.stage(
+                "выход по приложениям: " + byUid.entries.joinToString(", ") { (uid, rule) ->
+                    "${names[uid]} — " + if (rule == AppExit.SECOND) "второй выход" else "WARP"
+                } + (if (missing.isNotEmpty()) "; нет на телефоне: ${missing.joinToString(", ")}" else "")
+            )
+        }
         return AppExitTable(
             byUid,
             owner = { proto, local, remote ->
@@ -2197,6 +2209,306 @@ class WarpVpnService : VpnService() {
             names = names,
             log = { line -> TunnelDebug.stage(line) },
         )
+    }
+
+    // ------------------------------------------------ автовыбор выхода для приложений (эксперимент, с 1.10.43)
+    // Для приложений с выходом «Само» сервис сравнивает их сервис через WARP и через второй выход
+    // (AppAuto) и ведёт приложение туда, где сервис работает: автоправилом в таблице выхода, только
+    // для новых соединений. Замер идёт своим соединением, закреплённым за выходом (TunDispatcher.pin):
+    // по адресу назначения его направлять нельзя — тем же адресом пользуется само приложение, и его
+    // живые соединения переехали бы на другой выход. Telegram — как раньше (checkTelegramMedia).
+
+    /** Идёт замер — второй не запускаем. */
+    private val appAutoBusy = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Последний замер: когда, на какой сети и площадке выхода, и что решили (сервис → AppExit). */
+    @Volatile
+    private var appAutoAt = 0L
+
+    @Volatile
+    private var appAutoNet = ""
+
+    @Volatile
+    private var appAutoSite = ""
+
+    @Volatile
+    private var appAutoChoice: Map<String, Int> = emptyMap()
+
+    /** Площадка выхода из последней удачной проверки связи — для замеров по таймеру. */
+    @Volatile
+    private var appAutoLastSite = ""
+
+    /** Сессия, для которой уже идёт таймер замеров (-1 — ни для какой). */
+    @Volatile
+    private var appAutoTimerEpoch = -1
+
+    /** Как часто таймер смотрит, не пора ли мерить снова, и сколько ждать перед замером. */
+    private val APP_AUTO_TICK_MS = 5 * 60_000L
+    private val APP_AUTO_SETTLE_MS = 15_000L
+
+    /**
+     * Приложения под автовыбором: сервис → (uid → название). Только те, что идут через туннель, с
+     * выходом «Само» и с замером (см. AppAuto.covers): при «только выбранные» — выбранные, иначе —
+     * известные пакеты сервисов, которые стоят на телефоне.
+     */
+    private fun appAutoTargets(settings: ServiceSettings): Map<String, Map<Int, String>> {
+        val manual = AppExit.decodeAll(settings.appExits).keys
+        val pkgs: Collection<String> = when (settings.appsMode) {
+            ServiceSettings.APPS_ONLY -> settings.appsSelected
+            else -> AppServices.SERVICES.flatMap { it.packages }
+                .filter { settings.appsMode != ServiceSettings.APPS_EXCEPT || it !in settings.appsSelected }
+        }
+        val out = LinkedHashMap<String, LinkedHashMap<Int, String>>()
+        for (pkg in pkgs) {
+            if (pkg in manual) continue
+            val service = AppServices.serviceOf(pkg) ?: continue
+            if (!AppAuto.covers(service.title)) continue
+            val info = runCatching {
+                @Suppress("DEPRECATION")
+                packageManager.getApplicationInfo(pkg, 0)
+            }.getOrNull() ?: continue
+            val name = runCatching { packageManager.getApplicationLabel(info).toString() }.getOrDefault(pkg)
+            out.getOrPut(service.title) { LinkedHashMap() }[info.uid] = name
+        }
+        return out
+    }
+
+    /** Решения → автоправила таблицы этой сессии: uid приложений сервиса → «Второй выход». */
+    private fun applyAppAuto(targets: Map<String, Map<Int, String>>, choice: Map<String, Int>) {
+        val table = dispatcher?.appExits ?: return
+        val rules = HashMap<Int, Int>()
+        choice.forEach { (service, exit) ->
+            if (exit == AppExit.SECOND) targets[service]?.keys?.forEach { uid -> rules[uid] = AppExit.SECOND }
+        }
+        table.setAuto(rules)
+    }
+
+    /** Итог для экрана — в файл: экран живёт в другом процессе. null — стереть. */
+    private fun saveAppAutoStatus(status: AppAuto.Status?) {
+        runCatching {
+            val target = File(filesDir, AppAuto.STATUS_FILE)
+            if (status == null) {
+                target.delete()
+                return@runCatching
+            }
+            val text = status.encode()
+            val tmp = File(filesDir, AppAuto.STATUS_FILE + ".tmp")
+            tmp.writeText(text)
+            if (!tmp.renameTo(target)) {
+                target.writeText(text)
+                tmp.delete()
+            }
+        }
+    }
+
+    /**
+     * После проверки связи (связь есть). Автовыбор выключен — снять автоправила и итог. Та же сеть и
+     * площадка, решение свежее — поставить его новой сессии сразу, без замера. Пора мерить (и экран
+     * включён, связь не медленная) — замер в своём потоке.
+     */
+    private fun appAutoAfterLink(myEpoch: Int, site: String) {
+        val settings = serviceSettings()
+        if (site.isNotEmpty()) appAutoLastSite = site
+        val d = dispatcher
+        if (settings.appAuto && d != null && d.appExits == null && Build.VERSION.SDK_INT >= 29) {
+            // Включили, когда туннель уже шёл (а ручных правил нет): таблицы выхода по приложениям в
+            // этой сессии нет — ставим её сейчас, на лету; без автоправил она ничего не меняет.
+            d.appExits = runCatching { buildAppExits(appExitRules(), auto = true) }.getOrNull()
+        }
+        val table = d?.appExits
+        if (!settings.appAuto) {
+            if (table != null && table.autoRules().isNotEmpty()) {
+                table.setAuto(emptyMap())
+                TunnelDebug.stage("автовыбор выхода выключен — приложения снова идут как «Само»; идущие соединения доживают прежним путём")
+            }
+            if (appAutoAt > 0L || appAutoChoice.isNotEmpty()) {
+                appAutoAt = 0L
+                appAutoChoice = emptyMap()
+                saveAppAutoStatus(null)
+            }
+            return
+        }
+        ensureAppAutoTimer(myEpoch)
+        if (TunnelState.second != TunnelStatus.SECOND_UP && table != null && table.autoRules().isNotEmpty()) {
+            // Второй выход лёг — новые соединения сразу через WARP (иначе ждали бы следующего замера),
+            // а когда поднимется — замер заново.
+            table.setAuto(emptyMap())
+            appAutoAt = 0L
+            TunnelDebug.stage("автовыбор выхода: второй выход не поднят — приложения снова идут через WARP; замерю, когда поднимется")
+        }
+        val net = memoryNetKind()
+        val fresh = appAutoAt > 0L && net == appAutoNet && site == appAutoSite &&
+            System.currentTimeMillis() - appAutoAt in 0 until AppAuto.GAP_MS
+        if (fresh) {
+            // Новая сессия (переподключение) — таблица новая и пустая: решение ставим сразу.
+            if (table != null && table.autoRules().isEmpty() && appAutoChoice.values.any { it == AppExit.SECOND }) {
+                applyAppAuto(appAutoTargets(settings), appAutoChoice)
+            }
+            return
+        }
+        if (!isScreenOn() || slowRadio()) return
+        if (!appAutoBusy.compareAndSet(false, true)) return
+        Thread({
+            try {
+                if (appAutoQuiet(myEpoch)) runAppAuto(myEpoch, site, net)
+            } catch (e: InterruptedException) {
+                // штатная остановка вместе с сервисом
+            } catch (e: Throwable) {
+                runCatching { TunnelDebug.stage("автовыбор выхода: замер не удался (${e.javaClass.simpleName} ${e.message.orEmpty().take(60)})") }
+            } finally {
+                appAutoBusy.set(false)
+            }
+        }, "warpscout-app-exit").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }.start()
+    }
+
+    /**
+     * Перед замером: пусть приложения переподключатся (после подъёма их соединения рвутся разом), а
+     * проверка связи и замер скорости закончатся — иначе они делят канал с замером через WARP, и WARP
+     * выглядит медленнее, чем есть. false — сессия кончилась, экран погас или связь медленная.
+     */
+    private fun appAutoQuiet(myEpoch: Int): Boolean {
+        Thread.sleep(APP_AUTO_SETTLE_MS)
+        val until = System.currentTimeMillis() + 90_000L
+        while ((linkCheckBusy.get() || speedBusy.get()) && System.currentTimeMillis() < until) {
+            if (!linkAlive(myEpoch)) return false
+            Thread.sleep(1_000L)
+        }
+        return linkAlive(myEpoch) && isScreenOn() && !slowRadio() && serviceSettings().appAuto
+    }
+
+    /**
+     * Таймер сессии: проверка связи идёт после подъёма, при открытии экрана и по подозрению, а экран
+     * может гореть часами (видео). Раз в 5 минут смотрим, не пора ли мерить снова (30 минут прошло,
+     * экран включён, связь есть); решает appAutoAfterLink. Кончается с сессией или выключением.
+     */
+    private fun ensureAppAutoTimer(myEpoch: Int) {
+        if (appAutoTimerEpoch == myEpoch) return
+        appAutoTimerEpoch = myEpoch
+        Thread({
+            try {
+                while (true) {
+                    Thread.sleep(APP_AUTO_TICK_MS)
+                    if (myEpoch != epoch.get() || stopped.get() || destroyed) break
+                    if (!serviceSettings().appAuto) break
+                    if (!linkAlive(myEpoch) || TunnelState.linkWeb != TunnelStatus.LINK_OK) continue
+                    runCatching { appAutoAfterLink(myEpoch, appAutoLastSite) }
+                }
+            } catch (e: InterruptedException) {
+                // штатная остановка вместе с сервисом
+            } finally {
+                if (appAutoTimerEpoch == myEpoch) appAutoTimerEpoch = -1
+            }
+        }, "warpscout-app-exit-timer").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }.start()
+    }
+
+    /** Один замер сервиса через выход [lane] (0 — WARP, 1 — второй выход): своё соединение, закреплённое за выходом. */
+    private fun probeVia(d: TunDispatcher, probe: AppAuto.Probe, lane: Int, routes: ExitRouter?): AppAuto.Measure {
+        val pinned = ArrayList<Triple<Int, String, Int>>()
+        try {
+            return AppAuto.fetch(
+                probe,
+                resolve = { host -> java.net.InetAddress.getAllByName(host).mapNotNull { it.hostAddress } },
+                inTunnel = { ip -> routedIp(routes, ip) },
+                opener = AppAuto.tlsOpener { localPort, ip, port ->
+                    d.pin(localPort, ip, port, lane)
+                    pinned += Triple(localPort, ip, port)
+                },
+            )
+        } finally {
+            pinned.forEach { (localPort, ip, port) -> d.unpin(localPort, ip, port) }
+        }
+    }
+
+    /**
+     * Замер: каждый сервис — через WARP и через второй выход, решение (AppAuto.decide), автоправила,
+     * итог в файл и в журнал. Туннель переподнялся посреди — бросаем: замер был не про эту сессию.
+     */
+    private fun runAppAuto(myEpoch: Int, site: String, net: String) {
+        val settings = serviceSettings()
+        val label = secondLabel()
+        // [settled] — итог на 30 минут (дальше мерить незачем); нет — попробовать при следующей
+        // проверке связи: второй выход мог ещё подниматься.
+        fun finish(status: AppAuto.Status, choice: Map<String, Int>, settled: Boolean = true) {
+            if (settled) {
+                appAutoAt = status.at
+                appAutoNet = net
+                appAutoSite = site
+                appAutoChoice = choice
+            }
+            saveAppAutoStatus(status)
+        }
+        val now = System.currentTimeMillis()
+        val d = dispatcher
+        val table = d?.appExits
+        if (d == null || TunnelState.second != TunnelStatus.SECOND_UP) {
+            finish(
+                AppAuto.Status(now, site, label, emptyList(), "второй выход сейчас не поднят (или выключен) — автовыбору не из чего выбирать"),
+                emptyMap(), settled = false
+            )
+            return
+        }
+        if (table == null) {
+            val old = Build.VERSION.SDK_INT < 29
+            finish(
+                AppAuto.Status(
+                    now, site, label, emptyList(),
+                    if (old) "выход по приложениям работает с Android 10 — автовыбор выключен"
+                    else "выход по приложениям в этой сессии не включился — включится со следующего подключения"
+                ),
+                emptyMap(), settled = old
+            )
+            return
+        }
+        if (table.disabled) {
+            finish(AppAuto.Status(now, site, label, emptyList(), "Android не называет владельцев соединений — автовыбор не работает"), emptyMap())
+            return
+        }
+        val targets = appAutoTargets(settings)
+        if (targets.isEmpty()) {
+            table.setAuto(emptyMap())
+            finish(
+                AppAuto.Status(
+                    now, site, label, emptyList(),
+                    "нет приложений с выходом «Само», для которых есть замер (" + AppAuto.PROBES.joinToString(", ") { it.service } + ")"
+                ),
+                emptyMap()
+            )
+            return
+        }
+        val routes = currentRoutes()
+        val rows = ArrayList<AppAuto.Row>()
+        val choice = LinkedHashMap<String, Int>()
+        for (service in targets.keys) {
+            val probe = AppAuto.probeFor(service) ?: continue
+            if (!linkAlive(myEpoch) || dispatcher !== d) return
+            val warp = probeVia(d, probe, 0, routes)
+            if (!linkAlive(myEpoch) || dispatcher !== d) return
+            var second = probeVia(d, probe, 1, routes)
+            if (!linkAlive(myEpoch) || dispatcher !== d) return
+            // Второй выход упал посреди замера — пакеты шли через WARP, замер не про него.
+            if (TunnelState.second != TunnelStatus.SECOND_UP) {
+                second = second.copy(unknown = true, note = "второй выход упал во время замера")
+            }
+            val exit = AppAuto.decide(warp, second, appAutoChoice[service] ?: AppExit.AUTO)
+            choice[service] = exit
+            rows += AppAuto.Row(service, exit, warp, second, AppAuto.why(warp, second, exit))
+        }
+        val before = appAutoChoice
+        applyAppAuto(targets, choice)
+        finish(AppAuto.Status(System.currentTimeMillis(), site, label, rows), choice)
+        TunnelDebug.stage(
+            "автовыбор выхода: " + rows.joinToString("; ") { r ->
+                "${r.service} — WARP ${AppAuto.describe(r.warp)}, второй выход ${AppAuto.describe(r.second)} → ${AppAuto.exitName(r.exit)}"
+            }
+        )
+        rows.forEach { r ->
+            if (r.exit == (before[r.service] ?: AppExit.AUTO)) return@forEach
+            val apps = targets[r.service]?.values?.joinToString(", ").orEmpty().ifBlank { r.service }
+            TunnelDebug.stage(
+                if (r.exit == AppExit.SECOND) "автовыбор выхода: $apps — через $label (${r.why}); туда идут новые соединения, идущие не рвутся"
+                else "автовыбор выхода: $apps — снова как «Само», через WARP (${r.why})"
+            )
+        }
     }
 
     /** Площадка, о которой в этой сессии уже написали в журнал. */

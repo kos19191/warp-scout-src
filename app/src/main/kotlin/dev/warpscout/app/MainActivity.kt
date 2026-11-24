@@ -361,6 +361,8 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             // Список бесплатных серверов Proton — раз в неделю.
             refreshProtonIfStale()
             updateSecondState()
+            // Итог автовыбора выхода (эксперимент, с 1.10.43): сервис мог намерить новое, пока экран был закрыт.
+            renderAppAuto()
         }.onFailure { t ->
             TunnelDebug.error("обновление экрана: " + SafeMode.describe(t))
             runCatching { banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true) }
@@ -519,6 +521,36 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         binding.switchFeatDns.isChecked = prefs.featDnsInTunnel
         binding.switchFeatAbroad.isChecked = prefs.featAbroadSearch
         binding.switchFeatTgSecond.isChecked = prefs.featTgSecond
+        binding.switchFeatAppAuto.isChecked = prefs.featAppAuto
+        renderAppAuto()
+    }
+
+    /** Итог последнего замера автовыбора выхода (файл пишет сервис) — читаем один раз на показ. */
+    private fun appAutoStatus(): dev.warpscout.core.tunnel.AppAuto.Status? = runCatching {
+        val f = File(filesDir, dev.warpscout.core.tunnel.AppAuto.STATUS_FILE)
+        if (f.exists()) dev.warpscout.core.tunnel.AppAuto.Status.decode(f.readText()) else null
+    }.getOrNull()
+
+    /**
+     * Под переключателем «выход для приложений — сам» (эксперимент, с 1.10.43): как он работает и что
+     * намерил сервис в последний раз. Выключен — ничего не показываем.
+     */
+    private fun renderAppAuto() {
+        val view = binding.textAppAuto
+        if (!prefs.featAppAuto) {
+            view.visibility = View.GONE
+            return
+        }
+        val status = appAutoStatus()
+        view.text = getString(R.string.app_auto_note) + "\n" +
+            (status?.let { dev.warpscout.core.tunnel.AppAuto.statusLines(it).joinToString("\n") } ?: getString(R.string.app_auto_none))
+        view.visibility = View.VISIBLE
+    }
+
+    /** Раздел отчёта «Приложения по точкам» (эксперимент, с 1.10.43) — только при включённом автовыборе. */
+    private fun appsByPointSection(report: dev.warpscout.core.model.TuningReport): String {
+        if (!prefs.featAppAuto) return ""
+        return runCatching { "\n" + dev.warpscout.core.tunnel.AppAuto.byPointText(report, appAutoStatus()) }.getOrDefault("")
     }
 
     /**
@@ -541,6 +573,12 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         bind(binding.switchFeatDns, getString(R.string.feat_dns), { prefs.featDnsInTunnel }, { prefs.featDnsInTunnel = it })
         bind(binding.switchFeatAbroad, getString(R.string.feat_abroad), { prefs.featAbroadSearch }, { prefs.featAbroadSearch = it })
         bind(binding.switchFeatTgSecond, getString(R.string.feat_tg_second), { prefs.featTgSecond }, { prefs.featTgSecond = it })
+        bind(binding.switchFeatAppAuto, getString(R.string.feat_app_auto_short), { prefs.featAppAuto }, {
+            prefs.featAppAuto = it
+            renderAppAuto()
+            // Включили — первый замер сразу: сервис меряет после проверки связи.
+            if (it && tunnel.supported && tunnel.isUp) runCatching { tunnel.requestLinkCheck() }
+        })
     }
 
     private fun buildJunkChecks() {
@@ -2457,7 +2495,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             ?: best?.let { ConfigFiles.render(it) }.orEmpty()
         updateServerNote()
         renderAvailability()
-        binding.textReport.text = runCatching { Report.toMarkdown(result.report) }
+        binding.textReport.text = runCatching { Report.toMarkdown(result.report) + appsByPointSection(result.report) }
             .getOrElse { getString(R.string.report_broken, it.message.orEmpty()) }
         renderShortlist()
         lastConfigFile = engine.storedConfigFile ?: best?.let { cfg ->

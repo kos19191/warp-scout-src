@@ -602,6 +602,18 @@ class Prefs(private val context: Context) {
             pushToService()
         }
 
+    /**
+     * Эксперимент «выход для приложений — сам» (с 1.10.43, см. AppAuto): приложения с выходом «Само»
+     * туннель ведёт через второй выход, если их сервис через WARP не открывается или заметно
+     * медленнее; в отчёте подбора — «Приложения по точкам». По умолчанию выключен.
+     */
+    var featAppAuto: Boolean
+        get() = sp.getBoolean("featAppAuto", false)
+        set(v) {
+            sp.edit().putBoolean("featAppAuto", v).apply()
+            pushToService()
+        }
+
     /** Перед переключением на выбранную точку спрашивать её пробой (рабочий туннель не трогая). */
     var featProbeBeforeSwitch: Boolean
         get() = sp.getBoolean("featProbeBeforeSwitch", true)
@@ -983,6 +995,8 @@ class Prefs(private val context: Context) {
             // Выход по приложениям (с 1.10.39): сервис читает его при подъёме туннеля. Только
             // действующие правила — при выключенном втором выходе их нет.
             appExits = dev.warpscout.core.tunnel.AppExit.encodeAll(appExitsActive()),
+            // Эксперимент (с 1.10.43): автовыбор выхода для приложений с «Само».
+            appAuto = featAppAuto,
         )
     }
 

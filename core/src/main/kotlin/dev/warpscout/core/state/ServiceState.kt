@@ -421,6 +421,12 @@ data class ServiceSettings(
      * 2 — целиком через второй выход. Приложения без строки — «Само», по адресам.
      */
     val appExits: List<String> = emptyList(),
+    /**
+     * Эксперимент «автовыбор выхода для приложений» (с 1.10.43, см. AppAuto): приложения с выходом
+     * «Само» сервис сам ведёт через второй выход, если их сервис через WARP не открывается или заметно
+     * медленнее. По умолчанию выключено.
+     */
+    val appAuto: Boolean = false,
 ) {
 
     fun toJson(): String = JsonVal.obj(
@@ -447,6 +453,7 @@ data class ServiceSettings(
         "abroadSearch" to JsonVal.bool(abroadSearch),
         "tgSecond" to JsonVal.bool(tgSecond),
         "appExits" to JsonVal.arr(appExits.map { JsonVal.str(it) }),
+        "appAuto" to JsonVal.bool(appAuto),
     ).render()
 
     companion object {
@@ -491,6 +498,8 @@ data class ServiceSettings(
                 tgSecond = obj.bool("tgSecond") ?: true,
                 // Нет поля (снимок от прежней версии) — у всех приложений «Само».
                 appExits = strings(obj, "appExits"),
+                // Нет поля (снимок от прежней версии) — эксперимент выключен.
+                appAuto = obj.bool("appAuto") ?: false,
             )
         }
     }

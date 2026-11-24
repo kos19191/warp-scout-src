@@ -670,6 +670,22 @@
                     android:layout_height="wrap_content"
                     android:text="@string/feat_tg_second" />
 
+                <!-- 1.10.43: эксперимент «выход для приложений — сам» и итог его замеров. -->
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatAppAuto"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_app_auto" />
+
+                <TextView
+                    android:id="@+id/textAppAuto"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:layout_marginBottom="6dp"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:visibility="gone" />
+
                 <!-- ── что туннелируем и как (переехало из вкладки «Туннель») ── -->
 
 

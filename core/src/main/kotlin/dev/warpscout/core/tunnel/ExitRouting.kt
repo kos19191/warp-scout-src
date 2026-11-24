@@ -244,6 +244,45 @@ class TunDispatcher(
     @Volatile
     var appExits: AppExitTable? = null
 
+    /**
+     * Соединения замеров автовыбора выхода (с 1.10.43, см. AppAuto): «свой порт|адрес|порт» → выход.
+     * Замер сравнивает сервис через WARP и через второй выход, и направлять его по адресу назначения
+     * нельзя: тем же адресом в эти секунды пользуется само приложение (у Instagram сайт и приложение —
+     * на одних адресах), и его живые соединения переехали бы на другой выход и оборвались. Поэтому
+     * правило — ровно на соединение замера; пока замеров нет, пакеты здесь не разбираются вовсе.
+     */
+    private val pinned = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    @Volatile
+    private var anyPinned = false
+
+    /** Закрепить соединение замера ([localPort] → [remoteIp]:[remotePort], TCP по IPv4) за выходом [lane]. */
+    @Synchronized
+    fun pin(localPort: Int, remoteIp: String, remotePort: Int, lane: Int) {
+        pinned[pinKey(localPort, remoteIp, remotePort)] = lane
+        anyPinned = true
+    }
+
+    @Synchronized
+    fun unpin(localPort: Int, remoteIp: String, remotePort: Int) {
+        pinned.remove(pinKey(localPort, remoteIp, remotePort))
+        anyPinned = pinned.isNotEmpty()
+    }
+
+    private fun pinKey(localPort: Int, remoteIp: String, remotePort: Int): String = "$localPort|${remoteIp.trim()}|$remotePort"
+
+    /** Выход соединения замера; −1 — пакет не из замера (только TCP по IPv4: замеры ходят так). */
+    private fun pinnedLane(p: ByteArray, len: Int): Int {
+        if (len < 20 || ((p[0].toInt() ushr 4) and 0x0F) != 4) return -1
+        val ihl = (p[0].toInt() and 0x0F) * 4
+        if (ihl < 20 || len < ihl + 4 || (p[9].toInt() and 0xFF) != 6) return -1
+        if ((((p[6].toInt() and 0x1F) shl 8) or (p[7].toInt() and 0xFF)) != 0) return -1
+        val sport = ((p[ihl].toInt() and 0xFF) shl 8) or (p[ihl + 1].toInt() and 0xFF)
+        val dport = ((p[ihl + 2].toInt() and 0xFF) shl 8) or (p[ihl + 3].toInt() and 0xFF)
+        val ip = "${p[16].toInt() and 0xFF}.${p[17].toInt() and 0xFF}.${p[18].toInt() and 0xFF}.${p[19].toInt() and 0xFF}"
+        return pinned[pinKey(sport, ip, dport)] ?: -1
+    }
+
     var sentPrimary: Long = 0L
         private set
     var sentSecondary: Long = 0L
@@ -280,7 +319,8 @@ class TunDispatcher(
                 continue
             }
             val byAddress = router.route(dst)
-            val wanted = appExits?.decide(packet, n, byAddress) ?: byAddress
+            val pin = if (anyPinned) pinnedLane(packet, n) else -1
+            val wanted = if (pin >= 0) pin else appExits?.decide(packet, n, byAddress) ?: byAddress
             // Если второй выход отказал (сессию не поднял или умер), его подсети не теряются:
             // трафик возвращается в основной туннель — регион будет не тот, зато сайт работает.
             // Так же и приложения с «Второй выход» (решил человек 23.11): идут через WARP.
