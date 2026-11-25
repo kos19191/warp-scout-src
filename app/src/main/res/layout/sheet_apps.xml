@@ -5,6 +5,12 @@
   Приложения: все, только выбранные, все кроме выбранных — список с иконками и поиском. Сайты: свои
   домены, адреса, подсети. Списки: категории галочками. Ничего не меняется до «Сохранить»: при
   включённом туннеле сохранение переподключает его (это часть настроек VpnService).
+
+  С 1.10.44-beta6 кнопки «Отмена» и «Сохранить» всегда видны. Раньше шторка открывалась «половинкой»,
+  высота которой зависит от высоты экрана, а кнопки — в самом низу: с тремя кнопками навигации Android
+  экран ниже, чем с жестами, и кнопки оставались за его краем. Теперь шторка открывается сразу целиком
+  (MainActivity.showAppsSheetUnsafe), а у списков layout_weight: высота прежняя, если помещается; не
+  помещается (невысокий экран, крупный шрифт, клавиатура поиска) — список короче, кнопки на месте.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -68,6 +74,7 @@
         android:id="@+id/sheetPanelApps"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:layout_weight="1"
         android:orientation="vertical">
 
         <RadioGroup
@@ -99,6 +106,7 @@
             android:id="@+id/appsListBox"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_weight="1"
             android:orientation="vertical">
 
             <!-- С 1.10.39: что значит кнопка выхода в строке (видна, когда есть второй выход). -->
@@ -137,11 +145,13 @@
                 android:textAppearance="?attr/textAppearanceBodySmall"
                 android:textColor="?attr/colorOnSurfaceVariant" />
 
-            <!-- Высота задана: список прокручивается сам, шторка остаётся на месте. -->
+            <!-- Высота задана: список прокручивается сам, шторка остаётся на месте. Не помещается
+                 (невысокий экран, три кнопки навигации, клавиатура поиска) — становится короче. -->
             <ListView
                 android:id="@+id/appsList"
                 android:layout_width="match_parent"
                 android:layout_height="320dp"
+                android:layout_weight="1"
                 android:divider="@android:color/transparent"
                 android:dividerHeight="0dp"
                 android:fastScrollEnabled="true" />
@@ -193,6 +203,7 @@
         android:id="@+id/sheetPanelLists"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:layout_weight="1"
         android:orientation="vertical"
         android:visibility="gone">
 
@@ -207,6 +218,7 @@
             android:id="@+id/sheetListsScroll"
             android:layout_width="match_parent"
             android:layout_height="300dp"
+            android:layout_weight="1"
             android:layout_marginTop="4dp">
 
             <LinearLayout

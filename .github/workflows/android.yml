@@ -103,6 +103,9 @@ jobs:
           # Вход в Proton (1.10.44-beta5): SRP байт в байт как у Proton и подпись модуля их ключом.
           need /tmp/selftest.log "Proton: доказательство клиента M1 как у python-proton-core"
           need /tmp/selftest.log "Proton: подменённый текст модуля отвергнут"
+          # Начальные экраны (1.10.44-beta6): сохраняется ровно отмеченное, снятое руками не возвращается.
+          need /tmp/selftest.log "начальные экраны: сохраняются ровно отмеченные"
+          need /tmp/selftest.log "начальные экраны: снятый TikTok второй выход не получает, отмеченный ChatGPT — получает"
 
           say "галочек в selftest: $(grep -c '✓' /tmp/selftest.log || true)"
           say "галочек в интеграции: $(grep -c '✓' /tmp/integration.log || true)"

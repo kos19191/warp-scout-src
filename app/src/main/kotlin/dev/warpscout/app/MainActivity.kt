@@ -42,6 +42,7 @@ import dev.warpscout.core.tune.TuningResult
 import dev.warpscout.core.tunnel.AppExit
 import dev.warpscout.core.tunnel.ExitRouter
 import dev.warpscout.core.tunnel.SecondDefaults
+import dev.warpscout.core.tunnel.WelcomeApps
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
@@ -123,6 +124,8 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     private val pickSecondConf = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
     ) { uri ->
+        // Окно закрыли без выбора — «применить сразу» (начальные экраны) файла больше не ждёт.
+        if (uri == null) secondConfApplyNow = false
         if (uri != null && ::binding.isInitialized) {
             runCatching { loadSecondConf(uri) }.onFailure { t ->
                 TunnelDebug.error("второй выход: файл конфига — " + SafeMode.describe(t))
@@ -298,12 +301,22 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             runCatching { File(cacheDir, "updates").takeIf { it.exists() }?.deleteRecursively() }
             // Системные загрузки обновлений, вставшие в прошлых версиях (с 1.10.40, см. UpdateFlow), — убрать.
             runCatching { cleanStaleUpdateDownloads() }
+            // Ждали подключения, чтобы открыть выбор второго выхода (начальные экраны), — ждём и дальше.
+            secondSetupUntil = savedInstanceState?.getLong(STATE_SECOND_SETUP, 0L) ?: 0L
+            // Начальные экраны (бета, с 1.10.44-beta6): после новой установки, один раз. Не открылись —
+            // не пытаемся при каждом запуске: экран и без них работает.
+            runCatching { maybeShowWelcome(savedInstanceState) }.onFailure { t ->
+                TunnelDebug.error("начальные экраны не открылись: " + SafeMode.describe(t))
+                runCatching { prefs.welcomePending = false }
+            }
         } catch (t: Throwable) {
             SafeMode.show(this, t, "запуск интерфейса")
         }
     }
 
     override fun onDestroy() {
+        welcome?.dismiss()
+        welcome = null
         stopTunnelPolling()
         if (shown === this) shown = null
         if (UpdateFlow.ui === this) UpdateFlow.ui = null
@@ -777,6 +790,12 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putInt(STATE_TAB, selectedTab)
+        // Начальные экраны (с 1.10.44-beta6) переживают поворот: страница, отметки, ожидание туннеля.
+        welcome?.takeIf { it.isShowing }?.let { w ->
+            outState.putInt(STATE_WELCOME_PAGE, w.currentPage)
+            w.checkedNow()?.let { outState.putStringArrayList(STATE_WELCOME_CHECKED, it) }
+        }
+        if (secondSetupUntil != 0L) outState.putLong(STATE_SECOND_SETUP, secondSetupUntil)
     }
 
     /** «Сгенерировать конфиг» с первого экрана: тот же конфиг, что уйдёт в файл, только на виду. */
@@ -3781,6 +3800,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         if (tunnel.isUp || tunnel.active) {
             // Выключает человек: сервис запомнит это и сам туннель больше не включит.
             tunnel.stopByUser()
+            secondSetupUntil = 0L
             tunnelStartedAtLocal = 0L
             binding.btnTunnel.setText(R.string.btn_tunnel_on)
             renderShortlist()
@@ -3817,6 +3837,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     private fun requestConnectCancel() {
         if (!connecting || connectCancel) return
         connectCancel = true
+        secondSetupUntil = 0L
         binding.btnTunnel.isEnabled = false
         binding.btnTunnel.setText(R.string.btn_connect_cancelling)
     }
@@ -4416,6 +4437,8 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             // Кнопка свободна (не идёт подключение и подбор) — держим её подпись в согласии с сервисом.
             if (!connecting && !engine.running) runCatching { refreshTunnelButtonLabel() }
             val upNow = runCatching { tunnel.isUp }.getOrDefault(false)
+            // Начальные экраны: «Настроить» второй выход ждёт подключения — потом выбор Proton.
+            if (secondSetupUntil != 0L) runCatching { continueSecondSetup(upNow) }
             val marksNow = runCatching { TunnelStatusBus.snapshot(this@MainActivity).marks }.getOrDefault("")
             if (upNow != lastShortlistUp) {
                 lastShortlistUp = upNow
@@ -5457,6 +5480,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     private fun openSecondConfPicker() {
         // Тип у .conf в «Загрузках» бывает любой (text/plain, application/octet-stream) — показываем все.
         runCatching { pickSecondConf.launch(arrayOf("*/*")) }.onFailure { t ->
+            secondConfApplyNow = false
             TunnelDebug.error("второй выход: окно выбора файла не открылось — " + SafeMode.describe(t))
             banner(getString(R.string.second_file_fail, SafeMode.describe(t)), error = true)
         }
@@ -5495,6 +5519,20 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         val proton = ProtonFree.isProton(text)
         val endpoint = server.endpoint.render()
         TunnelDebug.stage("второй выход: конфиг из файла (${if (proton) "Proton" else "свой сервер"}, сервер $endpoint)")
+        // Файл выбран из начальных экранов — применяем сразу, как конфиг Proton кнопкой (с 1.10.44-beta6):
+        // «Сохранить и применить» там нет. На упрощённом экране его тоже нет — так бывает, если экран
+        // пересоздался, пока было открыто окно выбора файла, и отметка «из начальных экранов» потерялась.
+        val applyNow = secondConfApplyNow || simpleShown()
+        secondConfApplyNow = false
+        if (applyNow) {
+            updateSecondState()
+            applyWithRoutes(
+                getString(R.string.dirty_second_exit),
+                getString(R.string.second_file_applying, endpoint),
+                getString(R.string.second_file_saved, endpoint),
+            )
+            return
+        }
         markSettingsDirty(getString(R.string.dirty_second_exit))
         banner(getString(if (proton) R.string.second_file_ok_proton else R.string.second_file_ok, endpoint))
     }
@@ -5818,6 +5856,177 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         runCatching { updateSimple() }
     }
 
+    // ------------------------------------------------ начальные экраны (бета, с 1.10.44-beta6)
+
+    /** Начальные экраны, пока открыты. */
+    private var welcome: WelcomeScreens? = null
+
+    /** «Настроить» второй выход из начальных экранов ждёт подключения до этого времени (0 — не ждёт). */
+    private var secondSetupUntil = 0L
+
+    /** С какого тика опроса туннель работает, пока ждём (0 — ещё не работает). */
+    private var secondSetupUpSince = 0L
+
+    /** Файл второго выхода выбран из начальных экранов: применить сразу, без «Сохранить и применить». */
+    private var secondConfApplyNow = false
+
+    /**
+     * Начальные экраны (просьба 25.11) — после новой установки, один раз (Prefs.welcomePending): какие
+     * приложения пускать через туннель и второй выход. Пока только в бете. Экран создан заново (поворот)
+     * — продолжаем с той же страницы и с теми же отметками.
+     */
+    private fun maybeShowWelcome(saved: Bundle?) {
+        if (!BuildConfig.BETA || !prefs.welcomePending) return
+        if (welcome?.isShowing == true) return
+        val page = saved?.getInt(STATE_WELCOME_PAGE, WelcomeScreens.PAGE_APPS) ?: WelcomeScreens.PAGE_APPS
+        val checked = saved?.getStringArrayList(STATE_WELCOME_CHECKED)
+        TunnelDebug.stage(
+            if (saved == null) "начальные экраны: новая установка — показываю"
+            else "начальные экраны: экран создан заново — продолжаю (страница ${page + 1})"
+        )
+        welcome = WelcomeScreens(this, welcomeHost).also { it.show(page, checked) }
+    }
+
+    private val welcomeHost = object : WelcomeScreens.Host {
+        override fun knownApps(): List<WelcomeScreens.App> =
+            appEntries.map { WelcomeScreens.App(it.pkg, it.label, it.system) }
+
+        override fun readApps(): List<WelcomeScreens.App> =
+            loadAppsSync().map { WelcomeScreens.App(it.pkg, it.label, it.system) }
+
+        override fun preset(apps: List<WelcomeScreens.App>): Set<String> = welcomePreset(apps)
+
+        // Как в шторке «Туннелирование»: спутник (с Gemini пойдёт приложение Google), а в бете — что у
+        // приложения второй выход по умолчанию.
+        override fun rowNote(pkg: String): String {
+            val joined = runCatching {
+                dev.warpscout.core.lists.AppServices.serviceOf(pkg)?.companions.orEmpty()
+                    .filter { it.pkg != pkg }.joinToString(", ") { it.title }
+            }.getOrDefault("")
+            val line = if (joined.isEmpty()) pkg else getString(R.string.apps_row_companion, pkg, joined)
+            return if (BuildConfig.BETA && SecondDefaults.wants(pkg)) getString(R.string.welcome_row_second, line) else line
+        }
+
+        override fun saveApps(installed: List<String>, preset: Set<String>, checked: Set<String>) =
+            saveWelcomeApps(installed, preset, checked)
+
+        override fun finished(how: String) {
+            welcome = null
+            prefs.welcomePending = false
+            TunnelDebug.stage("начальные экраны: пройдены — $how")
+        }
+
+        override fun setupSecond() = beginSecondSetup()
+
+        override fun pickSecondFile() {
+            secondConfApplyNow = true
+            openSecondConfPicker()
+        }
+    }
+
+    /**
+     * Что отмечено на первой странице сразу (WelcomeApps.preset): набор по умолчанию (DefaultApps), в бете
+     * — «второй выход по умолчанию» (SecondDefaults) и то, что уже отмечено, кроме снятого руками.
+     */
+    private fun welcomePreset(apps: List<WelcomeScreens.App>): Set<String> {
+        val defaults = runCatching {
+            DefaultApps.find(apps.map { Triple(it.pkg, it.label, it.system) }, packageName).keys
+        }.getOrDefault(emptySet())
+        val second = if (BuildConfig.BETA) apps.map { it.pkg }.filter { SecondDefaults.wants(it) } else emptyList()
+        return WelcomeApps.preset(
+            installed = apps.map { it.pkg },
+            defaults = defaults,
+            second = second,
+            appsMode = prefs.appsMode,
+            selected = prefs.appsSelected,
+            unticked = prefs.appsUnticked,
+        )
+    }
+
+    /**
+     * «Сохранить» на первой странице: «только выбранные» ровно с отмеченными. Снятое из отмеченных сразу —
+     * «сняли руками»: ни набор по умолчанию, ни второй выход по умолчанию его обратно не отметят.
+     * Записывается так же, как из шторки «Туннелирование»: настройки, вкладка расширенного вида, применение.
+     */
+    private fun saveWelcomeApps(installed: List<String>, preset: Set<String>, checked: Set<String>) {
+        val start = TunnelChoice(
+            appsMode = prefs.appsMode,
+            apps = prefs.appsSelected,
+            routes = prefs.routesMode,
+            sites = prefs.tunnelSites,
+            block = prefs.allowBlockIds,
+            exits = prefs.appExits,
+        )
+        // Выбор сделан здесь: набор по умолчанию «только выбранные» больше сам не включает.
+        prefs.appsDefaultsDone = true
+        val unticked = WelcomeApps.untickedOnSave(preset, checked)
+        prefs.appsUnticked = prefs.appsUnticked - checked + unticked
+        val now = start.copy(
+            appsMode = Prefs.APPS_ONLY,
+            apps = WelcomeApps.selectedAfterSave(installed, checked, start.appsMode, start.apps),
+        )
+        fun names(pkgs: Collection<String>) = pkgs.map { labelOfPackage(it) }.sortedBy { it.lowercase() }.joinToString(", ")
+        TunnelDebug.stage(
+            "начальные экраны: приложения — «Сохранить», только выбранные (${checked.size}): " +
+                names(checked).take(400) + (if (unticked.isEmpty()) "" else "; сняты: " + names(unticked).take(200))
+        )
+        if (now == start) return
+        saveTunnelSheet(now, start)
+    }
+
+    /**
+     * «Настроить» второй выход из начальных экранов. Proton из России без туннеля не открывается
+     * (proton_connect_tunnel_hint): туннель работает — сразу выбор способа; нет — включаем его, как
+     * большой кнопкой (после новой установки — с подбором точки), и открываем выбор, как только он
+     * заработает ([continueSecondSetup]). Ждём не дольше 15 минут; «Выключить» и «Отменить» — не ждём.
+     */
+    private fun beginSecondSetup() {
+        if (!tunnel.supported) {
+            banner(getString(R.string.tunnel_unavailable), error = true)
+            return
+        }
+        if (tunnel.isUp && !connecting && !engine.running) {
+            TunnelDebug.stage("начальные экраны: туннель работает — открываю выбор Proton")
+            openProtonConnect()
+            return
+        }
+        secondSetupUntil = System.currentTimeMillis() + SECOND_SETUP_WAIT_MS
+        secondSetupUpSince = 0L
+        TunnelDebug.stage("начальные экраны: второй выход — сначала туннель, потом выбор Proton")
+        // Туннель уже поднимается (подбор, перебор точек, сервис ждёт повтора) — просто ждём.
+        if (!connecting && !engine.running && !tunnel.active) toggleTunnel()
+        banner(getString(R.string.welcome_second_wait))
+    }
+
+    /** Опрос туннеля: ждали подключения для «Настроить» — заработал и держится пару секунд — выбор Proton. */
+    private fun continueSecondSetup(upNow: Boolean) {
+        val now = System.currentTimeMillis()
+        if (now > secondSetupUntil) {
+            secondSetupUntil = 0L
+            TunnelDebug.stage("начальные экраны: туннель за 15 минут не заработал — выбор второго выхода не открываю")
+            return
+        }
+        if (!upNow || connecting || engine.running) {
+            secondSetupUpSince = 0L
+            return
+        }
+        if (secondSetupUpSince == 0L) {
+            secondSetupUpSince = now
+            return
+        }
+        if (now - secondSetupUpSince < 2_000L || !screenResumed || isFinishing) return
+        secondSetupUntil = 0L
+        TunnelDebug.stage("начальные экраны: туннель заработал — открываю выбор Proton")
+        openProtonConnect()
+    }
+
+    private fun openProtonConnect() {
+        runCatching { startProtonConnect() }.onFailure { t ->
+            TunnelDebug.error("второй выход: Proton кнопкой — " + SafeMode.describe(t))
+            banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+        }
+    }
+
     // ------------------------------------------------ приложения (упрощённый экран)
 
     private fun showAppsSheet() {
@@ -6080,6 +6289,15 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             }, "warpscout-apps-sheet").apply { isDaemon = true }.start()
         }
         dialog.setContentView(sheet.root)
+        // Шторка — сразу целиком (с 1.10.44-beta6). Раньше она открывалась «половинкой» (её высота зависит
+        // от высоты экрана), а «Сохранить» и «Отмена» — в самом низу шторки: с тремя кнопками навигации
+        // Android экран ниже, чем с жестами, и кнопки оставались за его краем. Не помещается шторка и
+        // целиком — список становится короче (sheet_apps), кнопки всегда видны. Вниз шторка закрывается
+        // сразу, без промежуточной «половинки».
+        runCatching {
+            dialog.behavior.skipCollapsed = true
+            dialog.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
+        }.onFailure { t -> TunnelDebug.error("шторка «Туннелирование»: не раскрылась целиком — " + SafeMode.describe(t)) }
         dialog.setOnDismissListener { updateSimple() }
         dialog.show()
     }
@@ -6585,6 +6803,14 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
          */
         const val BACKUP_FILE_LIMIT = 8 * 1024 * 1024
         const val STATE_TAB = "warpscout.tab"
+
+        /** Начальные экраны (с 1.10.44-beta6) переживают поворот: страница, отметки, ожидание туннеля. */
+        const val STATE_WELCOME_PAGE = "warpscout.welcome.page"
+        const val STATE_WELCOME_CHECKED = "warpscout.welcome.checked"
+        const val STATE_SECOND_SETUP = "warpscout.welcome.second"
+
+        /** Сколько «Настроить» второй выход ждёт подключения туннеля: первый подбор — минута-другая. */
+        const val SECOND_SETUP_WAIT_MS = 15 * 60_000L
 
         /** Пауза между переездом ползунка «Расширенный режим» и сменой вида. */
         const val MODE_SWITCH_DELAY_MS = 280L

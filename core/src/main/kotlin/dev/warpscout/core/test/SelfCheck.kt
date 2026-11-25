@@ -64,6 +64,7 @@ import dev.warpscout.core.tunnel.InnerUdpChannel
 import dev.warpscout.core.tunnel.PacketMath
 import dev.warpscout.core.tunnel.AppAuto
 import dev.warpscout.core.tunnel.SecondDefaults
+import dev.warpscout.core.tunnel.WelcomeApps
 import dev.warpscout.core.presets.Presets
 import dev.warpscout.core.model.ResourceResult
 
@@ -217,6 +218,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         }
         section("Proton кнопкой: вход в аккаунт, без аккаунта, сторонний сервис (1.10.44-beta5)") {
             ProtonChecks { name, ok, detail -> check(name, ok, detail) }.run()
+        }
+        section("бета: начальные экраны — что отмечено сразу и что сохраняется (1.10.44-beta6)") {
+            welcomeChecks()
         }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
@@ -1430,6 +1434,60 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         check("поставили Grok позже — второй выход и отметка", p8.added == listOf(grok) && grok in p8.selected && p8.exits[grok] == e.SECOND)
         check("пакеты с пробелами и повторами — без дублей",
             d.plan(listOf(" $grok ", grok), emptyMap(), only, emptySet(), emptySet(), emptySet()).added == listOf(grok))
+    }
+
+    /**
+     * 1.10.44-beta6: начальные экраны после новой установки (25.11: «которые мы отметили уже должны быть
+     * отмечены и там выбрать можно, сохранить или пропустить»). Отмечено то, что приложение отметило бы
+     * само; «Сохранить» — ровно отмеченные; снятое из отмеченных сразу больше само не отмечается.
+     */
+    private fun welcomeChecks() {
+        val w = WelcomeApps
+        val only = ServiceSettings.APPS_ONLY
+        val except = ServiceSettings.APPS_EXCEPT
+        val all = ServiceSettings.APPS_ALL
+        val telegram = "org.telegram.messenger"
+        val youtube = "com.google.android.youtube"
+        val tiktok = "com.zhiliaoapp.musically"
+        val chatgpt = "com.openai.chatgpt"
+        val chrome = "com.android.chrome"
+        val bank = "ru.sberbankmobile"
+        val gone = "org.example.removed"
+        val installed = listOf(telegram, youtube, tiktok, chatgpt, chrome, bank)
+
+        // Новая установка: «все приложения», ничего не отмечено и не снято.
+        val fresh = w.preset(installed, listOf(telegram, youtube), listOf(tiktok, chatgpt), all, emptySet(), emptySet())
+        check("начальные экраны: отмечены набор по умолчанию и второй выход по умолчанию",
+            fresh == setOf(telegram, youtube, tiktok, chatgpt), "$fresh")
+        check("начальные экраны: без беты — только набор по умолчанию",
+            w.preset(installed, listOf(telegram, youtube), emptyList(), all, emptySet(), emptySet()) == setOf(telegram, youtube))
+        check("начальные экраны: набор уже применён («только выбранные») — то же, без дублей",
+            w.preset(installed, listOf(telegram, youtube), listOf(tiktok, chatgpt), only, setOf(telegram, youtube), emptySet()) == fresh)
+        check("начальные экраны: снятое руками не отмечено, своё отмеченное — отмечено",
+            w.preset(installed, listOf(telegram, youtube), listOf(tiktok), only, setOf(telegram, chrome), setOf(youtube)) ==
+                setOf(telegram, chrome, tiktok))
+        check("начальные экраны: исключения «все, кроме» отмеченными не показываются",
+            w.preset(installed, listOf(telegram), emptyList(), except, setOf(bank), emptySet()) == setOf(telegram))
+        check("начальные экраны: чего нет на телефоне — не отмечено",
+            w.preset(listOf(telegram), listOf(telegram, youtube), listOf(tiktok), only, setOf(gone), emptySet()) == setOf(telegram))
+
+        // «Сохранить»: ровно отмеченные; снятое из отмеченных сразу — в «сняли руками».
+        val checked = setOf(telegram, chatgpt, chrome)
+        val saved = w.selectedAfterSave(installed, checked, all, emptySet())
+        check("начальные экраны: сохраняются ровно отмеченные", saved == checked, "$saved")
+        check("начальные экраны: отметка удалённого приложения не теряется",
+            w.selectedAfterSave(installed, checked, only, setOf(telegram, youtube, gone)) == checked + gone)
+        check("начальные экраны: исключения «все, кроме» в выбор не переходят",
+            w.selectedAfterSave(installed, setOf(telegram), except, setOf(bank, gone)) == setOf(telegram))
+        check("начальные экраны: ничего не отмечено — пусто (сервис пускает все приложения)",
+            w.selectedAfterSave(installed, emptySet(), all, emptySet()).isEmpty())
+        val unticked = w.untickedOnSave(fresh, checked)
+        check("начальные экраны: снятые из отмеченных сразу — в «сняли руками»", unticked == setOf(youtube, tiktok), "$unticked")
+        // Потом настроили второй выход: снятый TikTok его по умолчанию не получает, оставленный ChatGPT — получает.
+        val plan = SecondDefaults.plan(installed, emptyMap(), only, saved, unticked, emptySet())
+        check("начальные экраны: снятый TikTok второй выход не получает, отмеченный ChatGPT — получает",
+            tiktok !in plan.exits && plan.exits[chatgpt] == dev.warpscout.core.tunnel.AppExit.SECOND && plan.selected == saved,
+            "${plan.exits} ${plan.selected}")
     }
 
     /** Разбор копии, как в 1.10.40–1.10.43 (прежний Backup.parse): так старая версия прочтёт новую копию. */

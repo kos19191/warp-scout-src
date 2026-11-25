@@ -53,6 +53,10 @@ FRAMEWORK = {
     "ImageView": "android.widget.ImageView", "ProgressBar": "android.widget.ProgressBar",
     "View": "android.view.View", "Space": "android.widget.Space",
     "RadioGroup": "android.widget.RadioGroup", "RadioButton": "android.widget.RadioButton",
+    # Без полного имени тип в заглушке не находился («cannot access class 'ListView'»).
+    "ListView": "android.widget.ListView", "GridView": "android.widget.GridView",
+    "ImageButton": "android.widget.ImageButton", "Switch": "android.widget.Switch",
+    "SeekBar": "android.widget.SeekBar", "WebView": "android.webkit.WebView",
     "include": "android.view.View", "merge": "android.view.View", "fragment": "android.view.View",
 }
 
@@ -214,8 +218,10 @@ def check_resources() -> list[str]:
                 problems.append(f"{where}: висячая ссылка @{kind}/{name}")
 
     kt = "\n".join(p.read_text(encoding="utf-8") for d in KOTLIN_DIRS if d.is_dir() for p in d.rglob("*.kt"))
+    # В R точки имён становятся подчёркиваниями: стиль Theme.WarpScout.Welcome — R.style.Theme_WarpScout_Welcome.
+    r_names = {k: {n.replace(".", "_") for n in v} for k, v in names.items()}
     for kind, name in re.findall(r"(?<![a-zA-Z.])R\.(string|id|layout|style|dimen|color|drawable|xml|menu)\.([a-zA-Z_0-9]+)", kt):
-        if name not in names.get(kind, set()):
+        if name not in r_names.get(kind, set()):
             problems.append(f"Kotlin: R.{kind}.{name} нигде не определён")
     # foregroundServiceType: приложение имеет право объявить только типы из разрешённого
     # перечисления (проверено по ServiceInfo в android.jar); «vpn» среди них нет — на 34+
@@ -333,7 +339,8 @@ def write_stubs(dirn: Path, declared: dict[str, list[tuple[str, str]]], names: d
             continue
         r.append(f"    public static final class {kind} {{")
         r.append(f"        private {kind}() {{}}")
-        for i, n in enumerate(sorted(kinds[kind])):
+        # Как у aapt2: точки в имени (стили Theme.WarpScout.*) — подчёркивания в поле R.
+        for i, n in enumerate(sorted({x.replace(".", "_") for x in kinds[kind]})):
             r.append(f"        public static final int {n} = 0x7f0a{i:04d};")
         r.append("    }")
     r.append("}")
@@ -364,6 +371,10 @@ def write_stubs(dirn: Path, declared: dict[str, list[tuple[str, str]]], names: d
             b.append(f"    public void {setter}({t} v) {{ this.{field_name(name)} = v; }}")
         b += ["", f"    public static {cls} inflate(android.view.LayoutInflater in) {{",
               f"        android.view.View v = in.inflate(R.layout.{layout}, null);",
+              f"        return new {cls}(({root_type}) v, v);", "    }",
+              # Как у настоящего ViewBinding: строки списков надуваются с родителем (ListView, RecyclerView).
+              f"    public static {cls} inflate(android.view.LayoutInflater in, android.view.ViewGroup parent, boolean attach) {{",
+              f"        android.view.View v = in.inflate(R.layout.{layout}, parent, attach);",
               f"        return new {cls}(({root_type}) v, v);", "    }",
               f"    public static {cls} bind(android.view.View v) {{ return new {cls}(({root_type}) v, v); }}",
               "}"]

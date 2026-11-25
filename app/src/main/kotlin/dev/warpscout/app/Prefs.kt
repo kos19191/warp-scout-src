@@ -21,6 +21,15 @@ class Prefs(private val context: Context) {
     private val sp = context.getSharedPreferences("warpscout", Context.MODE_PRIVATE)
 
     init {
+        // Начальные экраны (бета, с 1.10.44-beta6) — только после новой установки. Решаем один раз, при
+        // первом создании Prefs и до переносов ниже (они пишут свои отметки): настроек ещё нет — приложение
+        // только что поставили, экраны покажем; есть — оно обновилось, им уже пользуются, не показываем.
+        // Отметка — в своём файле: «Сброс по умолчанию» и восстановление из копии стирают настройки
+        // целиком, а показывать экраны после них не нужно; в резервную копию этот файл не входит.
+        val welcome = context.getSharedPreferences(WELCOME_FILE, Context.MODE_PRIVATE)
+        if (!welcome.contains(WELCOME_PENDING)) {
+            welcome.edit().putBoolean(WELCOME_PENDING, BuildConfig.BETA && sp.all.isEmpty()).apply()
+        }
         // Раньше был один переключатель «split-tunnel: whitelist» (ключ «whitelist», по умолчанию
         // включён). Он стал 4-позиционным режимом + списочным режимом — мигрируем молча, чтобы у
         // обновившихся людей поведение не поменялось: включённый whitelist = пресет маршрутов.
@@ -414,6 +423,14 @@ class Prefs(private val context: Context) {
     var appsDefaultsDone: Boolean
         get() = sp.getBoolean("appsDefaultsV1", false)
         set(v) = sp.edit().putBoolean("appsDefaultsV1", v).apply()
+
+    /**
+     * Начальные экраны (бета, с 1.10.44-beta6) ещё не пройдены: приложение только что поставили. Закрыли
+     * экраны любой кнопкой — false, больше не показываются (см. init).
+     */
+    var welcomePending: Boolean
+        get() = context.getSharedPreferences(WELCOME_FILE, Context.MODE_PRIVATE).getBoolean(WELCOME_PENDING, false)
+        set(v) = context.getSharedPreferences(WELCOME_FILE, Context.MODE_PRIVATE).edit().putBoolean(WELCOME_PENDING, v).apply()
 
     /** Приложения из набора по умолчанию, с которых человек сам снял галочку: обратно не ставим. */
     var appsUnticked: Set<String>
@@ -1145,6 +1162,10 @@ class Prefs(private val context: Context) {
         const val THEME_SYSTEM = 0
         const val THEME_LIGHT = 1
         const val THEME_DARK = 2
+
+        /** Файл отметки начальных экранов (с 1.10.44-beta6): не настройки — сброс и копия его не трогают. */
+        const val WELCOME_FILE = "warpscout_welcome"
+        private const val WELCOME_PENDING = "pending"
 
         const val MIRROR_NOTE = "Ключи берутся из публичного генератора (warp-api.cfd); вводить PrivateKey не нужно."
 

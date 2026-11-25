@@ -815,4 +815,23 @@
     <string name="proton_key_service">сторонний сервис</string>
     <string name="proton_key_line">Ключ: %1$s, до %2$s</string>
     <string name="proton_key_line_soon">Ключ: %1$s, до %2$s — скоро истечёт: нажмите «Подключить второй выход (Proton)»</string>
+
+    <!-- Начальные экраны (бета, с 1.10.44-beta6): после новой установки, один раз (WelcomeScreens). -->
+    <string name="welcome_step">Шаг %1$d из %2$d</string>
+    <string name="welcome_apps_title">Какие приложения пускать через туннель</string>
+    <string name="welcome_apps_text">Отмеченные пойдут через туннель, остальные — напрямую, как без VPN. Уже отмечено то, что WarpScout выбирает сам: снимите лишнее или добавьте своё. Поменять можно и потом — в «Туннелировании».</string>
+    <string name="welcome_apps_none">Ничего не отмечено — через туннель пойдут все приложения</string>
+    <string name="welcome_apps_failed">Список приложений не прочитался. Нажмите «Пропустить» — выбрать можно потом в «Туннелировании».</string>
+    <string name="welcome_row_second">второй выход по умолчанию · %1$s</string>
+    <string name="welcome_skip">Пропустить</string>
+    <string name="welcome_save">Сохранить</string>
+    <string name="welcome_second_title">Второй выход</string>
+    <string name="welcome_second_text">Выход WARP часто российский, и часть сервисов с ним не работает или показывает Россию: TikTok, ChatGPT, Claude, Gemini, Grok. Второй выход пускает их через другой VPN-сервер поверх туннеля — бесплатный Proton VPN или ваш сервер WireGuard/AmneziaWG. Остальное идёт через WARP, как шло.</string>
+    <string name="welcome_second_how">«Настроить» включит туннель, если он выключен (Proton из России открывается только через него), и откроет подключение Proton: вход в свой аккаунт, без аккаунта или через сторонний сервис. Сервер выбирается из списка, второй выход включается сам.</string>
+    <string name="welcome_second_later">Настроить можно и потом: «Расширенный режим» → «Настройки» → «Второй выход».</string>
+    <string name="welcome_second_file">Свой сервер — файл .conf</string>
+    <string name="welcome_second_go">Настроить</string>
+    <string name="welcome_second_wait">Включаю туннель. Когда он заработает, откроется подключение второго выхода (Proton).</string>
+    <string name="second_file_applying">Второй выход: конфиг из файла, сервер %1$s — применяю…</string>
+    <string name="second_file_saved">Второй выход: конфиг из файла, сервер %1$s — сохранено, заработает при подключении туннеля</string>
 </resources>
