@@ -423,7 +423,7 @@ class AutoTuner(
         internal fun candidateKey(c: Candidate): String =
             c.config.endpoint.render() + "|" + c.junk.name
 
-        internal fun subnet24Of(host: String): String {
+        fun subnet24Of(host: String): String {
             val parts = host.split('.')
             return if (parts.size == 4) "${parts[0]}.${parts[1]}.${parts[2]}" else host
         }
