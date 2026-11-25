@@ -19,3 +19,4 @@ rootProject.name = "warp-scout"
 include(":core")
 include(":cli")
 include(":app")
+include(":desktop")

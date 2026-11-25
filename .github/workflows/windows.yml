@@ -1,0 +1,145 @@
+name: desktop-windows
+
+on:
+  push:
+    branches:
+      - main
+      - 'arena/**'
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Опубликовать Windows-сборки (MSI + Portable ZIP) в GitHub Release"
+        type: boolean
+        default: false
+      release_tag:
+        description: "Тег релиза (пусто → desktop-preview)"
+        required: false
+        default: ""
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-test:
+    name: "Desktop: сборка и тесты (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: "Самопроверка :core и тесты :desktop"
+        run: ./gradlew --no-daemon :cli:selftest :desktop:test
+
+  windows-package:
+    name: "Windows: Portable ZIP + MSI установщик"
+    needs: desktop-test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: "Сборка портативного приложения (WarpScout.exe + встроенный JRE)"
+        run: ./gradlew --no-daemon :desktop:createDistributable
+
+      - name: "Сборка MSI-установщика Windows"
+        run: ./gradlew --no-daemon :desktop:packageMsi
+
+      - name: "Упаковка артефактов и SHA-256"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $versionLine = Select-String -Path "desktop/build.gradle.kts" -Pattern 'val appVersion = "([^"]+)"'
+          $version = $versionLine.Matches[0].Groups[1].Value
+          Write-Host "Версия: $version"
+
+          New-Item -ItemType Directory -Force -Path "out-win" | Out-Null
+
+          $appDir = "desktop/build/compose/binaries/main/app/WarpScout"
+          if (-not (Test-Path $appDir)) {
+            throw "Не найден каталог сборки: $appDir"
+          }
+
+          $zipPath = "out-win/WarpScout-$version-windows-x64-portable.zip"
+          Compress-Archive -Path "$appDir/*" -DestinationPath $zipPath -Force
+
+          $msi = Get-ChildItem -Path "desktop/build/compose/binaries/main/msi" -Filter "*.msi" | Select-Object -First 1
+          if ($null -eq $msi) {
+            throw "Не найден MSI-установщик"
+          }
+          $msiOut = "out-win/WarpScout-$version-windows-x64.msi"
+          Copy-Item $msi.FullName $msiOut -Force
+
+          Get-ChildItem -Path "out-win" -File | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          } | Set-Content -Path "out-win/SHA256SUMS.txt" -Encoding UTF8
+
+          Get-ChildItem "out-win"
+          Get-Content "out-win/SHA256SUMS.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: warpscout-windows-x64
+          path: out-win/*
+          if-no-files-found: error
+
+  release-windows:
+    name: "Windows → GitHub Release"
+    needs: windows-package
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: warpscout-windows-x64
+          path: out-win
+
+      - name: "Публикация релиза Windows"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -oP 'val appVersion = "\K[^"]+' desktop/build.gradle.kts)
+          TAG="${INPUT_TAG:-desktop-preview}"
+          {
+            echo "WarpScout Desktop $VERSION для Windows 10/11 (x64)."
+            echo
+            echo "Подбирает рабочую точку Cloudflare WARP и профиль шума AmneziaWG, поднимает"
+            echo "системный туннель одной кнопкой через движок AmneziaWG и живёт в системном трее."
+            echo
+            echo "| Файл | Описание |"
+            echo "|---|---|"
+            echo "| \`WarpScout-$VERSION-windows-x64.msi\` | Установщик Windows (ярлык в меню Пуск, встроенный JRE) |"
+            echo "| \`WarpScout-$VERSION-windows-x64-portable.zip\` | Портативная версия — распакуй и запусти \`WarpScout.exe\` |"
+            echo
+            echo "**Что нужно:** Windows 10/11 (x64) и установленный клиент AmneziaWG (или \`amneziawg.exe\` + \`awg.exe\` в папке \`bin/\` рядом с приложением). Java устанавливать не нужно."
+          } > notes.md
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --title "WarpScout Desktop $VERSION" --notes-file notes.md
+            gh release upload "$TAG" out-win/* --clobber
+          else
+            gh release create "$TAG" out-win/* --title "WarpScout Desktop $VERSION ($TAG)" --notes-file notes.md --target "$GITHUB_SHA"
+          fi

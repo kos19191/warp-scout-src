@@ -235,11 +235,14 @@ cd warp-scout-src
 debug-ключ.
 
 ```
-core/   протокольный слой: WireGuard/AmneziaWG, криптография, подбор, маршруты, списки
-app/    Android-приложение: экраны, VpnService, настройки, экспорт
-cli/    консольный вариант подбора (без Android)
-tools/  оффлайн-проверки для CI
+core/    протокольный слой: WireGuard/AmneziaWG, криптография, подбор, маршруты, списки
+app/     Android-приложение: экраны, VpnService, настройки, экспорт
+desktop/ Windows-приложение: Compose Desktop UI, системный трей, AmneziaWG-движок
+cli/     консольный вариант подбора (без Android)
+tools/   оффлайн-проверки для CI
 ```
+
+Подробности по версии для ПК (Windows 10/11) — в [desktop/README.md](desktop/README.md).
 
 ```bash
 ./gradlew :cli:installDist
