@@ -100,10 +100,13 @@ object WindowsIpHelper {
     internal const val OFF_UNI_V4 = 4L
     internal const val OFF_UNI_V6 = 8L
     internal const val OFF_UNI_LUID = 32L
+    internal const val OFF_UNI_PREFIX_ORIGIN = 44L
+    internal const val OFF_UNI_SUFFIX_ORIGIN = 48L
     internal const val OFF_UNI_VALID_LIFETIME = 52L
     internal const val OFF_UNI_PREFERRED_LIFETIME = 56L
     internal const val OFF_UNI_PREFIX_LEN = 60L
     internal const val OFF_UNI_DAD_STATE = 64L
+    private const val IP_DAD_STATE_PREFERRED = 4
 
     private const val AF_INET: Short = 2
     private const val AF_INET6: Short = 23
@@ -142,6 +145,7 @@ object WindowsIpHelper {
         buf.write(OFF_UNI_V4, ipv4Bytes(ipLong), 0, 4)
         buf.setLong(OFF_UNI_LUID, adapterLuid)
         buf.setByte(OFF_UNI_PREFIX_LEN, prefixLength.toByte())
+        buf.setInt(OFF_UNI_DAD_STATE, IP_DAD_STATE_PREFERRED)
         val rc = api.CreateUnicastIpAddressEntry(buf)
         return rc == NO_ERROR || rc == ERROR_OBJECT_ALREADY_EXISTS
     }
@@ -157,6 +161,7 @@ object WindowsIpHelper {
         buf.write(OFF_UNI_V6, addr.address, 0, 16)
         buf.setLong(OFF_UNI_LUID, adapterLuid)
         buf.setByte(OFF_UNI_PREFIX_LEN, prefixLength.toByte())
+        buf.setInt(OFF_UNI_DAD_STATE, IP_DAD_STATE_PREFERRED)
         val rc = api.CreateUnicastIpAddressEntry(buf)
         return rc == NO_ERROR || rc == ERROR_OBJECT_ALREADY_EXISTS
     }

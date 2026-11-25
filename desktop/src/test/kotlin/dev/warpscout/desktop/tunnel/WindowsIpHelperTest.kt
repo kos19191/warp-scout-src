@@ -46,11 +46,12 @@ class WindowsIpHelperTest {
 
         api.InitializeUnicastIpAddressEntry(buf)
 
-        // Windows SDK: InitializeUnicastIpAddressEntry ставит Valid/PreferredLifetime = 0xFFFFFFFF (-1),
-        // OnLinkPrefixLength = 0xFF (-1), DadState = IpDadStatePreferred (4).
+        // Windows SDK: InitializeUnicastIpAddressEntry ставит PrefixOrigin/SuffixOrigin = 16 (Unchanged),
+        // Valid/PreferredLifetime = 0xFFFFFFFF (-1), OnLinkPrefixLength = 0xFF (-1).
+        assertEquals(16, buf.getInt(WindowsIpHelper.OFF_UNI_PREFIX_ORIGIN), "PrefixOrigin offset mismatch")
+        assertEquals(16, buf.getInt(WindowsIpHelper.OFF_UNI_SUFFIX_ORIGIN), "SuffixOrigin offset mismatch")
         assertEquals(-1, buf.getInt(WindowsIpHelper.OFF_UNI_VALID_LIFETIME), "ValidLifetime offset mismatch")
         assertEquals(-1, buf.getInt(WindowsIpHelper.OFF_UNI_PREFERRED_LIFETIME), "PreferredLifetime offset mismatch")
         assertEquals((-1).toByte(), buf.getByte(WindowsIpHelper.OFF_UNI_PREFIX_LEN), "OnLinkPrefixLength offset mismatch")
-        assertEquals(4, buf.getInt(WindowsIpHelper.OFF_UNI_DAD_STATE), "DadState offset mismatch")
     }
 }
