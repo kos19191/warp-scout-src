@@ -16,6 +16,7 @@ class DesktopPaths(val root: File) {
     val listsDir: File get() = File(root, "lists")
     val reportsDir: File get() = File(root, "reports")
     val backupsDir: File get() = File(root, "backups")
+    val updatesDir: File get() = File(root, "updates")
     val logsDir: File get() = File(root, "logs")
 
     val settingsFile: File get() = File(root, "settings.json")

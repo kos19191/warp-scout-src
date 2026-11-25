@@ -194,6 +194,96 @@ fun HomeScreen(
             }
         }
 
+        // --- 1b. Карточка доступного обновления из GitHub Releases ---
+        val upd = state.update
+        if ((upd.available != null && !upd.bannerDismissed) || upd.downloading || upd.installing) {
+            WarpCard(
+                containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.30f),
+                borderColor = warp.accentOrange.copy(alpha = 0.55f)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            Icons.Rounded.SystemUpdateAlt,
+                            contentDescription = null,
+                            tint = warp.accentOrange,
+                            modifier = Modifier.size(19.dp)
+                        )
+                        Text(
+                            text = upd.available?.let { "Доступно обновление ${it.version}" } ?: "Обновление WarpScout",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    if (!upd.downloading && !upd.installing) {
+                        IconButton(onClick = { controller.dismissUpdateBanner() }, modifier = Modifier.size(24.dp)) {
+                            Icon(Icons.Rounded.Close, contentDescription = "Скрыть", modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+                if (upd.statusMessage.isNotBlank()) {
+                    Text(
+                        text = upd.statusMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (upd.downloading) {
+                    if (upd.totalBytes > 0L) {
+                        LinearProgressIndicator(
+                            progress = { upd.progressFraction },
+                            modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)),
+                            color = warp.accentOrange
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)),
+                            color = warp.accentOrange
+                        )
+                    }
+                } else if (upd.installing) {
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)),
+                        color = warp.ok
+                    )
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { controller.downloadAndInstallUpdate() },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = warp.accentOrange, contentColor = Color.White),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Обновить сейчас", style = MaterialTheme.typography.labelMedium)
+                        }
+                        upd.available?.htmlUrl?.takeIf { it.isNotBlank() }?.let { url ->
+                            OutlinedButton(
+                                onClick = { DesktopPlatform.openUrl(url) },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                            ) {
+                                Text("Релиз", style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // --- 2. Баннер уведомлений ---
         state.banner?.let { msg ->
             Surface(
@@ -272,11 +362,11 @@ fun HomeScreen(
                     )
                     Surface(
                         modifier = Modifier
-                            .size(116.dp)
+                            .size(124.dp)
                             .clip(CircleShape)
                             .clickable { controller.onPrimaryButtonClick() },
                         shape = CircleShape,
-                        color = Color(0xFF14110F),
+                        color = Color(0xFF0E0C0A),
                         border = BorderStroke(2.5.dp, ringColor)
                     ) {
                         Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
@@ -284,7 +374,7 @@ fun HomeScreen(
                                 Image(
                                     bitmap = shield,
                                     contentDescription = "WarpScout",
-                                    modifier = Modifier.size(86.dp)
+                                    modifier = Modifier.size(92.dp)
                                 )
                             } else {
                                 Icon(

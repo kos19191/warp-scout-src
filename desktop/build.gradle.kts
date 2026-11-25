@@ -1,4 +1,6 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import java.time.Instant
+import java.time.format.DateTimeFormatter
 
 plugins {
     id("org.jetbrains.kotlin.jvm")
@@ -6,7 +8,53 @@ plugins {
     id("org.jetbrains.compose")
 }
 
-val appVersion = "1.10.24"
+val appVersion = "1.10.25"
+val githubRepo = "kos19191/warp-scout-src"
+
+val generatedBuildInfoDir = layout.buildDirectory.dir("generated/resources/buildinfo")
+
+val generateBuildInfo by tasks.registering {
+    val outDir = generatedBuildInfoDir
+    val versionStr = appVersion
+    val repoStr = githubRepo
+    val commitSha = providers.environmentVariable("GITHUB_SHA")
+        .orElse(providers.provider {
+            runCatching {
+                ProcessBuilder("git", "rev-parse", "--short", "HEAD")
+                    .directory(rootProject.projectDir)
+                    .start()
+                    .inputStream.bufferedReader().readText().trim()
+            }.getOrDefault("")
+        })
+        .map { it.take(12).ifBlank { "local" } }
+    inputs.property("version", versionStr)
+    inputs.property("repo", repoStr)
+    outputs.dir(outDir)
+    doLast {
+        val dir = outDir.get().asFile
+        dir.mkdirs()
+        val nowIso = DateTimeFormatter.ISO_INSTANT.format(Instant.now())
+        dir.resolve("warpscout-build.properties").writeText(
+            """
+            version=$versionStr
+            buildTimeUtc=$nowIso
+            commitSha=${commitSha.get()}
+            githubRepo=$repoStr
+            """.trimIndent() + "\n",
+            Charsets.UTF_8
+        )
+    }
+}
+
+sourceSets {
+    main {
+        resources.srcDir(generatedBuildInfoDir)
+    }
+}
+
+tasks.named("processResources") {
+    dependsOn(generateBuildInfo)
+}
 
 dependencies {
     implementation(project(":core"))

@@ -162,6 +162,7 @@ jobs:
             --vendor "WarpScout" `
             --description "WarpScout Desktop - Cloudflare WARP and AmneziaWG auto-tuner and tunnel" `
             --copyright "MIT License" `
+            --icon $iconPath `
             --win-menu `
             --win-menu-group "WarpScout" `
             --win-shortcut `

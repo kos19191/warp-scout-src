@@ -22,6 +22,7 @@ import dev.warpscout.desktop.engine.DesktopController
 import dev.warpscout.desktop.engine.DesktopUiState
 import dev.warpscout.desktop.storage.ThemeMode
 import dev.warpscout.desktop.tunnel.EngineLocator
+import dev.warpscout.desktop.update.AppUpdater
 
 /**
  * Вкладка «Настройки»: движок AmneziaWG, параметры сети (DNS/MTU/Keepalive/IPv6),
@@ -41,6 +42,112 @@ fun SettingsScreen(state: DesktopUiState, controller: DesktopController) {
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // --- 0. Обновления из GitHub Releases ---
+        val upd = state.update
+        WarpCard(
+            borderColor = if (upd.available != null) warp.accentOrange.copy(alpha = 0.55f)
+            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+        ) {
+            SectionHeader(
+                title = "Обновления программы",
+                subtitle = "Текущая версия: v${upd.currentVersion} · ${upd.installKind.title}"
+            )
+
+            if (upd.statusMessage.isNotBlank()) {
+                StatusPill(
+                    text = upd.statusMessage,
+                    dotColor = when {
+                        upd.error != null -> warp.error
+                        upd.available != null -> warp.accentOrange
+                        upd.checking || upd.downloading || upd.installing -> warp.accentOrange
+                        else -> warp.ok
+                    }
+                )
+            }
+
+            if (upd.downloading) {
+                if (upd.totalBytes > 0L) {
+                    LinearProgressIndicator(
+                        progress = { upd.progressFraction },
+                        modifier = Modifier.fillMaxWidth().height(5.dp),
+                        color = warp.accentOrange
+                    )
+                } else {
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth().height(5.dp),
+                        color = warp.accentOrange
+                    )
+                }
+            } else if (upd.installing) {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().height(5.dp),
+                    color = warp.ok
+                )
+            }
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (upd.available != null) {
+                    Button(
+                        onClick = { controller.downloadAndInstallUpdate() },
+                        enabled = !upd.busy,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = warp.accentOrange, contentColor = Color.White)
+                    ) {
+                        Icon(Icons.Rounded.SystemUpdateAlt, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Установить ${upd.available.version}", style = MaterialTheme.typography.labelMedium)
+                    }
+                } else {
+                    FilledTonalButton(
+                        onClick = { controller.checkForUpdates(manual = true) },
+                        enabled = !upd.busy,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (upd.checking) "Проверяю…" else "Проверить обновления",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        val url = upd.available?.htmlUrl?.takeIf { it.isNotBlank() } ?: AppUpdater.releasesPageUrl()
+                        DesktopPlatform.openUrl(url)
+                    }
+                ) {
+                    Icon(Icons.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("GitHub", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+
+            if (upd.available != null) {
+                TextButton(
+                    onClick = { controller.checkForUpdates(manual = true) },
+                    enabled = !upd.busy,
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                ) {
+                    Text("Проверить ещё раз", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
+            SettingSwitchRow(
+                title = "Проверять обновления при запуске",
+                subtitle = "Автоматически уведомляет о новых сборках Windows в GitHub Releases",
+                checked = s.autoCheckUpdates,
+                onCheckedChange = { v -> controller.updateSettings { it.copy(autoCheckUpdates = v) } }
+            )
+            SettingSwitchRow(
+                title = "Получать пререлизы (preview)",
+                subtitle = "Включает обновления канала desktop-windows-preview с ранними исправлениями",
+                checked = s.includePrereleaseUpdates,
+                onCheckedChange = { v -> controller.updateSettings { it.copy(includePrereleaseUpdates = v) } }
+            )
+        }
+
         // --- 1. Режим туннеля (встроенный Wintun по умолчанию / внешний AmneziaWG) ---
         WarpCard {
             SectionHeader(

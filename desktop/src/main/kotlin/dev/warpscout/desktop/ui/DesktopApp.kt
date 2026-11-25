@@ -70,7 +70,7 @@ fun DesktopApp(
                                     Image(
                                         bitmap = shield,
                                         contentDescription = null,
-                                        modifier = Modifier.size(26.dp)
+                                        modifier = Modifier.size(32.dp)
                                     )
                                 }
                                 Column {
@@ -97,7 +97,7 @@ fun DesktopApp(
                                             TunnelPhase.CONNECTING -> "Подключение…"
                                             TunnelPhase.RECONNECTING -> "Переподключение…"
                                             TunnelPhase.ERROR -> "Ошибка"
-                                            TunnelPhase.OFF -> "Windows Desktop"
+                                            TunnelPhase.OFF -> "Windows · v${state.update.currentVersion}"
                                         },
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant

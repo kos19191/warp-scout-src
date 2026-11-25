@@ -83,6 +83,12 @@ fun main(args: Array<String>) {
                 singleInstance.tryAcquire()
                 false
             }
+        },
+        onExitForUpdate = {
+            runCatching { trayRef?.remove() }
+            runCatching { controller.shutdown(disconnectTunnel = true) }
+            runCatching { singleInstance.release() }
+            kotlin.system.exitProcess(0)
         }
     )
 

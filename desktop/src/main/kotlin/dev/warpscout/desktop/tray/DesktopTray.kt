@@ -42,6 +42,7 @@ class DesktopTray(
     private val itemNext = MenuItem("Другая точка входа")
     private val menuTop3 = Menu("Лучшие конфиги")
     private val itemCheck = MenuItem("Проверить сайты")
+    private val itemUpdate = MenuItem("Проверить обновления")
     private val itemShow = MenuItem("Открыть окно")
     private val itemExit = MenuItem("Выход")
 
@@ -57,6 +58,14 @@ class DesktopTray(
                 onShowWindow()
                 controller.runSiteAndDnsCheck()
             }
+            itemUpdate.addActionListener {
+                onShowWindow()
+                if (controller.state.value.update.available != null) {
+                    controller.downloadAndInstallUpdate()
+                } else {
+                    controller.checkForUpdates(manual = true)
+                }
+            }
             itemShow.addActionListener { onShowWindow() }
             itemExit.addActionListener { onExit() }
 
@@ -66,6 +75,7 @@ class DesktopTray(
             popup.add(itemNext)
             popup.add(menuTop3)
             popup.add(itemCheck)
+            popup.add(itemUpdate)
             popup.addSeparator()
             popup.add(itemShow)
             popup.add(itemExit)
@@ -94,6 +104,7 @@ class DesktopTray(
             append(state.hasConfig).append('|')
             append(state.tunnel.activeEndpoint).append('|')
             append(state.tunnel.exitInfo.regionLabel()).append('|')
+            append(state.update.available?.version.orEmpty()).append('|')
             append(state.shortlist.joinToString(",") { "${it.endpoint}:${it.junkName}" })
         }
         if (sig == lastMenuSignature) return
@@ -130,6 +141,7 @@ class DesktopTray(
             }
 
             itemNext.isEnabled = phase == TunnelPhase.CONNECTED
+            itemUpdate.label = state.update.available?.let { "Обновить до ${it.version}" } ?: "Проверить обновления"
 
             menuTop3.removeAll()
             if (state.shortlist.isEmpty()) {

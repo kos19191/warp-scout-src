@@ -49,6 +49,10 @@ import dev.warpscout.desktop.tunnel.TunnelSnapshot
 import dev.warpscout.desktop.tunnel.WindowsAutostart
 import dev.warpscout.desktop.tunnel.WindowsTunnelManager
 import dev.warpscout.desktop.tunnel.WintunLoader
+import dev.warpscout.desktop.update.AppUpdater
+import dev.warpscout.desktop.update.BuildInfo
+import dev.warpscout.desktop.update.InstallKind
+import dev.warpscout.desktop.update.ReleaseInfo
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -66,6 +70,25 @@ data class LogEntry(
     val level: LogLevel,
     val message: String
 )
+
+data class UpdateUiState(
+    val currentVersion: String = BuildInfo.current.version,
+    val buildTimeUtc: String = BuildInfo.current.buildTimeUtc,
+    val installKind: InstallKind = AppUpdater.detectInstallKind(),
+    val checking: Boolean = false,
+    val downloading: Boolean = false,
+    val installing: Boolean = false,
+    val downloadedBytes: Long = 0L,
+    val totalBytes: Long = 0L,
+    val available: ReleaseInfo? = null,
+    val bannerDismissed: Boolean = false,
+    val statusMessage: String = "",
+    val error: String? = null
+) {
+    val busy: Boolean get() = checking || downloading || installing
+    val progressFraction: Float
+        get() = if (totalBytes > 0L) (downloadedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f) else 0f
+}
 
 data class DesktopUiState(
     val settings: DesktopSettings = DesktopSettings(),
@@ -100,6 +123,9 @@ data class DesktopUiState(
     val banner: String? = null,
     val bannerIsError: Boolean = false,
 
+    // Обновления из GitHub Releases
+    val update: UpdateUiState = UpdateUiState(),
+
     // Журнал
     val logs: List<LogEntry> = emptyList()
 ) {
@@ -122,7 +148,8 @@ class DesktopController(
     private val runner: CommandRunner = ProcessCommandRunner(),
     private val autoConnectRequested: Boolean = false,
     private val onTrayNotify: (title: String, message: String) -> Unit = { _, _ -> },
-    private val onRelaunchElevated: (extraArgs: List<String>) -> Boolean = { false }
+    private val onRelaunchElevated: (extraArgs: List<String>) -> Boolean = { false },
+    private val onExitForUpdate: () -> Unit = {}
 ) {
     private val _state = MutableStateFlow(DesktopUiState())
     val state: StateFlow<DesktopUiState> = _state.asStateFlow()
@@ -195,9 +222,13 @@ class DesktopController(
             )
         }
 
-        appendLog("WarpScout Desktop запущен (каталог данных: ${store.paths.root.absolutePath})")
+        appendLog("WarpScout Desktop v${BuildInfo.current.version} запущен (каталог данных: ${store.paths.root.absolutePath})")
         refreshEngineAndPrivileges()
         rescheduleBackgroundTune(loaded)
+
+        if (loaded.autoCheckUpdates) {
+            scheduler.schedule({ checkForUpdates(manual = false) }, 4, TimeUnit.SECONDS)
+        }
 
         if (autoConnectRequested) {
             appendLog("Запуск с автоподключением (--autoconnect)…")
@@ -246,6 +277,187 @@ class DesktopController(
 
     fun showBanner(text: String, isError: Boolean = false) {
         _state.update { it.copy(banner = text, bannerIsError = isError) }
+    }
+
+    fun dismissUpdateBanner() {
+        _state.update { it.copy(update = it.update.copy(bannerDismissed = true)) }
+    }
+
+    /** Проверяет наличие новых релизов WarpScout Desktop на GitHub Releases. */
+    fun checkForUpdates(manual: Boolean = true) {
+        if (_state.value.update.busy) return
+        _state.update {
+            it.copy(
+                update = it.update.copy(
+                    checking = true,
+                    error = null,
+                    statusMessage = if (manual) "Проверяю новые релизы на GitHub…" else it.update.statusMessage
+                )
+            )
+        }
+        auxWorker.execute {
+            val includePre = _state.value.settings.includePrereleaseUpdates
+            val res = AppUpdater.checkForUpdate(
+                current = BuildInfo.current,
+                includePrereleases = includePre
+            )
+            if (!res.ok) {
+                if (manual) {
+                    appendLog("Проверка обновлений: ${res.error}", LogLevel.WARN)
+                    showBanner(res.error ?: "Не удалось проверить обновления", isError = true)
+                }
+                _state.update {
+                    it.copy(
+                        update = it.update.copy(
+                            checking = false,
+                            error = if (manual) res.error else null,
+                            statusMessage = if (manual) (res.error ?: "Ошибка проверки") else it.update.statusMessage
+                        )
+                    )
+                }
+                return@execute
+            }
+
+            if (res.updateAvailable && res.release != null) {
+                val rel = res.release
+                appendLog("Доступно обновление: ${rel.title} (${rel.tagName})", LogLevel.OK)
+                if (!manual) {
+                    onTrayNotify("Доступно обновление WarpScout", "${rel.title} — можно обновить из программы")
+                } else {
+                    showBanner("Найдено обновление: ${rel.title}")
+                }
+                _state.update {
+                    it.copy(
+                        update = it.update.copy(
+                            checking = false,
+                            available = rel,
+                            bannerDismissed = false,
+                            statusMessage = res.message,
+                            error = null
+                        )
+                    )
+                }
+            } else {
+                if (manual) {
+                    appendLog(res.message, LogLevel.OK)
+                    showBanner(res.message)
+                }
+                _state.update {
+                    it.copy(
+                        update = it.update.copy(
+                            checking = false,
+                            available = null,
+                            statusMessage = res.message,
+                            error = null
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    /** Скачивает релиз, проверяет SHA-256, запускает установщик и перезапускает WarpScout. */
+    fun downloadAndInstallUpdate() {
+        val u = _state.value.update
+        if (u.downloading || u.installing) return
+        val release = u.available ?: run {
+            checkForUpdates(manual = true)
+            return
+        }
+
+        _state.update {
+            it.copy(
+                update = it.update.copy(
+                    downloading = true,
+                    installing = false,
+                    downloadedBytes = 0L,
+                    totalBytes = release.assetFor(u.installKind)?.sizeBytes ?: 0L,
+                    error = null,
+                    statusMessage = "Скачиваю ${release.title}…"
+                )
+            )
+        }
+        appendLog("Начинаю загрузку обновления ${release.title} (${u.installKind.title})…")
+
+        auxWorker.execute {
+            val dl = AppUpdater.downloadUpdate(
+                release = release,
+                installKind = u.installKind,
+                destDir = store.paths.updatesDir,
+                onProgress = { got, total ->
+                    _state.update { cur ->
+                        cur.copy(
+                            update = cur.update.copy(
+                                downloadedBytes = got,
+                                totalBytes = total,
+                                statusMessage = if (total > 0L) {
+                                    val pct = ((got * 100L) / total).coerceIn(0L, 100L)
+                                    "Загрузка: ${Formatters.bytes(got)} / ${Formatters.bytes(total)} ($pct%)"
+                                } else {
+                                    "Загрузка: ${Formatters.bytes(got)}"
+                                }
+                            )
+                        )
+                    }
+                }
+            )
+
+            if (!dl.ok || dl.file == null) {
+                val err = dl.error ?: "Не удалось скачать обновление"
+                appendLog("Ошибка загрузки обновления: $err", LogLevel.ERROR)
+                showBanner("Обновление не загрузилось: $err", isError = true)
+                _state.update {
+                    it.copy(
+                        update = it.update.copy(
+                            downloading = false,
+                            installing = false,
+                            error = err,
+                            statusMessage = err
+                        )
+                    )
+                }
+                return@execute
+            }
+
+            val shaNote = if (dl.sha256Verified) " (SHA-256 проверен)" else ""
+            appendLog("Обновление загружено: ${dl.file.name}$shaNote — запускаю установку…", LogLevel.OK)
+            _state.update {
+                it.copy(
+                    update = it.update.copy(
+                        downloading = false,
+                        installing = true,
+                        statusMessage = "Запускаю установку обновления$shaNote…"
+                    )
+                )
+            }
+
+            val sameVersion = AppUpdater.compareVersions(release.version, BuildInfo.current.version) == 0
+            val launched = AppUpdater.launchInstallerScript(
+                downloadedFile = dl.file,
+                isMsi = dl.isMsi,
+                sameVersion = sameVersion,
+                updatesDir = store.paths.updatesDir
+            )
+
+            if (launched) {
+                appendLog("Установщик обновления запущен — закрываю WarpScout для замены файлов…", LogLevel.OK)
+                onExitForUpdate()
+            } else {
+                val err = "Не удалось запустить установщик автоматически. Файл сохранён в ${dl.file.absolutePath}"
+                appendLog(err, LogLevel.WARN)
+                showBanner(err, isError = true)
+                _state.update {
+                    it.copy(
+                        update = it.update.copy(
+                            downloading = false,
+                            installing = false,
+                            error = err,
+                            statusMessage = err
+                        )
+                    )
+                }
+            }
+        }
     }
 
     fun updateSettings(transform: (DesktopSettings) -> DesktopSettings) {

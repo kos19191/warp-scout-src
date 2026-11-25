@@ -52,6 +52,8 @@ data class DesktopSettings(
     val autostartWindows: Boolean = false,
     val autoConnectOnStart: Boolean = false,
     val disconnectOnExit: Boolean = true,
+    val autoCheckUpdates: Boolean = true,
+    val includePrereleaseUpdates: Boolean = true,
 
     // Движок туннеля (по умолчанию — встроенный Wintun + DataPlane из :core, без сторонних программ)
     val backendMode: TunnelBackendMode = TunnelBackendMode.BUILTIN_WINTUN,
