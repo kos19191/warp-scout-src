@@ -415,7 +415,8 @@ def main() -> int:
     # (раньше здесь стоял /home/user/... и CI на чистом раннере падал с FileNotFoundError).
     ap.add_argument("--stub-dir", default=str(Path(tempfile.mkdtemp(prefix="warpscout-stubs-"))))
     ap.add_argument("--out", default=str(Path(tempfile.mkdtemp(prefix="warpscout-out-"))))
-    ap.add_argument("--flavors", default="scout,tunnel")
+    # С 1.10.48 сборка одна — tunnel (WilyScout).
+    ap.add_argument("--flavors", default="tunnel")
     args = ap.parse_args()
 
     declared = ids_by_layout()

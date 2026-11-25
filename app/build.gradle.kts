@@ -129,12 +129,8 @@ android {
 
     sourceSets {
         getByName("main") { java.srcDirs("src/main/kotlin") }
-        // Туннель (сервис, плитка, автоподъём) — общий для обеих сборок: код и манифест берутся
-        // из src/tunnel. Отдельной заглушки «туннеля нет» у scout больше нет.
-        getByName("scout") {
-            java.srcDirs("src/tunnel/kotlin")
-            manifest.srcFile("src/tunnel/AndroidManifest.xml")
-        }
+        // Туннель (сервис, плитка, автоподъём): код и манифест — из src/tunnel. С 1.10.48 сборка
+        // одна (tunnel); у прежней scout здесь была та же привязка к src/tunnel.
         getByName("tunnel") { java.srcDirs("src/tunnel/kotlin") }
     }
 }
