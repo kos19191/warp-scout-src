@@ -236,7 +236,7 @@ object AppUpdater {
                     sizeBytes = ao.num("size")?.toLong() ?: 0L,
                     updatedAtUtc = ao.str("updated_at").orEmpty().ifBlank { publishedAt }
                 )
-            }
+            }.sortedByDescending { it.updatedAtEpochMs }
 
             val msi = assets.firstOrNull { it.name.endsWith(".msi", ignoreCase = true) }
             val zip = assets.firstOrNull {

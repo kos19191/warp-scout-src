@@ -66,6 +66,11 @@ class NativeWintunTunnelManager(
     var snapshot: TunnelSnapshot = TunnelSnapshot()
         private set
 
+    /** Фактически подключённая конфигурация (включая сработавшую резервную точку). */
+    @Volatile
+    var activeConfig: WarpConfig? = null
+        private set
+
     @Volatile
     private var activeQueue: List<WarpConfig> = emptyList()
 
@@ -557,6 +562,7 @@ class NativeWintunTunnelManager(
             }
 
             resetCounters()
+            activeConfig = cfg
             val nowMs = System.currentTimeMillis()
             onLog("Встроенный туннель поднят: ${cfg.endpoint.render()} · шум ${cfg.junk.name}")
 
@@ -627,6 +633,7 @@ class NativeWintunTunnelManager(
     }
 
     private fun teardownActiveSession() {
+        activeConfig = null
         runCatching { activeDispatcher?.stop() }
         activeDispatcher = null
         runCatching { secondaryPlane?.stop() }

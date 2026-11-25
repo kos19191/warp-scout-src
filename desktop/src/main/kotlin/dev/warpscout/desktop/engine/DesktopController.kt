@@ -563,9 +563,36 @@ class DesktopController(
                     }
                     val ok = nativeTunnel.connect(appliedPrimary, fallbacks, secondExit)
                     if (ok) {
-                        val compactConf = WgConf.render(parsed)
+                        val effectiveCfg = nativeTunnel.activeConfig ?: parsed
+                        val compactConf = WgConf.render(
+                            effectiveCfg.copy(
+                                allowedIps = if (s.settings.routeMode == dev.warpscout.desktop.storage.RouteMode.PRESET) {
+                                    if (s.settings.enableIpv6) "0.0.0.0/0, ::/0" else "0.0.0.0/0"
+                                } else {
+                                    effectiveCfg.allowedIps
+                                }
+                            )
+                        )
                         store.saveActiveConfigText(compactConf)
-                        _state.update { it.copy(activeConfText = compactConf) }
+                        val connectedEp = effectiveCfg.endpoint.render()
+                        val currentShortlist = _state.value.shortlist
+                        val alreadyInShortlist = currentShortlist.any {
+                            it.endpoint == connectedEp && it.junkName == effectiveCfg.junk.name
+                        }
+                        if (!alreadyInShortlist && currentShortlist.all { it.score <= 60 && it.resourcesOk <= 0 }) {
+                            val promoted = ShortlistEntry(
+                                endpoint = connectedEp,
+                                junkName = effectiveCfg.junk.name,
+                                score = 0,
+                                checkedAtMs = System.currentTimeMillis(),
+                                confText = compactConf
+                            )
+                            val updated = (listOf(promoted) + currentShortlist).take(3)
+                            store.saveShortlist(updated)
+                            _state.update { it.copy(activeConfText = compactConf, shortlist = updated) }
+                        } else {
+                            _state.update { it.copy(activeConfText = compactConf) }
+                        }
                         onTrayNotify("WarpScout подключён", "Точка: ${nativeTunnel.snapshot.activeEndpoint}")
                     }
                 } else {

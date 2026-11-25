@@ -260,6 +260,11 @@ jobs:
           } > notes.md
 
           if gh release view "$TAG" > /dev/null 2>&1; then
+            # Удаляем устаревшие .msi/.zip от прошлых версий, чтобы в релизе всегда была только актуальная сборка.
+            OLD_ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' | grep -E '\.(msi|zip)$' | grep -v "WarpScout-$VERSION-" || true)
+            for asset in $OLD_ASSETS; do
+              gh release delete-asset "$TAG" "$asset" --yes || true
+            done
             gh release edit "$TAG" --title "WarpScout Desktop $VERSION (Windows)" --notes-file notes.md --prerelease
             gh release upload "$TAG" out-win/* --clobber
           else
