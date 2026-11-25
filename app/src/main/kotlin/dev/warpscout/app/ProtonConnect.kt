@@ -318,7 +318,7 @@ class ProtonConnect(
         TunnelDebug.stage("Proton: без аккаунта, сторонний сервис proton-generation")
         showBusy(s(R.string.proton_busy_service))
         background(onFail = { t -> fail(t, service = true) }) {
-            val svc = ProtonService(AndroidHttp(), userAgent = "WarpScout/${BuildConfig.VERSION_NAME}", log = { TunnelDebug.stage(it) })
+            val svc = ProtonService(AndroidHttp(), userAgent = "WilyScout/${BuildConfig.VERSION_NAME}", log = { TunnelDebug.stage(it) })
             val session = svc.session()
             if (cancelled) return@background
             showBusy(s(R.string.proton_busy_servers))
@@ -341,7 +341,7 @@ class ProtonConnect(
     private fun finishWithSession(api: ProtonApi, session: ProtonApi.Session, via: Via, account: String) {
         showBusy(s(R.string.proton_busy_key))
         val keys = ProtonKeys.generate()
-        val cert = api.registerKey(session, keys, "WarpScout · ${Build.MODEL.orEmpty()}")
+        val cert = api.registerKey(session, keys, "WilyScout · ${Build.MODEL.orEmpty()}")
         TunnelDebug.stage("Proton: ключ выдан до ${date(cert.expiresAt)}")
         showBusy(s(R.string.proton_busy_servers))
         val servers = try {
@@ -668,7 +668,7 @@ class ProtonConnect(
     private fun newestVersion(): String? = runCatching {
         val reply = AndroidHttp().send(
             "GET", ProtonApi.TAGS_URL,
-            mapOf("Accept" to "application/vnd.github+json", "User-Agent" to "WarpScout/${BuildConfig.VERSION_NAME}"),
+            mapOf("Accept" to "application/vnd.github+json", "User-Agent" to "WilyScout/${BuildConfig.VERSION_NAME}"),
             null,
         )
         if (reply.status in 200..299) ProtonApi.newestVersion(reply.body) else null

@@ -179,7 +179,7 @@ jobs:
           fi
 
   apk:
-    name: "APK (scout + tunnel)"
+    name: "APK"
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.restore_releases == ''
     runs-on: ubuntu-latest
     steps:
@@ -221,7 +221,8 @@ jobs:
       - name: "Сборка отладочных APK"
         run: |
           set -o pipefail
-          ./gradlew --no-daemon :app:assembleScoutDebug :app:assembleTunnelDebug 2>&1 | tee /tmp/apk.log
+          # С 1.10.48 сборка одна — tunnel (приложение WilyScout); scout больше не собирается.
+          ./gradlew --no-daemon :app:assembleTunnelDebug 2>&1 | tee /tmp/apk.log
 
       # Главная проверка подписи — по готовым APK, а не по файлу ключа: важно, чем подписан
       # именно тот файл, который человек скачает. Отпечаток закреплён: если он изменится,
@@ -353,11 +354,10 @@ jobs:
           VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           mkdir -p out
-          SCOUT=$(find apk -name '*scout*.apk' | head -1)
-          TUNNEL=$(find apk -name '*tunnel*.apk' | head -1)
-          [ -n "$SCOUT" ] && [ -n "$TUNNEL" ] || { echo "не нашёл один из APK"; find apk -name '*.apk'; exit 1; }
-          cp "$SCOUT" "out/WarpScout-$VERSION-scout.apk"
-          cp "$TUNNEL" "out/WarpScout-$VERSION-tunnel.apk"
+          # С 1.10.48 приложение одно — WilyScout (сборка tunnel), и файл без приписок: WilyScout-<версия>.apk.
+          APK=$(find apk -name '*tunnel*.apk' | head -1)
+          [ -n "$APK" ] || { echo "не нашёл APK"; find apk -name '*.apk'; exit 1; }
+          cp "$APK" "out/WilyScout-$VERSION.apk"
           ( cd out && sha256sum *.apk | tee SHA256SUMS.txt )
           ls -l out
 
@@ -384,7 +384,7 @@ jobs:
           # коммитах, а страница релиза нужна человеку, который пришёл скачать APK. README — того же тега,
           # что и релиз: ветка main от релизов отстаёт.
           {
-            echo "WarpScout $VERSION — Android-приложение для работы через Cloudflare WARP."
+            echo "WilyScout $VERSION — Android-приложение для работы через Cloudflare WARP (раньше называлось WarpScout)."
             echo
             echo "Находит в вашей сети адрес Cloudflare, который пропускает трафик, поднимает на нём туннель"
             echo "WireGuard/AmneziaWG и держит его сам: переподключается после обрыва и смены сети, меняет точку"
@@ -393,11 +393,10 @@ jobs:
             echo "сервер WireGuard/AmneziaWG или бесплатный Proton VPN, — а TikTok пускает через второй выход целиком:"
             echo "с российского адреса он показывает только старые видео."
             echo
-            echo "| Файл | Что внутри | applicationId |"
-            echo "|---|---|---|"
-            echo "| \`WarpScout-$VERSION-tunnel.apk\` | открывается упрощённым экраном: кнопка, связь, резервная точка | \`dev.warpscout.app.tunnel\` |"
-            echo "| \`WarpScout-$VERSION-scout.apk\` | то же приложение, открывается расширенным экраном со всеми вкладками | \`dev.warpscout.app\` |"
-            echo "| \`SHA256SUMS.txt\` | контрольные суммы SHA-256 обоих APK | |"
+            echo "| Файл | Что внутри |"
+            echo "|---|---|"
+            echo "| \`WilyScout-$VERSION.apk\` | приложение: открывается упрощённым экраном, все вкладки — в расширенном виде (тумблер внизу экрана) |"
+            echo "| \`SHA256SUMS.txt\` | контрольная сумма SHA-256 APK |"
             echo
             echo "**Что нужно.** Android 8.0 и новее. При первом подключении система спросит разрешение на VPN,"
             echo "на Android 13 и новее — ещё на уведомления."
@@ -409,9 +408,14 @@ jobs:
             echo "поставьте её нажатием на файл. Или откройте APK из этого релиза поверх установленного. Настройки,"
             echo "ключи и подобранный конфиг сохраняются."
             echo
-            echo "Обе сборки можно держать на телефоне одновременно (VPN в Android при этом работает только один)."
+            echo "**Если стоит WarpScout.** WilyScout — то же приложение под новым именем (\`dev.warpscout.app.tunnel\`):"
+            echo "оно ставится поверх WarpScout (tunnel) как обновление, с настройками. WarpScout 1.10.47 и более ранние"
+            echo "сами на WilyScout не обновятся — они ищут файл со старым именем: скачайте APK отсюда и откройте его."
+            echo "Отдельной сборки scout больше нет: если она стоит, сохраните в ней резервную копию, в WilyScout"
+            echo "выберите «Восстановить из копии» → «Выбрать файл…» → Download/WarpScout, а scout удалите."
+            echo
             echo "Пока работает VPN другого приложения, подбор точки не запускается: замеры шли бы через чужой туннель."
-            echo "Сборки подписаны debug-ключом: для установки из файла, не для магазина приложений."
+            echo "Сборка подписана debug-ключом: для установки из файла, не для магазина приложений."
             echo "На странице релизов хранятся пять последних версий. Более старую поверх новой Android не поставит —"
             echo "только после удаления приложения (настройки при этом сотрутся)."
             echo
@@ -421,32 +425,31 @@ jobs:
 
           if [ "$BETA" = "1" ]; then
             {
-              echo "**Бета WarpScout $VERSION — для проверки, не обычное обновление.**"
+              echo "**Бета WilyScout $VERSION — для проверки, не обычное обновление.**"
               echo
-              echo "Ставится отдельным приложением **«WarpScout β»** рядом с обычным WarpScout и его не трогает:"
-              echo "applicationId с «.beta» на конце (\`dev.warpscout.app.tunnel.beta\`, \`dev.warpscout.app.beta\`)."
+              echo "Ставится отдельным приложением **«WilyScout β»** рядом с обычным WilyScout и его не трогает:"
+              echo "applicationId с «.beta» на конце (\`dev.warpscout.app.tunnel.beta\`)."
               echo "VPN в Android работает один: перед проверкой отключите туннель в обычном приложении (и «Постоянную VPN»"
               echo "для него в настройках Android, если включена), после — наоборот. Настройки, точки, второй выход"
-              echo "и списки переносятся резервной копией: в обычном приложении (1.10.43.1 и новее) «Сохранить резервную"
-              echo "копию» — она ляжет в «Загрузки/WarpScout», в бете — «Восстановить из копии» → «Выбрать файл…» →"
-              echo "Download/WarpScout. В копиях прежних версий только основные настройки."
+              echo "и списки переносятся резервной копией: в обычном приложении «Сохранить резервную копию» — она ляжет"
+              echo "в «Загрузки/WilyScout» (у WarpScout до 1.10.48 — в «Загрузки/WarpScout»), в бете — «Восстановить"
+              echo "из копии» → «Выбрать файл…» → эта папка → самый новый файл."
               echo
               echo "Обычная версия бету себе не предлагает; бета проверяет обновления только среди бет."
               echo
-              echo "| Файл | Что внутри | applicationId |"
-              echo "|---|---|---|"
-              echo "| \`WarpScout-$VERSION-tunnel.apk\` | бета, открывается упрощённым экраном | \`dev.warpscout.app.tunnel.beta\` |"
-              echo "| \`WarpScout-$VERSION-scout.apk\` | бета, открывается расширенным экраном | \`dev.warpscout.app.beta\` |"
-              echo "| \`SHA256SUMS.txt\` | контрольные суммы SHA-256 обоих APK | |"
+              echo "| Файл | Что внутри |"
+              echo "|---|---|"
+              echo "| \`WilyScout-$VERSION.apk\` | бета — отдельное приложение «WilyScout β» |"
+              echo "| \`SHA256SUMS.txt\` | контрольная сумма SHA-256 APK |"
               echo
               echo "Что в бете и как устроено — в [README](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/README.md), раздел «Бета»."
               echo "Собрано автоматически из коммита \`${GITHUB_SHA:0:7}\`, прогон: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             } > notes.md
           fi
-          TITLE="WarpScout $VERSION"
+          TITLE="WilyScout $VERSION"
           PRE=()
           if [ "$BETA" = "1" ]; then
-            TITLE="WarpScout $VERSION (бета)"
+            TITLE="WilyScout $VERSION (бета)"
             PRE=(--prerelease --latest=false)
           fi
 
@@ -462,7 +465,7 @@ jobs:
                 --title "$TITLE" --notes-file notes.md --verify-tag "${PRE[@]}"
             else
               gh release create "$TAG" out/*.apk out/SHA256SUMS.txt \
-                --title "WarpScout $VERSION ($TAG)" --notes-file notes.md --target "$GITHUB_SHA"
+                --title "WilyScout $VERSION ($TAG)" --notes-file notes.md --target "$GITHUB_SHA"
             fi
             echo "создал релиз $TAG"
           fi
@@ -572,12 +575,18 @@ jobs:
             fi
             SCOUT=$(find "$work/apk" -name '*scout*.apk' | head -1)
             TUNNEL=$(find "$work/apk" -name '*tunnel*.apk' | head -1)
-            if [ -z "$SCOUT" ] || [ -z "$TUNNEL" ]; then
+            # С 1.10.48 в артефакте один APK — WilyScout (сборка tunnel); до неё — два, WarpScout scout и tunnel.
+            NAME="WarpScout"
+            if [ -n "$TUNNEL" ] && [ -z "$SCOUT" ]; then
+              NAME="WilyScout"
+              cp "$TUNNEL" "$work/out/WilyScout-$VERSION.apk"
+            elif [ -n "$SCOUT" ] && [ -n "$TUNNEL" ]; then
+              cp "$SCOUT" "$work/out/WarpScout-$VERSION-scout.apk"
+              cp "$TUNNEL" "$work/out/WarpScout-$VERSION-tunnel.apk"
+            else
               find "$work/apk" -type f
-              err "$TAG: в артефакте прогона $RUN нет одного из APK"; echo "::endgroup::"; continue
+              err "$TAG: в артефакте прогона $RUN нет APK"; echo "::endgroup::"; continue
             fi
-            cp "$SCOUT" "$work/out/WarpScout-$VERSION-scout.apk"
-            cp "$TUNNEL" "$work/out/WarpScout-$VERSION-tunnel.apk"
             ( cd "$work/out" && sha256sum *.apk | tee SHA256SUMS.txt )
 
             # Подпись проверял исходный прогон; здесь — ещё раз, если на раннере есть apksigner.
@@ -627,9 +636,23 @@ jobs:
               echo "Предыдущие версии остаются на странице релизов. Вернуться на более старую можно, только"
               echo "удалив текущую: поверх новой версии Android старую не ставит (настройки при этом сотрутся)."
             } > "$work/notes.md"
+            if [ "$NAME" = "WilyScout" ]; then
+              {
+                echo "WilyScout $VERSION — Android-приложение для работы через Cloudflare WARP (раньше называлось WarpScout)."
+                echo
+                echo "| Файл | Что внутри |"
+                echo "|---|---|"
+                echo "| \`WilyScout-$VERSION.apk\` | приложение (\`dev.warpscout.app.tunnel\`) |"
+                echo "| \`SHA256SUMS.txt\` | контрольная сумма SHA-256 APK |"
+                echo
+                echo "Восстановлено из артефакта прогона, который собирал этот релиз: файл тот же, без пересборки."
+                echo "Как устроено приложение — в [README](https://github.com/${GH_REPO}/blob/${TAG}/README.md)."
+                echo "Собрано автоматически из коммита \`${SHA:0:7}\`, прогон: https://github.com/${GH_REPO}/actions/runs/${RUN}"
+              } > "$work/notes.md"
+            fi
 
             if ! out=$(gh release create "$TAG" "$work"/out/*.apk "$work/out/SHA256SUMS.txt" \
-                "${target[@]}" --title "WarpScout $VERSION" --notes-file "$work/notes.md" --latest=false 2>&1); then
+                "${target[@]}" --title "$NAME $VERSION" --notes-file "$work/notes.md" --latest=false 2>&1); then
               err "$TAG: релиз не создан: ${out:0:170}"; echo "::endgroup::"; continue
             fi
             echo "$out"

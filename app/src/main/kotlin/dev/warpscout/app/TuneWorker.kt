@@ -126,7 +126,7 @@ class TuneWorker(appContext: Context, params: WorkerParameters) : Worker(appCont
         val n = NotificationCompat.Builder(context, CHANNEL)
             // Своя иконка: значок Bluetooth в уведомлении о подборе конфигурации сбивал с толку.
             .setSmallIcon(R.drawable.ic_tile_tunnel)
-            .setContentTitle("WarpScout")
+            .setContentTitle("WilyScout")
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .build()

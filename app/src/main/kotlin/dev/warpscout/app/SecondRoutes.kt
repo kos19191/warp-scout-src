@@ -173,7 +173,7 @@ object SecondRoutes {
             val t0 = android.os.SystemClock.elapsedRealtime()
             val body = runCatching {
                 ExitCheck.fetchTrace(
-                    ip, CHECK_HOST, if (i == 0) 7000 else 5000, "WarpScout/${BuildConfig.VERSION_NAME}",
+                    ip, CHECK_HOST, if (i == 0) 7000 else 5000, "WilyScout/${BuildConfig.VERSION_NAME}",
                     verify = { host, session -> javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier().verify(host, session) }
                 )
             }

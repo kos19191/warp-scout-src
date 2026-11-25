@@ -11,8 +11,8 @@ android {
         applicationId = "dev.warpscout.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 81
-        versionName = "1.10.47"
+        versionCode = 82
+        versionName = "1.10.48"
         // Номер сборки (короткий хеш коммита из CI): по этой метке в журнале видно, какая именно
         // сборка стоит на телефоне. Локально — «local».
         // С 1.10.41 каждая сборка для телефона получает НОВЫЙ номер версии. Пересборку с тем же
@@ -26,7 +26,7 @@ android {
             "\"" + (System.getenv("GITHUB_SHA")?.take(7) ?: "local") + "\""
         )
         // Бета (с 1.10.44-beta1): версия вида «1.10.44-beta1». Ставится отдельным приложением рядом с
-        // обычным («WarpScout β», applicationId с «.beta» на конце), обновляется только бетами из
+        // обычным («WilyScout β», applicationId с «.beta» на конце), обновляется только бетами из
         // пре-релизов и обычную версию на телефоне не трогает.
         buildConfigField("boolean", "BETA", versionName.orEmpty().contains("-beta").toString())
     }
@@ -35,24 +35,16 @@ android {
 
     flavorDimensions += "mode"
     productFlavors {
-        // С 1.10.27 «только конфиги» больше нет: обе сборки — полное приложение со своим
-        // туннелем. Разница одна — каким экраном оно открывается, пока человек сам не выбрал
-        // (тумблер внизу экрана, выбор запоминается). Идентификаторы и подписи прежние, поэтому
-        // обе обновляются поверх старых версий без потери настроек.
-        create("scout") {
-            dimension = "mode"
-            buildConfigField("boolean", "TUNNEL_SUPPORTED", "true")
-            // scout открывается расширенным экраном — всеми вкладками, как раньше.
-            buildConfigField("boolean", "DEFAULT_SIMPLE", "false")
-            resValue("string", "app_name", if (beta) "WarpScout β (scout)" else "WarpScout")
-        }
+        // С 1.10.48 сборка одна — tunnel, а приложение называется WilyScout (раньше — WarpScout;
+        // сборки scout, открывавшейся расширенным экраном, больше нет: тот же вид — тумблером внизу
+        // экрана). Идентификатор прежний — dev.warpscout.app.tunnel, ключ тот же, поэтому WilyScout
+        // ставится поверх WarpScout (tunnel) как обновление, без потери настроек.
         create("tunnel") {
             dimension = "mode"
             buildConfigField("boolean", "TUNNEL_SUPPORTED", "true")
-            // tunnel открывается упрощённым: кнопка подключения, резервная точка, проверка связи.
+            // Открывается упрощённым экраном: кнопка подключения, резервная точка, проверка связи.
             buildConfigField("boolean", "DEFAULT_SIMPLE", "true")
-            resValue("string", "app_name", if (beta) "WarpScout β" else "WarpScout (tunnel)")
-            // чтобы обе сборки можно было держать на телефоне одновременно и сравнивать
+            resValue("string", "app_name", if (beta) "WilyScout β" else "WilyScout")
             applicationIdSuffix = ".tunnel"
         }
     }

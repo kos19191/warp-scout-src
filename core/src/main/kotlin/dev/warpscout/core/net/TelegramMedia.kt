@@ -215,7 +215,7 @@ object TelegramMedia {
                 socket.soTimeout = readTimeoutMs
                 val request = "GET ${target.path} HTTP/1.1\r\n" +
                     "Host: ${target.hostHeader}\r\n" +
-                    "User-Agent: WarpScout\r\n" +
+                    "User-Agent: WilyScout\r\n" +
                     "Accept: */*\r\n" +
                     "Accept-Encoding: identity\r\n" +
                     "Range: bytes=0-${maxBytes - 1}\r\n" +

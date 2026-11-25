@@ -38,7 +38,10 @@ object Backup {
     private const val KEEP = 10
 
     /** Папка копий в «Загрузках» (с 1.10.43.1). */
-    const val FOLDER = "WarpScout"
+    const val FOLDER = "WilyScout"
+
+    /** Папка копий до 1.10.48, когда приложение называлось WarpScout: список копий смотрит и её. */
+    const val OLD_FOLDER = "WarpScout"
 
     private const val VAULT_PREFS = "warpscout_vault"
 
@@ -145,7 +148,7 @@ object Backup {
     fun save(context: Context, reason: String): File? = synchronized(lock) {
         runCatching {
             val text = BackupFormat.render(collect(context, reason))
-            val name = "warpscout-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())}.bak"
+            val name = "wilyscout-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())}.bak"
             val file = File(dir(context), name)
             val tmp = File(file.parentFile, file.name + ".tmp")
             tmp.writeText(text)
@@ -223,8 +226,15 @@ object Backup {
                 MediaStore.MediaColumns.DATE_MODIFIED,
                 MediaStore.MediaColumns.SIZE,
             )
-            val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?"
-            val args = arrayOf("${Environment.DIRECTORY_DOWNLOADS}/$FOLDER%", "%.bak")
+            // И новая папка, и папка до 1.10.48 («Загрузки/WarpScout»): копии, записанные до
+            // переименования, остаются в списке.
+            val selection = "(${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? OR ${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?)" +
+                " AND ${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?"
+            val args = arrayOf(
+                "${Environment.DIRECTORY_DOWNLOADS}/$FOLDER%",
+                "${Environment.DIRECTORY_DOWNLOADS}/$OLD_FOLDER%",
+                "%.bak",
+            )
             val out = ArrayList<Item>()
             context.contentResolver.query(
                 MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection, selection, args,
@@ -243,11 +253,16 @@ object Backup {
         }.getOrDefault(emptyList())
     }
 
-    /** Папка «Загрузки/WarpScout» уже есть — окно выбора файла открываем сразу в ней. */
-    fun downloadsFolderExists(): Boolean = runCatching {
-        @Suppress("DEPRECATION")
-        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), FOLDER).isDirectory
-    }.getOrDefault(false)
+    /**
+     * Папка копий в «Загрузках», в которой открывать окно выбора файла: «WilyScout», если она уже
+     * есть, иначе «WarpScout» (копии до 1.10.48); null — ни одной.
+     */
+    fun pickerFolder(): String? = listOf(FOLDER, OLD_FOLDER).firstOrNull { name ->
+        runCatching {
+            @Suppress("DEPRECATION")
+            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), name).isDirectory
+        }.getOrDefault(false)
+    }
 
     fun list(context: Context): List<File> =
         (dir(context).listFiles() ?: emptyArray()).filter { it.name.endsWith(".bak") }
@@ -401,7 +416,7 @@ object Backup {
             else -> "свой сервер" + if (m["secondExitOn"] == true) "" else " (выключен)"
         }
         val lines = ArrayList<String>()
-        data.notes["app"]?.substringAfter(' ', "")?.ifBlank { null }?.let { lines += "Записана в WarpScout $it." }
+        data.notes["app"]?.substringAfter(' ', "")?.ifBlank { null }?.let { lines += "Записана версией $it." }
         lines += "Внутри:"
         lines += "• настройки: ${m.size} (приложений в туннеле: $apps, выход по приложениям: $exits)"
         lines += "• второй выход: $second"

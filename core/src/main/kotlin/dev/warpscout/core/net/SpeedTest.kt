@@ -164,7 +164,7 @@ object SpeedTest {
             conn.setRequestProperty("Cache-Control", "no-cache")
             // Без сжатия: считаем байты канала. Сжатый поток нулей «качался» бы в сотни раз быстрее.
             conn.setRequestProperty("Accept-Encoding", "identity")
-            conn.setRequestProperty("User-Agent", "WarpScout")
+            conn.setRequestProperty("User-Agent", "WilyScout")
             val code = try {
                 conn.responseCode
             } catch (e: SocketTimeoutException) {

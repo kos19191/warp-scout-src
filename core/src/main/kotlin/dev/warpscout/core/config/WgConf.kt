@@ -197,7 +197,7 @@ object WgConf {
 
     /** Только маршруты + список доменов комментарием: для «у меня уже есть WG, добавь маршруты». */
     fun renderRoutes(cfg: WarpConfig): String = buildString {
-        appendLine("# WarpScout: каналы туннелирования для «${cfg.name}»")
+        appendLine("# WilyScout: каналы туннелирования для «${cfg.name}»")
         appendLine("# Сервер (Endpoint): ${cfg.endpoint.render()}")
         appendLine("# Домены здесь уже развёрнуты в IP: WireGuard не умеет правила по именам, только маршруты.")
         appendLine("# Собранные адреса устаревают (CDN меняет IP) — обнови списки, если что-то из этого перестало открываться.")

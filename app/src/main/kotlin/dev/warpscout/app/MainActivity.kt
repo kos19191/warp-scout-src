@@ -2290,10 +2290,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         Thread({
             val now = java.util.Date()
             val text = buildString {
-                appendLine(
-                    "WarpScout ${BuildConfig.VERSION_NAME} · сборка ${BuildConfig.BUILD_REV} · " +
-                        app.getString(if (BuildConfig.FLAVOR == "tunnel") R.string.variant_tunnel else R.string.variant_scout)
-                )
+                appendLine("WilyScout ${BuildConfig.VERSION_NAME} · сборка ${BuildConfig.BUILD_REV}")
                 appendLine(
                     "выгружено: " +
                         java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(now)
@@ -2370,12 +2367,13 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                 appendLine(CrashLog.describe(app))
             }
             val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(now)
-            val name = "WarpScout-log-$stamp.txt"
+            val name = "WilyScout-log-$stamp.txt"
             // Для «Поделиться» — копия во временном каталоге (его отдаёт FileProvider); прежние
             // выгрузки удаляем, чтобы они не копились.
             val shareFile = runCatching {
                 val dir = java.io.File(app.cacheDir, "share").apply { mkdirs() }
-                dir.listFiles()?.filter { it.name.startsWith("WarpScout-log-") }?.forEach { it.delete() }
+                dir.listFiles()?.filter { it.name.startsWith("WilyScout-log-") || it.name.startsWith("WarpScout-log-") }
+                    ?.forEach { it.delete() }
                 java.io.File(dir, name).apply { writeText(text) }
             }.getOrNull()
             val saved = runCatching { ConfigFiles.saveTextToDownloads(app, name, text) }.getOrNull()
@@ -5745,10 +5743,13 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         }.onFailure { toast(getString(R.string.share_failed)) }
     }
 
-    /** Папка копий для окон выбора: «Загрузки/WarpScout», если она уже есть, иначе «Загрузки». */
+    /**
+     * Папка копий для окон выбора: «Загрузки/WilyScout», если она уже есть, иначе «Загрузки/WarpScout»
+     * (копии до 1.10.48), иначе просто «Загрузки».
+     */
     private fun backupFolderUri(): Uri = android.provider.DocumentsContract.buildDocumentUri(
         "com.android.externalstorage.documents",
-        if (Backup.downloadsFolderExists()) "primary:Download/${Backup.FOLDER}" else "primary:Download"
+        Backup.pickerFolder()?.let { "primary:Download/$it" } ?: "primary:Download"
     )
 
     /**
@@ -5827,7 +5828,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         }
         val text = String(bytes, Charsets.UTF_8)
         if (!Backup.isBackup(text)) {
-            TunnelDebug.stage("бекап: «$fileName» — не бекап WarpScout")
+            TunnelDebug.stage("бекап: «$fileName» — не бекап WilyScout")
             banner(getString(R.string.backup_file_bad, fileName), error = true)
             return
         }
@@ -6597,7 +6598,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         updateNote(getString(R.string.update_checking))
         Thread {
             val result = runCatching {
-                Updater.check(BuildConfig.VERSION_NAME, BuildConfig.BUILD_REV, BuildConfig.FLAVOR)
+                Updater.check(BuildConfig.VERSION_NAME, BuildConfig.BUILD_REV)
             }
             runOnUiThread {
                 UpdateFlow.endCheck()

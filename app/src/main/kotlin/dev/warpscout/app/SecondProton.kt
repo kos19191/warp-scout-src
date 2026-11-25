@@ -107,7 +107,7 @@ object SecondProton {
             instanceFollowRedirects = true
             connectTimeout = 15_000
             readTimeout = 30_000
-            setRequestProperty("User-Agent", "WarpScout/${BuildConfig.VERSION_NAME}")
+            setRequestProperty("User-Agent", "WilyScout/${BuildConfig.VERSION_NAME}")
             if (raw) setRequestProperty("Accept", "application/vnd.github.raw")
         }
         try {

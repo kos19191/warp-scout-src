@@ -144,7 +144,7 @@ object SafeMode {
     private fun copyToClipboard(activity: Activity, text: String) {
         runCatching {
             val cm = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            cm.setPrimaryClip(ClipData.newPlainText("WarpScout", text))
+            cm.setPrimaryClip(ClipData.newPlainText("WilyScout", text))
         }
     }
 

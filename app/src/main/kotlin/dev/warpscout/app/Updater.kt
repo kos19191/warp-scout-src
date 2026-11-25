@@ -76,7 +76,12 @@ object Updater {
     /** Файл скачался, но контрольная сумма не сошлась с SHA256SUMS.txt релиза. */
     class BadHash : Exception("контрольная сумма не сошлась")
 
-    fun apkName(version: String, flavor: String): String = "WarpScout-$version-$flavor.apk"
+    /**
+     * Имя APK в релизе. С 1.10.48 приложение одно и называется WilyScout: «WilyScout-1.10.48.apk»,
+     * у беты — «WilyScout-1.10.49-beta1.apk». До неё было две сборки: «WarpScout-<версия>-tunnel.apk»
+     * и «…-scout.apk».
+     */
+    fun apkName(version: String): String = "WilyScout-$version.apk"
 
     /**
      * Состояние системной загрузки: [status] — DownloadManager.STATUS_*, байты — сколько из скольких,
@@ -91,12 +96,12 @@ object Updater {
      */
     data class Direct(val uri: Uri, val name: String, val size: Long, val verified: Boolean?)
 
-    fun check(currentVersion: String, buildRev: String, flavor: String): Check {
+    fun check(currentVersion: String, buildRev: String): Check {
         // Бета (с 1.10.44-beta1) — отдельное приложение: ей предлагаются только беты, обычные версии — нет.
-        if (BuildConfig.BETA) return checkBeta(currentVersion, buildRev, flavor)
-        val viaApi = runCatching { latestFromApi(flavor) }
-        val release = viaApi.getOrNull() ?: latestFromWeb(flavor)
-        if (release.apkUrl.isBlank()) return Check.NoAsset(release.tag, apkName(release.version, flavor))
+        if (BuildConfig.BETA) return checkBeta(currentVersion, buildRev)
+        val viaApi = runCatching { latestFromApi() }
+        val release = viaApi.getOrNull() ?: latestFromWeb()
+        if (release.apkUrl.isBlank()) return Check.NoAsset(release.tag, apkName(release.version))
         val cmp = compareVersions(release.version, currentVersion)
         if (cmp > 0) return Check.Newer(release)
         if (cmp < 0) return Check.Latest(currentVersion)
@@ -116,9 +121,9 @@ object Updater {
      * предлагаются: это другое приложение (applicationId с «.beta»), его APK встал бы рядом, а не поверх.
      * Только через API: страница releases/latest пре-релизов не показывает.
      */
-    private fun checkBeta(currentVersion: String, buildRev: String, flavor: String): Check {
-        val release = latestBetaFromApi(flavor)
-        if (release.apkUrl.isBlank()) return Check.NoAsset(release.tag, apkName(release.version, flavor))
+    private fun checkBeta(currentVersion: String, buildRev: String): Check {
+        val release = latestBetaFromApi()
+        if (release.apkUrl.isBlank()) return Check.NoAsset(release.tag, apkName(release.version))
         val cmp = compareBeta(release.version, currentVersion)
         if (cmp > 0) return Check.Newer(release)
         if (cmp < 0) return Check.Latest(currentVersion)
@@ -129,7 +134,7 @@ object Updater {
         return Check.Latest(currentVersion)
     }
 
-    private fun latestBetaFromApi(flavor: String): Release {
+    private fun latestBetaFromApi(): Release {
         val body = runCatching { get("$API/releases?per_page=30", api = true) }.getOrElse {
             error("бета: GitHub API сейчас не отвечает (без входа — 60 запросов в час на адрес), попробуй позже")
         }
@@ -139,9 +144,9 @@ object Updater {
         val tag = json.str("tag_name").orEmpty()
         val version = tag.removePrefix("v")
         val assets = json.arr("assets")?.items.orEmpty().mapNotNull { it as? JsonVal.Obj }
-        val want = apkName(version, flavor)
+        val want = apkName(version)
         val apk = assets.firstOrNull { it.str("name") == want }
-            ?: assets.firstOrNull { it.str("name").orEmpty().endsWith("-$flavor.apk") }
+            ?: assets.firstOrNull { it.str("name").orEmpty().endsWith(".apk") }
         val sums = assets.firstOrNull { it.str("name") == "SHA256SUMS.txt" }
         return Release(
             tag = tag,
@@ -182,15 +187,15 @@ object Updater {
         return 0
     }
 
-    private fun latestFromApi(flavor: String): Release {
+    private fun latestFromApi(): Release {
         val json = parseJson(get("$API/releases/latest", api = true)) as? JsonVal.Obj
             ?: error("ответ GitHub не разобрался")
         val tag = json.str("tag_name").orEmpty().ifBlank { error("в ответе нет тега") }
         val version = tag.removePrefix("v")
         val assets = json.arr("assets")?.items.orEmpty().mapNotNull { it as? JsonVal.Obj }
-        val want = apkName(version, flavor)
+        val want = apkName(version)
         val apk = assets.firstOrNull { it.str("name") == want }
-            ?: assets.firstOrNull { it.str("name").orEmpty().endsWith("-$flavor.apk") }
+            ?: assets.firstOrNull { it.str("name").orEmpty().endsWith(".apk") }
         val sums = assets.firstOrNull { it.str("name") == "SHA256SUMS.txt" }
         return Release(
             tag = tag,
@@ -203,7 +208,7 @@ object Updater {
     }
 
     /** Без API: `releases/latest` перенаправляет на `releases/tag/vX`, имена файлов известны. */
-    private fun latestFromWeb(flavor: String): Release {
+    private fun latestFromWeb(): Release {
         val conn = (URL("$WEB/releases/latest").openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = false
             connectTimeout = 10_000
@@ -219,7 +224,7 @@ object Updater {
         val tag = location.substringAfter("/releases/tag/", "").substringBefore('?').trim()
         if (tag.isBlank()) error("GitHub не назвал последний релиз")
         val version = tag.removePrefix("v")
-        val name = apkName(version, flavor)
+        val name = apkName(version)
         return Release(
             tag = tag,
             version = version,
@@ -249,7 +254,7 @@ object Updater {
         // response-content-type APK), и по нему нажатие на «Загрузка завершена» открывает установщик.
         val request = DownloadManager.Request(Uri.parse(release.apkUrl))
             .setTitle(release.apkName)
-            .setDescription("WarpScout ${release.version}")
+            .setDescription("WilyScout ${release.version}")
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
             .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, release.apkName)
             .addRequestHeader("User-Agent", userAgent())
@@ -330,7 +335,7 @@ object Updater {
                 val id = c.getLong(idCol)
                 val title = if (titleCol >= 0) runCatching { c.getString(titleCol) }.getOrNull().orEmpty() else ""
                 if (id != keep && c.getInt(statusCol) != DownloadManager.STATUS_SUCCESSFUL &&
-                    title.startsWith("WarpScout-") && title.endsWith(".apk")
+                    (title.startsWith("WilyScout-") || title.startsWith("WarpScout-")) && title.endsWith(".apk")
                 ) {
                     stale += id
                 }
@@ -563,5 +568,5 @@ object Updater {
         }
     }
 
-    private fun userAgent(): String = "WarpScout/${BuildConfig.VERSION_NAME} (${BuildConfig.FLAVOR})"
+    private fun userAgent(): String = "WilyScout/${BuildConfig.VERSION_NAME}"
 }

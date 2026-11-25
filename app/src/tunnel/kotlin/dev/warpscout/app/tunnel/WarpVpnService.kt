@@ -3270,7 +3270,7 @@ class WarpVpnService : VpnService() {
             val had = SplitRoutes.prefixesOf(withDns).toHashSet()
             val added = SplitRoutes.prefixesOf(withGithub).count { it !in had && (v6 || !it.contains(':')) }
             if (added > 0) {
-                TunnelDebug.stage("обновления WarpScout: сети GitHub в маршрутах туннеля (+$added) — обновление и списки сайтов качаются через туннель")
+                TunnelDebug.stage("обновления WilyScout: сети GitHub в маршрутах туннеля (+$added) — обновление и списки сайтов качаются через туннель")
             }
         }
         return withGithub
@@ -3849,7 +3849,7 @@ class WarpVpnService : VpnService() {
 
     private fun builderFor(cfg: WarpConfig): Builder {
         val builder = Builder()
-            .setSession("WarpScout")
+            .setSession("WilyScout")
             .setMtu(cfg.mtu.coerceIn(576, 1420))
             // setBlocking — это НЕ «запретить трафик мимо маршрутов» (так ошибочно было написано
             // здесь раньше), а режим дескриптора tun: блокирующее чтение или нет. Дескриптор
@@ -3914,7 +3914,7 @@ class WarpVpnService : VpnService() {
                     // который идут выбранные приложения.
                     runCatching { builder.addAllowedApplication(packageName) }
                     TunnelDebug.stage(
-                        "приложения: только выбранные (${selected.size}) и сам WarpScout — для проверок" +
+                        "приложения: только выбранные (${selected.size}) и сам WilyScout — для проверок" +
                             added.joinToString("") { "; с ними приложение ${it.companion.title} — внутри него работает ${it.service}" }
                     )
                     absent.forEach {

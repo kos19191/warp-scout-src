@@ -216,7 +216,7 @@ class VpnTunnelVerifier(private val context: Context) : TunnelVerifier {
     @Volatile
     private var lastSpeed = -1
 
-    override val title: String get() = "собственный туннель WarpScout"
+    override val title: String get() = "собственный туннель WilyScout"
 
     override fun lastSpeedKbps(): Int = lastSpeed
 

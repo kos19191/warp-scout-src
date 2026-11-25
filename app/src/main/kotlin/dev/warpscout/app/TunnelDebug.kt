@@ -299,7 +299,7 @@ object TunnelDebug {
         file.parentFile?.mkdirs()
         file.writeText(
             buildString {
-                appendLine("WarpScout: журнал туннеля")
+                appendLine("WilyScout: журнал туннеля")
                 appendLine("время: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}")
                 appendLine("байт вверх/вниз: $bytesUp / $bytesDown, попыток handshake: $handshakeAttempts")
                 appendLine()

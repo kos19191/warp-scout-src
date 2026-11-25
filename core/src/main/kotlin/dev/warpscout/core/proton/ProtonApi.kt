@@ -552,7 +552,7 @@ class ProtonApi(
 class ProtonService(
     private val http: ProtonHttp,
     private val bases: List<String> = BASES,
-    private val userAgent: String = "WarpScout",
+    private val userAgent: String = "WilyScout",
     private val log: (String) -> Unit = {},
 ) {
     companion object {

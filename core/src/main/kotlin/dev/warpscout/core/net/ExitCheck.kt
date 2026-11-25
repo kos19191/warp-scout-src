@@ -166,7 +166,7 @@ object ExitCheck {
         ip: String,
         host: String,
         timeoutMs: Int = 7000,
-        userAgent: String = "WarpScout",
+        userAgent: String = "WilyScout",
         verify: ((String, SSLSession) -> Boolean)? = null,
         socket: () -> Socket = { Socket() },
     ): String {

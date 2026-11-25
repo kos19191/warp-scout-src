@@ -1,8 +1,8 @@
 <resources>
-    <string name="app_name">WarpScout</string>
-    <string name="app_name_long">WarpScout — автоматический подбор WARP/AWG</string>
+    <string name="app_name">WilyScout</string>
+    <string name="app_name_long">WilyScout — автоматический подбор WARP/AWG</string>
     <string name="import_title">Импорт конфига</string>
-    <string name="vpn_notification">WarpScout: туннель активен</string>
+    <string name="vpn_notification">WilyScout: туннель активен</string>
 
     <string name="tab_start">Главная</string>
     <string name="tab_scan">Подбор</string>
@@ -80,7 +80,7 @@
     <!-- Пока конфигурации нет, кнопка не обещает «включить», а честно говорит, что сделает. -->
     <string name="btn_tunnel_search">Найти точку и подключиться</string>
     <string name="btn_tunnel_searching">Ищу точку и подключаюсь…</string>
-    <string name="shield_desc">Знак WarpScout: щит с лисой</string>
+    <string name="shield_desc">Знак WilyScout: щит с лисой</string>
     <string name="banner_no_config_scanning">Туннеля ещё нет — подбираю точку и подключусь сам</string>
     <string name="scan_found_connecting">Точка найдена — подключаюсь</string>
     <string name="scan_found_connecting_to">Лучшая точка: %1$s — подключаюсь к ней</string>
@@ -193,7 +193,7 @@
     <string name="tunnel_connecting_saved">Подключаюсь к сохранённой точке %1$s…</string>
     <string name="btn_backup">Сохранить резервную копию</string>
     <string name="btn_restore">Восстановить из копии</string>
-    <string name="backup_hint">Резервная копия — один файл со всем, что помнит приложение: настройки, рабочий конфиг, тройки точек и резервные точки, второй выход, приложения и сайты в туннеле, память точек, скачанные списки и ключ аккаунта. Приложение пишет копию само после каждого подключения и подбора, но хранит у себя — при удалении приложения эти копии стираются. Кнопка выше кладёт копию в «Загрузки/WarpScout»: оттуда её откроет «Восстановить из копии» → «Выбрать файл…» — и после переустановки, и в бете. В копии ключи — не выкладывайте её в открытый доступ.</string>
+    <string name="backup_hint">Резервная копия — один файл со всем, что помнит приложение: настройки, рабочий конфиг, тройки точек и резервные точки, второй выход, приложения и сайты в туннеле, память точек, скачанные списки и ключ аккаунта. Приложение пишет копию само после каждого подключения и подбора, но хранит у себя — при удалении приложения эти копии стираются. Кнопка выше кладёт копию в «Загрузки/WilyScout»: оттуда её откроет «Восстановить из копии» → «Выбрать файл…» — и после переустановки, и в бете. В копии ключи — не выкладывайте её в открытый доступ.</string>
     <string name="backup_failed">Бекап не сохранился</string>
     <string name="backup_saved_where">Копия сохранена: %1$s</string>
     <string name="backup_saved_title">Копия сохранена</string>
@@ -202,25 +202,25 @@
     <string name="backup_export_fail">Копия не записалась: %1$s</string>
     <string name="backup_restored">Восстановлено из «%1$s»: %2$s. Переподключите туннель — точки и маршруты из копии вступят в силу.</string>
     <string name="backup_restored_old">Восстановлено из «%1$s»: %2$s. Это копия старого формата — в ней только основные настройки: тройки точек, память точек и списки не перенеслись. Сохраните копию заново в обновлённом приложении и восстановите её.</string>
-    <string name="backup_restore_failed">«%1$s» не восстановилась: файл повреждён или это не копия WarpScout</string>
-    <string name="backup_none">В приложении копий нет — выберите файл копии (обычно Download/WarpScout)</string>
+    <string name="backup_restore_failed">«%1$s» не восстановилась: файл повреждён или это не копия WilyScout</string>
+    <string name="backup_none">В приложении копий нет — выберите файл копии (обычно Download/WilyScout, копии до 1.10.48 — в Download/WarpScout)</string>
     <string name="backup_choice_title">Из какой копии восстановить?</string>
     <string name="backup_choice_app">Последняя копия этого приложения: %1$s</string>
     <string name="backup_choice_downloads">Последняя в «Загрузках/%1$s»: %2$s</string>
-    <string name="backup_choice_file">Выбрать файл… (Download/%1$s — там копии и обычного WarpScout, и беты)</string>
+    <string name="backup_choice_file">Выбрать файл… (Download/%1$s — там копии и обычного WilyScout, и беты; копии до 1.10.48 — в Download/WarpScout)</string>
     <string name="backup_pick">Выбрать файл…</string>
     <string name="backup_picker_fail">Окно выбора файла не открылось</string>
     <string name="backup_file_fail">Файл копии не прочитался: %1$s</string>
-    <string name="backup_file_big">Файл больше 8 МБ — это не бекап WarpScout</string>
+    <string name="backup_file_big">Файл больше 8 МБ — это не бекап WilyScout</string>
     <string name="backup_denied_title">Samsung не дал прочитать файл</string>
     <string name="backup_denied_message">«%1$s» открыт через «Загрузки» или «Недавние» — оттуда Samsung отдаёт не все файлы. Откройте его через «Мои файлы» или в окне выбора: ☰ → «Внутренняя память» → Download.</string>
     <string name="backup_pick_myfiles">Мои файлы</string>
     <string name="backup_pick_again">Выбрать снова</string>
-    <string name="backup_file_bad">«%1$s» — не бекап WarpScout. Нужен файл warpscout-….bak, сохранённый кнопкой «Сохранить резервную копию»</string>
+    <string name="backup_file_bad">«%1$s» — не бекап WilyScout. Нужен файл wilyscout-….bak (до 1.10.48 — warpscout-….bak), сохранённый кнопкой «Сохранить резервную копию»</string>
     <string name="backup_restore_title">Восстановить настройки?</string>
     <string name="backup_restore_message">Текущие настройки будут заменены содержимым %1$s. Туннель после этого лучше переподключить.</string>
     <string name="backup_restore_ok">Восстановить</string>
-    <string name="backup_share_title">Бекап WarpScout</string>
+    <string name="backup_share_title">Бекап WilyScout</string>
     <string name="btn_save_apply">Сохранить и применить</string>
     <string name="btn_save_send">Сохранить и отправить</string>
     <string name="btn_save_plain">Сохранить</string>
@@ -287,9 +287,7 @@
     <string name="conn_failed">● Не удалось подключиться: %1$s</string>
     <string name="conn_waiting">● Переподключусь сам: %1$s</string>
     <string name="journal_empty">Журнал пуст: туннель ещё не запускался. Подключитесь на вкладке «Главная» — здесь появится каждый шаг с временем.</string>
-    <string name="version_footer">WarpScout %1$s</string>
-    <string name="variant_tunnel">tunnel · открывается упрощённым экраном</string>
-    <string name="variant_scout">scout · открывается расширенным экраном</string>
+    <string name="version_footer">WilyScout %1$s</string>
     <string name="section_report">Отчёт</string>
 
     <!-- Советы в диагностике: подбираются по журналу, текст — из ресурсов -->
@@ -300,18 +298,18 @@
     <string name="advice_3_title">Система не дала tun-интерфейс</string>
     <string name="advice_3_what">Обычно это значит, что уже работает другой VPN. Android поднимает только один туннель: выключи его и повтори.</string>
     <string name="advice_4_title">Не удалось вывести сокет из-под туннеля</string>
-    <string name="advice_4_what">Без этого пакеты туннеля попали бы внутрь туннеля (петля). Так бывает при включённом Always-on VPN у другого приложения или при жёстком ограничении фоновой работы для WarpScout.</string>
+    <string name="advice_4_what">Без этого пакеты туннеля попали бы внутрь туннеля (петля). Так бывает при включённом Always-on VPN у другого приложения или при жёстком ограничении фоновой работы для WilyScout.</string>
     <string name="advice_5_title">Конфиг не дошёл до сервиса</string>
     <string name="advice_5_what">Нужен подобранный или импортированный конфиг: нажми «Включить туннель» на главной либо «Импортировать .conf» и повтори запуск.</string>
     <string name="advice_6_title">Не удалось создать UDP-сокет</string>
     <string name="advice_6_what">Проверь, что у приложения есть сеть (Wi-Fi или мобильные данные) и что в системе не включён режим «только разрешённые приложения» для VPN.</string>
     <string name="advice_7_title">Сервис не смог остаться живым</string>
-    <string name="advice_7_what">На Android 14+ нужны разрешение на уведомления и нормальный режим батареи для WarpScout: выключи агрессивную экономию для приложения.</string>
+    <string name="advice_7_what">На Android 14+ нужны разрешение на уведомления и нормальный режим батареи для WilyScout: выключи агрессивную экономию для приложения.</string>
     <string name="advice_8_title">Туннель поднят, но трафик через него не идёт</string>
     <string name="advice_8_what">Смотри AllowedIPs: при раздельном туннеле в него попадают только перечисленные сети. Если проверял сайт, которого в списке нет, — он и не должен идти через WARP. Для «всё через туннель» выбери режим «весь трафик».</string>
 
     <!-- Фоновый подбор по расписанию -->
-    <string name="tune_channel">WarpScout: подбор конфигурации</string>
+    <string name="tune_channel">WilyScout: подбор конфигурации</string>
     <string name="tune_delayed">Авто-подбор отложен: туннель работает, попробую позже</string>
     <string name="tune_best">Лучшая точка: %1$s (%2$s)</string>
     <string name="tune_none">Живых точек не найдено — попробуйте позже</string>
@@ -367,7 +365,7 @@
     <string name="scan_notif_channel">Подбор конфигурации</string>
 
     <!-- ── упрощённый экран ── -->
-    <string name="simple_brand">WarpScout</string>
+    <string name="simple_brand">WilyScout</string>
     <string name="simple_orb_desc">Включить или выключить туннель</string>
     <string name="simple_state_off">Выключено</string>
     <string name="simple_state_connecting">Подключаю…</string>
@@ -560,7 +558,7 @@
     <!-- 1.10.44 (в бете — с 1.10.44-beta4): у TikTok, ChatGPT, Claude, Gemini, Grok выход по умолчанию — «Второй выход» -->
     <string name="second_defaults_added">%1$s — по умолчанию целиком через второй выход. Поменять — кнопкой выхода в строке приложения («Туннелирование»).</string>
     <string name="second_defaults_added_up">%1$s — по умолчанию целиком через второй выход. Включится со следующего подключения, сразу — «Сохранить и применить».</string>
-    <string name="apps_other_profile">⚠ Копия %1$s есть в другом профиле Android (Двойной профиль или рабочий): туннель WarpScout работает в основном профиле, и эта копия, скорее всего, идёт мимо него.</string>
+    <string name="apps_other_profile">⚠ Копия %1$s есть в другом профиле Android (Двойной профиль или рабочий): туннель WilyScout работает в основном профиле, и эта копия, скорее всего, идёт мимо него.</string>
     <!-- 1.10.35: браузер — только к нужным сайтам, сети выбранных приложений -->
     <string name="browser_sites_switch">Браузер — только к нужным сайтам</string>
     <string name="browser_sites_note">Если среди выбранных есть браузер, через туннель из него идут только сайты второго выхода (ChatGPT, Claude, Gemini, Grok, заблокированные для РФ), «Мои сайты» и отмеченные списки, остальное — напрямую. Telegram, Instagram, YouTube, Facebook, X и другие известные приложения идут целиком: их сети добавляются сами.</string>
@@ -660,7 +658,7 @@
     <string name="update_ready_msg">Файл %1$s — в «Загрузках». Нажмите на него: Android спросит, поставить ли поверх. Настройки сохранятся.</string>
     <string name="update_open_downloads">Открыть «Загрузки»</string>
     <string name="update_open_failed">Откройте «Загрузки» (или «Мои файлы» → «Загрузки») и нажмите на %1$s</string>
-    <!-- 1.10.40: вставшая системная загрузка больше не «уже скачивается» без конца — WarpScout качает сам -->
+    <!-- 1.10.40: вставшая системная загрузка больше не «уже скачивается» без конца — WilyScout качает сам -->
     <string name="update_state_start">Скачиваю обновление…</string>
     <string name="update_state_attach">Обновление уже в системной загрузке — слежу за ней: встанет — скачаю сам</string>
     <string name="update_downloading_bytes">Скачиваю обновление: %1$s</string>
@@ -670,7 +668,7 @@
     <string name="update_why_no_dm">недоступна</string>
     <string name="update_why_bad_hash">скачала испорченный файл</string>
     <string name="update_failed_title">Обновление не скачалось</string>
-    <string name="update_failed_no_tunnel">Сейчас WarpScout выходит в интернет мимо туннеля, а напрямую GitHub у операторов бывает недоступен: включите туннель и нажмите «Обновления» ещё раз.</string>
+    <string name="update_failed_no_tunnel">Сейчас WilyScout выходит в интернет мимо туннеля, а напрямую GitHub у операторов бывает недоступен: включите туннель и нажмите «Обновления» ещё раз.</string>
     <string name="update_failed_browser">Или скачайте браузером: откроется файл %1$s; когда скачается, нажмите на него — Android предложит поставить поверх. Настройки сохранятся.</string>
     <string name="update_open_browser">Скачать браузером</string>
 
@@ -679,12 +677,12 @@
     <string name="reset_note">Всё как после установки: настройки и галочки — по умолчанию, свои списки стёрты, найденные точки и конфиг второго выхода забыты.</string>
     <string name="btn_reset_all">Сбросить всё по умолчанию</string>
     <string name="reset_title">Сбросить всё по умолчанию?</string>
-    <string name="reset_message">WarpScout станет как после установки:\n\n• переключатели, галочки и выборы — по умолчанию (тема, вид экрана, автоматика, DNS, маршруты);\n• свои списки стёрты: сайты туннелирования, свои сайты второго выхода, сайты проверки, адреса и порты подбора; приложения — снова набор по умолчанию;\n• найденные точки, очередь и резервные забыты, туннель выключится — потом нажмите кнопку, и WarpScout подберёт точки заново;\n• конфиг второго выхода (Proton или свой сервер) удалён — его нужно будет вставить снова.\n\nОстаются журнал, бекапы, запасной ключ WARP и скачанные списки сайтов. Перед сбросом сохраню бекап: «Восстановить» на «Главной» вернёт настройки.</string>
+    <string name="reset_message">WilyScout станет как после установки:\n\n• переключатели, галочки и выборы — по умолчанию (тема, вид экрана, автоматика, DNS, маршруты);\n• свои списки стёрты: сайты туннелирования, свои сайты второго выхода, сайты проверки, адреса и порты подбора; приложения — снова набор по умолчанию;\n• найденные точки, очередь и резервные забыты, туннель выключится — потом нажмите кнопку, и WilyScout подберёт точки заново;\n• конфиг второго выхода (Proton или свой сервер) удалён — его нужно будет вставить снова.\n\nОстаются журнал, бекапы, запасной ключ WARP и скачанные списки сайтов. Перед сбросом сохраню бекап: «Восстановить» на «Главной» вернёт настройки.</string>
     <string name="reset_ok">Сбросить</string>
     <string name="reset_busy">Сейчас идёт подбор или подключение — остановите его, потом сбрасывайте</string>
     <string name="reset_running">Сбрасываю всё по умолчанию…</string>
-    <string name="reset_done">Всё сброшено — как после установки. Нажмите кнопку: WarpScout подберёт точки заново.</string>
-    <string name="reset_partly">Сброшено, но не всё: %1$s. Нажмите кнопку: WarpScout подберёт точки заново.</string>
+    <string name="reset_done">Всё сброшено — как после установки. Нажмите кнопку: WilyScout подберёт точки заново.</string>
+    <string name="reset_partly">Сброшено, но не всё: %1$s. Нажмите кнопку: WilyScout подберёт точки заново.</string>
 
     <!-- ── 1.10.32: «Обновить адреса и проверить выход» — ход и итог под кнопкой ── -->
     <string name="second_busy">Проверка уже идёт — итог появится под кнопкой</string>
@@ -742,7 +740,7 @@
     <string name="btn_proton_guide">Как подключить Proton</string>
     <string name="btn_second_file">Выбрать файл .conf</string>
     <string name="proton_guide_title">Proton VPN Free — второй выход</string>
-    <string name="proton_guide_text">1. Откройте account.protonvpn.com и войдите — хватит бесплатного аккаунта. Сайт Proton в России заблокирован: открывайте его при включённом WarpScout, в браузере, который идёт через туннель, или на компьютере.\n\n2. Downloads → WireGuard configuration.\n\n3. Имя — любое, Platform — Android, VPN options не трогайте. В списке Free server configs — любая страна → Create.\n\n4. Download — скачается файл .conf.\n\n5. Здесь: «Выбрать файл .conf» → файл из «Загрузок». Конфиг встанет в поле, второй выход включится.\n\n6. «Страна второго выхода» — «Любая — ближние первыми»: сервер приложение выбирает само и меняет, если он перестал отвечать. Конфиг нужен один раз — его ключ подходит ко всем бесплатным серверам.\n\n7. «Сохранить и применить», потом «Обновить адреса и проверить выход» — под кнопкой появится страна выхода.\n\n8. Приложение целиком через Proton (Aurora, Grok, Claude) — «Туннелирование» → кнопка «Само» в строке приложения → «Второй выход».</string>
+    <string name="proton_guide_text">1. Откройте account.protonvpn.com и войдите — хватит бесплатного аккаунта. Сайт Proton в России заблокирован: открывайте его при включённом WilyScout, в браузере, который идёт через туннель, или на компьютере.\n\n2. Downloads → WireGuard configuration.\n\n3. Имя — любое, Platform — Android, VPN options не трогайте. В списке Free server configs — любая страна → Create.\n\n4. Download — скачается файл .conf.\n\n5. Здесь: «Выбрать файл .conf» → файл из «Загрузок». Конфиг встанет в поле, второй выход включится.\n\n6. «Страна второго выхода» — «Любая — ближние первыми»: сервер приложение выбирает само и меняет, если он перестал отвечать. Конфиг нужен один раз — его ключ подходит ко всем бесплатным серверам.\n\n7. «Сохранить и применить», потом «Обновить адреса и проверить выход» — под кнопкой появится страна выхода.\n\n8. Приложение целиком через Proton (Aurora, Grok, Claude) — «Туннелирование» → кнопка «Само» в строке приложения → «Второй выход».</string>
     <string name="proton_guide_site">Открыть сайт Proton</string>
     <string name="proton_guide_pick">Выбрать файл .conf</string>
     <string name="proton_guide_close">Закрыть</string>
@@ -763,7 +761,7 @@
     <string name="proton_way_anonymous_note">Как «без регистрации» в приложении Proton для Android: одна кнопка, без посредников. Proton может закрыть такой вход в любой день.</string>
     <string name="proton_way_service">Без аккаунта — сторонний сервис</string>
     <string name="proton_way_service_note">proton-generation (warp-api.cfd) — запасной путь. Сервис видит ваш адрес и может пропасть, а аккаунт Proton у него временный: удалят — ключ перестанет работать.</string>
-    <string name="proton_connect_tunnel_hint">Из России адреса Proton закрыты: включите туннель (весь трафик или «всё, кроме российских сетей») — WarpScout сам ходит через него, а если Proton режут и там (выход WARP в Москве), идёт обходным путём Proton.</string>
+    <string name="proton_connect_tunnel_hint">Из России адреса Proton закрыты: включите туннель (весь трафик или «всё, кроме российских сетей») — WilyScout сам ходит через него, а если Proton режут и там (выход WARP в Москве), идёт обходным путём Proton.</string>
     <string name="proton_login_title">Вход в Proton</string>
     <string name="proton_login_user">Логин или почта Proton</string>
     <string name="proton_login_password">Пароль</string>
@@ -793,14 +791,14 @@
     <string name="proton_pick_server">%1$s · %2$s</string>
     <string name="proton_pick_back">Назад</string>
     <string name="proton_until_unknown">срок неизвестен (обычно год)</string>
-    <string name="proton_note_account">WarpScout: Proton Free, вход в аккаунт %1$s, ключ до %2$s</string>
-    <string name="proton_note_anonymous">WarpScout: Proton Free без аккаунта, ключ до %1$s</string>
-    <string name="proton_note_service">WarpScout: Proton Free через сторонний сервис proton-generation, ключ до %1$s</string>
+    <string name="proton_note_account">WilyScout: Proton Free, вход в аккаунт %1$s, ключ до %2$s</string>
+    <string name="proton_note_anonymous">WilyScout: Proton Free без аккаунта, ключ до %1$s</string>
+    <string name="proton_note_service">WilyScout: Proton Free через сторонний сервис proton-generation, ключ до %1$s</string>
     <string name="proton_err_title">Не получилось</string>
     <string name="proton_err_password">Неверный логин или пароль.</string>
     <string name="proton_err_network">Proton не отвечает — ни напрямую, ни через посредников Proton (обходной путь). Из России его адреса закрыты, а если выход WARP сейчас в Москве («Выход: RU» в настройках), их режут и через туннель. Что можно: подобрать точку с выходом за рубежом (туннель при этом включён) или выбрать «Другой способ» → сторонний сервис.\n\n%1$s</string>
     <string name="proton_err_service_network">Сторонний сервис не отвечает — возможно, он закрыт или недоступен из вашей сети. Попробуйте вход в аккаунт.\n\n%1$s</string>
-    <string name="proton_err_version">Proton не принимает эту версию входа — обновите WarpScout.\n\n%1$s</string>
+    <string name="proton_err_version">Proton не принимает эту версию входа — обновите WilyScout.\n\n%1$s</string>
     <string name="proton_err_hv">Proton просит подтвердить, что вы не робот, но не прислал проверку. Попробуйте позже или другой способ.</string>
     <string name="proton_err_webview">Не открылось окно проверки Proton (WebView): %1$s. Обновите «Android System WebView» в магазине приложений или выберите другой способ.</string>
     <string name="proton_err_no_vpn">Proton выдал вход без доступа к VPN</string>
@@ -819,7 +817,7 @@
     <!-- Начальные экраны (с 1.10.44, в бете — с 1.10.44-beta6): после новой установки, один раз (WelcomeScreens). -->
     <string name="welcome_step">Шаг %1$d из %2$d</string>
     <string name="welcome_apps_title">Какие приложения пускать через туннель</string>
-    <string name="welcome_apps_text">Отмеченные пойдут через туннель, остальные — напрямую, как без VPN. Уже отмечено то, что WarpScout выбирает сам: снимите лишнее или добавьте своё. Поменять можно и потом — в «Туннелировании».</string>
+    <string name="welcome_apps_text">Отмеченные пойдут через туннель, остальные — напрямую, как без VPN. Уже отмечено то, что WilyScout выбирает сам: снимите лишнее или добавьте своё. Поменять можно и потом — в «Туннелировании».</string>
     <string name="welcome_apps_none">Ничего не отмечено — через туннель пойдут все приложения</string>
     <string name="welcome_apps_failed">Список приложений не прочитался. Нажмите «Пропустить» — выбрать можно потом в «Туннелировании».</string>
     <string name="welcome_row_second">второй выход по умолчанию · %1$s</string>
@@ -836,15 +834,15 @@
     <string name="second_file_saved">Второй выход: конфиг из файла, сервер %1$s — сохранено, заработает при подключении туннеля</string>
     <!-- Подбор при VPN другого приложения (с 1.10.45, см. ForeignVpn) -->
     <string name="foreign_vpn_title">Сначала выключи другой VPN</string>
-    <string name="foreign_vpn_msg">Сейчас работает VPN другого приложения (интерфейс %1$s). Подбор при нём не запускаю: замеры шли бы через чужой туннель, а не через твою сеть, и точка подобралась бы неправильная. Выключить чужой VPN WarpScout сам не может — так устроен Android.\n\nВыключи его в его приложении или в настройках VPN и запусти подбор снова. Если у того приложения включена «Постоянная VPN», сними её там же.</string>
+    <string name="foreign_vpn_msg">Сейчас работает VPN другого приложения (интерфейс %1$s). Подбор при нём не запускаю: замеры шли бы через чужой туннель, а не через твою сеть, и точка подобралась бы неправильная. Выключить чужой VPN WilyScout сам не может — так устроен Android.\n\nВыключи его в его приложении или в настройках VPN и запусти подбор снова. Если у того приложения включена «Постоянная VPN», сними её там же.</string>
     <string name="foreign_vpn_settings">Настройки VPN</string>
     <string name="foreign_vpn_ok">Понятно</string>
     <string name="foreign_vpn_banner">Подбор не запущен: работает другой VPN — выключи его и повтори</string>
     <!-- Proton кнопкой при выключенном туннеле (с 1.10.45) -->
     <string name="proton_need_tunnel_title">Сначала включи туннель</string>
-    <string name="proton_need_tunnel_msg">Proton из России закрыт, поэтому ключ WarpScout получает через свой туннель, а он сейчас выключен: без него запрос, скорее всего, не дойдёт (так выглядит ошибка «Unable to resolve host vpn-api.proton.me»).\n\n«Включить туннель» — включу его и сам открою выбор способа, как только туннель заработает. Нужен режим «весь трафик» или «всё, кроме российских сетей».</string>
-    <string name="proton_need_tunnel_wait">Туннель ещё подключается. Proton из России закрыт, и ключ WarpScout получает только через работающий туннель — открою выбор способа, как только он заработает.</string>
-    <string name="proton_need_tunnel_foreign">Сейчас работает VPN другого приложения (интерфейс %1$s). Когда включится туннель WarpScout, Android его отключит: два VPN сразу не работают. Если у того приложения включена «Постоянная VPN», сначала сними её в настройках VPN.</string>
+    <string name="proton_need_tunnel_msg">Proton из России закрыт, поэтому ключ WilyScout получает через свой туннель, а он сейчас выключен: без него запрос, скорее всего, не дойдёт (так выглядит ошибка «Unable to resolve host vpn-api.proton.me»).\n\n«Включить туннель» — включу его и сам открою выбор способа, как только туннель заработает. Нужен режим «весь трафик» или «всё, кроме российских сетей».</string>
+    <string name="proton_need_tunnel_wait">Туннель ещё подключается. Proton из России закрыт, и ключ WilyScout получает только через работающий туннель — открою выбор способа, как только он заработает.</string>
+    <string name="proton_need_tunnel_foreign">Сейчас работает VPN другого приложения (интерфейс %1$s). Когда включится туннель WilyScout, Android его отключит: два VPN сразу не работают. Если у того приложения включена «Постоянная VPN», сначала сними её в настройках VPN.</string>
     <string name="proton_need_tunnel_on">Включить туннель</string>
     <string name="proton_need_tunnel_later">Открыть, когда заработает</string>
     <string name="proton_need_tunnel_anyway">Всё равно продолжить</string>
