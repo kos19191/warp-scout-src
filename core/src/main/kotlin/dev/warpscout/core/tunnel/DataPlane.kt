@@ -42,6 +42,11 @@ class SocketUdpChannel(
     private val txPacket = java.net.DatagramPacket(ByteArray(1), 0)
 
     init {
+        // Буферы сокета побольше (с 1.10.49-beta1, как в версии для компьютера): при одновременной
+        // загрузке медиа пакеты приходят пачками, и маленький буфер их терял. Система ограничит
+        // своим максимумом.
+        runCatching { socket.receiveBufferSize = 4 * 1024 * 1024 }
+        runCatching { socket.sendBufferSize = 4 * 1024 * 1024 }
         if (!socket.isConnected) socket.connect(InetSocketAddress(endpoint.host, endpoint.port))
         socket.soTimeout = timeoutMs
     }
@@ -280,6 +285,14 @@ class DataPlane(
     private var peerIndex: Int = 0
     private var localIndex: Int = 0
 
+    /**
+     * Прежняя сессия — для приёма после rekey (с 1.10.49-beta1, как в версии для компьютера): сервер
+     * ещё одно RTT шлёт пакеты в старую сессию, пока до него не дойдёт наш первый пакет новой. Раньше
+     * они терялись — каждые две минуты короткий провал, на котором и спотыкался Telegram.
+     */
+    private var prevSession: Wg.Session? = null
+    private var prevLocalIndex: Int = 0
+
     /** Ответы на наши инициации (тип 2/3): один читатель — сюда, ожидающий — оттуда. */
     private val handshakeInbox = LinkedBlockingQueue<ByteArray>(16)
 
@@ -483,10 +496,16 @@ class DataPlane(
     private fun deliver(pkt: ByteArray) {
         val plain = synchronized(lock) {
             val s = session ?: return
-            val idx = localIndex
-            val opened = Wg.openTransport(pkt, idx, s) ?: return
-            session = opened.second
-            opened.first
+            val opened = Wg.openTransport(pkt, localIndex, s)
+            if (opened != null) {
+                session = opened.second
+                opened.first
+            } else {
+                val ps = prevSession ?: return
+                val old = Wg.openTransport(pkt, prevLocalIndex, ps) ?: return
+                prevSession = old.second
+                old.first
+            }
         }
         if (plain.isEmpty()) return
         // Ответ на нашу пробу данных — не для приложений: считаем его и в tun не пишем. Иначе
@@ -642,6 +661,13 @@ class DataPlane(
 
     private fun install(s: Wg.Session, peer: Int, local: Int, initial: Boolean) {
         synchronized(lock) {
+            if (!initial && session != null) {
+                prevSession = session
+                prevLocalIndex = localIndex
+            } else {
+                prevSession = null
+                prevLocalIndex = 0
+            }
             session = s
             peerIndex = peer
             localIndex = local

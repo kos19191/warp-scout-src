@@ -154,7 +154,8 @@ object WgConf {
             allowedIps = peer.get("AllowedIPs") ?: "0.0.0.0/0, ::/0",
             dns = iface.get("DNS")?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList(),
             mtu = intKey("MTU", 1280),
-            persistentKeepalive = peer.get("PersistentKeepalive")?.trim()?.toIntOrNull(),
+            // У AmneziaWG 3 интервал бывает диапазоном («25-35»): берём нижнюю границу (с 1.10.49-beta1).
+            persistentKeepalive = peer.get("PersistentKeepalive")?.trim()?.substringBefore('-')?.trim()?.toIntOrNull(),
             enableIpv6Address = addr.size > 1
         )
     }

@@ -2075,7 +2075,20 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         // переключатель ничего не значит. Поэтому состояние пересчитываем сразу, а не
         // после «Сохранить и применить».
         binding.editSecondConf.doAfterTextChanged {
-            prefs.secondConf = it?.toString()?.trim().orEmpty()
+            val raw = it?.toString()?.trim().orEmpty()
+            // Ключ AmneziaVPN «vpn://…» (с 1.10.49-beta1): в поле встаёт сам конфиг из ключа.
+            if (dev.warpscout.core.config.AmneziaKey.looksLike(raw)) {
+                val conf = amneziaKeyToConf(raw, "вставлен в поле")
+                if (conf != null) {
+                    binding.editSecondConf.post {
+                        binding.editSecondConf.setText(conf)
+                        if (!binding.switchSecondExit.isChecked) binding.switchSecondExit.isChecked = true
+                        markSettingsDirty(getString(R.string.dirty_second_exit))
+                    }
+                    return@doAfterTextChanged
+                }
+            }
+            prefs.secondConf = raw
             updateSecondState()
             // Вставили конфиг Proton — свежий список бесплатных серверов (встроенный тоже годится).
             refreshProtonIfStale()
@@ -3208,7 +3221,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                     else -> {
                         val transport = getString(
                             if (prefs.secondViaWarp) R.string.second_transport_warp else R.string.second_transport_direct
-                        ) + if (dev.warpscout.core.tunnel.AwgChannel.paramsOf(prefs.secondConf) != null) " · AmneziaWG" else ""
+                        ) + (dev.warpscout.core.tunnel.AwgChannel.paramsOf(prefs.secondConf)?.let { " · AmneziaWG ${it.version}" } ?: "")
                         append(
                             getString(
                                 R.string.second_on_summary, server, transport,
@@ -5563,6 +5576,25 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
      * при вставке: Proton узнаётся сам), второй выход включается; применяется по «Сохранить и
      * применить». Ключ из файла в журнал не пишем — только сервер.
      */
+    /**
+     * Ключ AmneziaVPN «vpn://…» → текст конфига второго выхода (с 1.10.49-beta1, см. AmneziaKey). null —
+     * ключ не подходит (Premium, полный доступ к серверу, XRay/OpenVPN, битый): причина уже на плашке
+     * и в журнале. Ключи из ключа в журнал не пишем — только протокол и имя сервера.
+     */
+    private fun amneziaKeyToConf(key: String, source: String): String? =
+        when (val r = dev.warpscout.core.config.AmneziaKey.decode(key)) {
+            is dev.warpscout.core.config.AmneziaKey.Result.Conf -> {
+                TunnelDebug.stage("второй выход: ключ AmneziaVPN ($source) — ${r.protocol}, сервер «${r.name}»")
+                banner(getString(R.string.second_key_ok, r.protocol, r.name))
+                r.text
+            }
+            is dev.warpscout.core.config.AmneziaKey.Result.Unsupported -> {
+                TunnelDebug.stage("второй выход: ключ vpn:// ($source) не подошёл — ${r.reason}")
+                banner(getString(R.string.second_key_bad, r.reason), error = true)
+                null
+            }
+        }
+
     private fun loadSecondConf(uri: Uri) {
         val limit = 64 * 1024
         val bytes = contentResolver.openInputStream(uri)?.use { input ->
@@ -5579,7 +5611,13 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             banner(getString(R.string.second_file_big), error = true)
             return
         }
-        val text = String(bytes, Charsets.UTF_8).replace("\uFEFF", "").replace("\r\n", "\n").trim()
+        val fileText = String(bytes, Charsets.UTF_8).replace("\uFEFF", "").replace("\r\n", "\n").trim()
+        // В файле может лежать ключ AmneziaVPN «vpn://…» (с 1.10.49-beta1) — берём конфиг из него.
+        val text = if (dev.warpscout.core.config.AmneziaKey.looksLike(fileText)) {
+            amneziaKeyToConf(fileText, "из файла") ?: return
+        } else {
+            fileText
+        }
         val server = runCatching { WgConf.toWarpConfig("второй выход", text) }.getOrNull()
         if (server == null) {
             TunnelDebug.stage("второй выход: в выбранном файле нет конфига WireGuard")

@@ -165,6 +165,8 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
             secondExitNat()
             secondExitInner()
             secondExitAwg()
+            amneziaV3()
+            amneziaKeys()
             secondExitPipeline()
             expect(
                 "снимок: состояние второго выхода переживает JSON",
@@ -1762,6 +1764,17 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         check("transport: клиент расшифровал ответ", cliGot?.first?.contentEquals(payload.reversedArray()) == true)
         val bad = back.copyOf().also { it[20] = (it[20].toInt() xor 0x40).toByte() }
         check("transport: битый тег отвергнут", Wg.openTransport(bad, 0x0badf00d, cliAfter) == null)
+
+        // Переставленные пакеты (RFC 6479, с 1.10.49-beta1): опоздавший принимается, повтор — нет.
+        val (ooo1, cliOoo1) = Wg.buildTransport(0x5a5a5a5a, cliAfter, "p1".toByteArray())
+        val (ooo2, _) = Wg.buildTransport(0x5a5a5a5a, cliOoo1, "p2".toByteArray())
+        val got2 = Wg.openTransport(ooo2, 0x5a5a5a5a, srvAfter)
+        val got1 = got2?.let { Wg.openTransport(ooo1, 0x5a5a5a5a, it.second) }
+        check("transport: переупорядоченный UDP-пакет принят (RFC 6479)", got1?.first?.contentEquals("p1".toByteArray()) == true)
+        check("transport: повтор переупорядоченного пакета отвергнут", got1?.let { Wg.openTransport(ooo1, 0x5a5a5a5a, it.second) } == null)
+        val window = Wg.ReplayWindow().also { it.mark(5000) }
+        check("transport: окно повторов — 2048 номеров",
+            window.isAcceptable(5000 - 2047) && !window.isAcceptable(5000 - 2048) && !window.isAcceptable(5000) && window.isAcceptable(5001))
 
         // ---- cookie reply: сервер «под нагрузкой»
         val cookie = ByteArray(16) { (it + 1).toByte() }
@@ -4215,6 +4228,218 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         check("AmneziaWG: данные уходят с типом H4", out.size == 1 && Crypto.readLe32(out[0], 0) == 4567890)
         inbox.add(ByteArray(48).also { Crypto.le32(4567890).copyInto(it, 0) })
         check("AmneziaWG: входящие данные приведены к типу 4", awg.receive()?.let { Crypto.readLe32(it, 0) } == 4)
+    }
+
+    /**
+     * AmneziaWG 3 (AmneziaVPN 5.1+) во втором выходе: подписи I1–I5, защита заголовков ChaCha20 и
+     * «хвосты» (с 1.10.49-beta1). «Сервер» здесь разбирает пакеты так же, как amneziawg-go
+     * (DeterminePacketTypeAndPadding в device/receive.go): nonce — первые 12 байт пакета, тип
+     * открывается первыми 4 байтами потока ChaCha20, остальное сообщение — следующими.
+     */
+    private fun amneziaV3() {
+        // RFC 8439, приложение A.1, вектор 1: нулевые ключ и nonce, счётчик 0.
+        val ks = ByteArray(16)
+        Crypto.chacha20Xor(ByteArray(32), ByteArray(12), ks, 0, 16)
+        expect("ChaCha20: вектор RFC 8439 (A.1 #1)", Crypto.hex(ks), "76b8e0ada0f13d90405d6ae55386bd28")
+
+        val obf = dev.warpscout.core.tunnel.AwgObf
+        val built = obf.parse("<r 2><b 0x8580><t><rc 3><rd 2><dz 2><d>")?.build(java.util.Random(1), nowSec = 0x01020304L)
+        check("подписи I1–I5: длина как у amneziawg-go", built?.size == 2 + 2 + 4 + 3 + 2 + 2, "${built?.size}")
+        check(
+            "подписи I1–I5: байты, время big-endian, буквы, цифры, нули",
+            built != null && built[2] == 0x85.toByte() && built[3] == 0x80.toByte() &&
+                built.copyOfRange(4, 8).contentEquals(byteArrayOf(1, 2, 3, 4)) &&
+                built.copyOfRange(8, 11).all { (it.toInt() and 0xff).toChar().isLetter() } &&
+                built.copyOfRange(11, 13).all { (it.toInt() and 0xff).toChar().isDigit() } &&
+                built[13] == 0.toByte() && built[14] == 0.toByte()
+        )
+        check(
+            "подписи I1–I5: неизвестный тег и нечётный hex — ошибка, как у amneziawg-go",
+            runCatching { obf.parse("<x 1>") }.isFailure && runCatching { obf.parse("<b 0x123>") }.isFailure
+        )
+        check("подписи I1–I5: без тегов — пакета нет", obf.parse("просто текст") == null)
+
+        val hpk = ByteArray(32) { (it * 7 + 1).toByte() }
+        val conf = "[Interface]\nPrivateKey = x\nJc = 4\nJmin = 10\nJmax = 50\nS1 = 12\nS2 = 12\nS3 = 12\nS4 = 12\n" +
+            "H1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\nI1 = <r 2><b 0x858000010001>\nHeaderProtectionKey = ${Crypto.base64(hpk)}\n" +
+            "ContentPaddingAddition = 10-100\nRekeyAfterTime = 100-120\nRandomTrailers = on\nDisableCookies = on\n"
+        val p = AwgChannel.paramsOf(conf)
+        check(
+            "AmneziaWG 3: параметры AmneziaVPN 5.1 разобраны",
+            p != null && p.version == "3" && p.headerKey?.contentEquals(hpk) == true && p.randomTrailers &&
+                p.ipackets.size == 1 && "ContentPaddingAddition" in p.notApplied && p.problems.isEmpty(),
+            p?.describe().orEmpty()
+        )
+        if (p == null) return
+
+        val out = ArrayList<ByteArray>()
+        val inbox = java.util.ArrayDeque<ByteArray>()
+        val rec = object : dev.warpscout.core.tunnel.UdpChannel {
+            override fun send(packet: ByteArray) {
+                out += packet.copyOf()
+            }
+            override fun receive(): ByteArray? = inbox.pollFirst()
+            override fun close() = Unit
+        }
+        val cPriv = ByteArray(32) { (it * 3 + 7).toByte() }
+        val sPriv = ByteArray(32) { (it * 5 + 11).toByte() }
+        val cPub = Crypto.publicOf(cPriv)
+        val sPub = Crypto.publicOf(sPriv)
+        val awg = AwgChannel(rec, p, cPub, sPub, java.util.Random(11))
+
+        fun serverOpen(d: ByteArray, pad: Int, len: Int): ByteArray {
+            val msg = d.copyOfRange(pad, pad + len)
+            Crypto.chacha20Xor(hpk, d.copyOfRange(0, 12), msg, 0, len)
+            return msg
+        }
+
+        val init = Wg.buildInitiation(cPriv, cPub, sPub, 0x4321)
+        awg.send(init.packet)
+        val sentInit = out.last()
+        check(
+            "AmneziaWG 3: подпись I1 и Jc пакетов шума перед инициацией",
+            out.size == 1 + 4 + 1 && out[0].size == 2 + 6 && out[0][2] == 0x85.toByte() &&
+                out.subList(1, 5).all { it.size in 10..50 },
+            "пакетов ${out.size}"
+        )
+        check(
+            "AmneziaWG 3: инициация — 12 случайных байт, сообщение и хвост в пределах окна",
+            sentInit.size in (12 + 148)..AwgChannel.DEFAULT_UDP_WINDOW, "${sentInit.size}"
+        )
+        val openedInit = serverOpen(sentInit, 12, 148)
+        val mac1 = Blake2s.mac(Blake2s.hash("mac1----".toByteArray() + sPub), openedInit.copyOfRange(0, 116))
+        check(
+            "AmneziaWG 3: сервер (как amneziawg-go) разбирает инициацию — тип H1, mac1 сходится",
+            Crypto.readLe32(openedInit, 0) == 1 && mac1.contentEquals(openedInit.copyOfRange(116, 132))
+        )
+        check("AmneziaWG 3: заголовок в сети закрыт", !sentInit.copyOfRange(12, 16).contentEquals(byteArrayOf(1, 0, 0, 0)))
+
+        val std = openedInit.copyOf().also { Crypto.le32(1).copyInto(it, 0) }
+        val (resp, _) = WgResponder.respondWithSession(std, sPriv)
+        // Ответ сервера: 12 случайных байт, сообщение с типом H2 (mac1 по нему), всё под XOR, хвост.
+        val padR = ByteArray(12) { (40 + it).toByte() }
+        val msgR = resp.copyOf().also {
+            Crypto.le32(2).copyInto(it, 0)
+            Wg.remac1(it, cPub)
+        }
+        Crypto.chacha20Xor(hpk, padR, msgR, 0, msgR.size)
+        inbox.add(padR + msgR + ByteArray(37) { 7 })
+        val res = awg.receive()?.let { Wg.consumeResponse(it, init, sPub) }
+        check(
+            "AmneziaWG 3: ответ сервера с хвостом распознан, рукопожатие сходится",
+            res?.kind == Wg.ResponseKind.HANDSHAKE_RESPONSE, res?.kind.toString()
+        )
+
+        out.clear()
+        val data = ByteArray(64) { it.toByte() }.also {
+            Crypto.le32(4).copyInto(it, 0)
+            Crypto.le32(0x0a0b0c0d).copyInto(it, 4)
+        }
+        awg.send(data)
+        val sentData = out.singleOrNull()
+        val hdr = sentData?.let { serverOpen(it, 12, 16) }
+        check(
+            "AmneziaWG 3: данные — сервер открывает 16 байт заголовка: тип H4, индекс на месте",
+            sentData != null && sentData.size == 12 + 64 && hdr != null && Crypto.readLe32(hdr, 0) == 4 &&
+                Crypto.readLe32(hdr, 4) == 0x0a0b0c0d && sentData.copyOfRange(28, 76).contentEquals(data.copyOfRange(16, 64))
+        )
+        val padD = ByteArray(12) { (90 + it).toByte() }
+        val fromServer = ByteArray(64) { (it * 3).toByte() }.also {
+            Crypto.le32(4).copyInto(it, 0)
+            Crypto.le32(0x11223344).copyInto(it, 4)
+        }
+        val wire = fromServer.copyOf().also { Crypto.chacha20Xor(hpk, padD, it, 0, 16) }
+        inbox.add(padD + wire)
+        check("AmneziaWG 3: входящие данные открыты и приведены к типу 4", awg.receive()?.contentEquals(fromServer) == true)
+    }
+
+    /** Ключи AmneziaVPN «vpn://…» во втором выходе (с 1.10.49-beta1). */
+    private fun amneziaKeys() {
+        val J = dev.warpscout.core.json.JsonVal
+        fun key(json: String): String {
+            val raw = json.toByteArray()
+            val deflater = java.util.zip.Deflater(8)
+            deflater.setInput(raw)
+            deflater.finish()
+            val buf = ByteArray(raw.size + 256)
+            val n = deflater.deflate(buf)
+            deflater.end()
+            val head = byteArrayOf((raw.size ushr 24).toByte(), (raw.size ushr 16).toByte(), (raw.size ushr 8).toByte(), raw.size.toByte())
+            return "vpn://" + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(head + buf.copyOf(n))
+        }
+        fun k(n: Int) = Crypto.base64(ByteArray(32) { n.toByte() })
+        val native = "[Interface]\nAddress = 10.8.1.2/32\nDNS = \$PRIMARY_DNS, \$SECONDARY_DNS\nPrivateKey = ${k(1)}\n" +
+            "Jc = 4\nJmin = 10\nJmax = 50\nS1 = 12\nS2 = 12\nS3 = 12\nS4 = 12\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\n" +
+            "I1 = <r 2><b 0x8580>\nHeaderProtectionKey = ${k(2)}\nRandomTrailers = on\n\n[Peer]\nPublicKey = ${k(3)}\n" +
+            "PresharedKey = ${k(4)}\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = 203.0.113.7:55424\nPersistentKeepalive = 25-35\n"
+        val last = J.obj("config" to J.str(native), "hostName" to J.str("203.0.113.7"), "port" to J.num(55424)).render()
+        val awgKey = key(
+            J.obj(
+                "containers" to J.arr(listOf(J.obj(
+                    "container" to J.str("amnezia-awg"),
+                    "awg" to J.obj("last_config" to J.str(last), "protocol_version" to J.str("3.1"), "port" to J.str("55424")),
+                ))),
+                "defaultContainer" to J.str("amnezia-awg"),
+                "dns1" to J.str("9.9.9.9"), "dns2" to J.str("149.112.112.112"),
+                "description" to J.str("Мой сервер"),
+            ).render()
+        )
+        val r1 = dev.warpscout.core.config.AmneziaKey.decode(awgKey)
+        check(
+            "ключ vpn:// (AmneziaVPN): AmneziaWG — конфиг извлечён",
+            r1 is dev.warpscout.core.config.AmneziaKey.Result.Conf && r1.protocol == "AmneziaWG 3.1" &&
+                r1.name == "Мой сервер" && r1.text.contains("DNS = 9.9.9.9, 149.112.112.112") && r1.text.contains("HeaderProtectionKey"),
+            r1.toString().take(160)
+        )
+        val text1 = (r1 as? dev.warpscout.core.config.AmneziaKey.Result.Conf)?.text.orEmpty()
+        val cfg1 = runCatching { WgConf.toWarpConfig("k1", text1) }.getOrNull()
+        check(
+            "ключ vpn://: сервер, keepalive «25-35» → 25, параметры AmneziaWG 3",
+            cfg1 != null && cfg1.endpoint.render() == "203.0.113.7:55424" && cfg1.persistentKeepalive == 25 &&
+                AwgChannel.paramsOf(text1)?.version == "3",
+            "${cfg1?.endpoint?.render()} ka=${cfg1?.persistentKeepalive}"
+        )
+
+        val last2 = J.obj(
+            "client_ip" to J.str("10.8.1.3"), "client_priv_key" to J.str(k(5)), "server_pub_key" to J.str(k(6)),
+            "hostName" to J.str("198.51.100.9"), "port" to J.num(51820), "Jc" to J.str("3"), "S1" to J.str("20"),
+            "H1" to J.str("100-200"), "persistent_keep_alive" to J.str("25"),
+        ).render()
+        val r2 = dev.warpscout.core.config.AmneziaKey.decode(key(J.obj(
+            "containers" to J.arr(listOf(J.obj("container" to J.str("amnezia-awg"), "awg" to J.obj("last_config" to J.str(last2))))),
+            "defaultContainer" to J.str("amnezia-awg"),
+        ).render()))
+        val text2 = (r2 as? dev.warpscout.core.config.AmneziaKey.Result.Conf)?.text.orEmpty()
+        val cfg2 = runCatching { WgConf.toWarpConfig("k2", text2) }.getOrNull()
+        check(
+            "ключ vpn:// без готового .conf — конфиг собран из полей",
+            cfg2 != null && cfg2.endpoint.render() == "198.51.100.9:51820" && text2.contains("Address = 10.8.1.3/32") &&
+                AwgChannel.paramsOf(text2)?.h1 == 100L..200L,
+            r2.toString().take(200)
+        )
+
+        val premium = dev.warpscout.core.config.AmneziaKey.decode(key(J.obj("auth_data" to J.obj("api_key" to J.str("x")), "api_config" to J.obj()).render()))
+        check(
+            "ключ vpn:// Amnezia Premium — объяснение: конфига в нём нет",
+            premium is dev.warpscout.core.config.AmneziaKey.Result.Unsupported && premium.reason.contains("Premium")
+        )
+        val xray = dev.warpscout.core.config.AmneziaKey.decode(key(J.obj(
+            "containers" to J.arr(listOf(J.obj("container" to J.str("amnezia-xray"), "xray" to J.obj("last_config" to J.str("{}"))))),
+            "defaultContainer" to J.str("amnezia-xray"),
+        ).render()))
+        check(
+            "ключ vpn:// с XRay — объяснение: нужен AmneziaWG или WireGuard",
+            xray is dev.warpscout.core.config.AmneziaKey.Result.Unsupported && xray.reason.contains("XRay")
+        )
+        check(
+            "ключ vpn:// битый — отказ без падения",
+            dev.warpscout.core.config.AmneziaKey.decode("vpn://@@@") is dev.warpscout.core.config.AmneziaKey.Result.Unsupported &&
+                dev.warpscout.core.config.AmneziaKey.decode("vpn://AAAA") is dev.warpscout.core.config.AmneziaKey.Result.Unsupported
+        )
+        check(
+            "ключ vpn:// узнаётся по началу",
+            dev.warpscout.core.config.AmneziaKey.looksLike("  vpn://abc") && !dev.warpscout.core.config.AmneziaKey.looksLike("[Interface]")
+        )
     }
 
     private fun confTargets() {

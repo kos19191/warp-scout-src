@@ -3734,7 +3734,7 @@ class WarpVpnService : VpnService() {
                 " к ${remote.hostAddress}:${second.endpoint.port}" +
                 (if (nat.v4) ", адрес отправителя — из второго конфига" else ", адреса IPv4 во втором конфиге нет") +
                 (if (tun6 != null && !nat.v6) ", IPv6 у сервера нет — сайты пойдут по IPv4" else "") +
-                (awg?.let { ", AmneziaWG ${it.describe()}" } ?: "")
+                (awg?.let { ", ${it.describe()}" } ?: "")
         )
         return SecondPlan(inner, remote, local4, remote4, nat, awg, localPublic, peerPublic, mss)
     }

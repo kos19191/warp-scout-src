@@ -484,14 +484,25 @@ object Icmp6Reject {
 }
 
 /**
- * AmneziaWG поверх нашего WireGuard: свои номера типов пакетов (H1–H4, в AmneziaWG 2 — диапазоны
- * «от-до»), случайные байты перед сообщениями (S1 — инициация, S2 — ответ, S3 — cookie, S4 — данные)
- * и Jc пакетов-шума размером Jmin–Jmax перед каждой инициацией.
+ * AmneziaWG поверх нашего WireGuard — для второго выхода (свой сервер AmneziaWG).
+ *
+ * Что умеет, по версиям AmneziaWG (как в amneziawg-go, device/send.go и receive.go):
+ * - 1.0: свои номера типов пакетов H1–H4, случайные байты перед инициацией и ответом (S1, S2) и Jc
+ *   пакетов шума размером Jmin–Jmax перед каждой инициацией;
+ * - 1.5: пакеты-«подписи» I1–I5 перед шумом ([AwgObf]; с 1.10.49-beta1);
+ * - 2: H1–H4 — диапазоны «от-до» (номер выбирается случайно на каждый пакет), S3 — перед cookie,
+ *   S4 — перед пакетами данных;
+ * - 3 (3.1 у AmneziaVPN 5.1+; с 1.10.49-beta1): HeaderProtectionKey — заголовок каждого пакета
+ *   закрыт ChaCha20 (у рукопожатия — всё сообщение, у данных — 16 байт заголовка), nonce — первые
+ *   12 байт пакета, то есть случайные байты S1–S4; RandomTrailers — случайный «хвост» после
+ *   сообщений рукопожатия. ContentPaddingAddition, DisableCookies и таймеры (RekeyAfterTime и др.)
+ *   клиенту менять не нужно: дополнительную набивку внутри шифра сервер принимает и без неё, cookie
+ *   шлёт сервер, а наши таймеры — обычные таймеры WireGuard, они в пределах серверных.
  *
  * Сделано обёрткой над каналом, а не правкой самого WireGuard: основной туннель (WARP) работает с
- * обычными типами, и эта обёртка его не касается — она включается только для второго выхода и
- * только если в его конфиге есть свои H или S. mac1 считается по байтам вместе с типом, поэтому
- * после замены типа он пересчитывается (см. [Wg.remac1]).
+ * обычными типами, и эта обёртка его не касается — она включается только для второго выхода и только
+ * если в его конфиге есть параметры AmneziaWG. mac1 считается по байтам вместе с типом, поэтому после
+ * замены типа он пересчитывается (см. [Wg.remac1]).
  */
 class AwgChannel(
     private val inner: UdpChannel,
@@ -502,26 +513,60 @@ class AwgChannel(
 ) : UdpChannel {
 
     /** Параметры AmneziaWG; диапазоны — беззнаковые 32-битные. */
-    data class Params(
+    class Params(
         val h1: LongRange, val h2: LongRange, val h3: LongRange, val h4: LongRange,
         val s1: Int = 0, val s2: Int = 0, val s3: Int = 0, val s4: Int = 0,
         val jc: Int = 0, val jmin: Int = 0, val jmax: Int = 0,
+        /** I1–I5: пакеты-«подписи» перед каждой инициацией (пустые и битые сюда не попадают). */
+        val ipackets: List<AwgObf.Chain> = emptyList(),
+        /** HeaderProtectionKey (AmneziaWG 3): 32 байта ключа ChaCha20. */
+        val headerKey: ByteArray? = null,
+        /** RandomTrailers (AmneziaWG 3): «хвосты» после сообщений рукопожатия. */
+        val randomTrailers: Boolean = false,
+        /** Параметры AmneziaWG 3, которые клиенту применять не нужно (для журнала). */
+        val notApplied: List<String> = emptyList(),
+        /** Что в конфиге не разобралось (для журнала): битые I1–I5, ключ защиты заголовков. */
+        val problems: List<String> = emptyList(),
     ) {
-        /** Обычный WireGuard (без своих типов, добавок и пакетов-шума): обёртка не нужна. */
+        /** Обычный WireGuard (без своих типов, добавок, шума и защиты): обёртка не нужна. */
         val isPlain: Boolean
             get() = h1 == 1L..1L && h2 == 2L..2L && h3 == 3L..3L && h4 == 4L..4L &&
-                s1 == 0 && s2 == 0 && s3 == 0 && s4 == 0 && jc == 0
+                s1 == 0 && s2 == 0 && s3 == 0 && s4 == 0 && jc == 0 &&
+                ipackets.isEmpty() && headerKey == null && !randomTrailers
 
-        fun describe(): String = "H1=${r(h1)} H2=${r(h2)} H3=${r(h3)} H4=${r(h4)} S1=$s1 S2=$s2" +
-            (if (s3 != 0 || s4 != 0) " S3=$s3 S4=$s4" else "") + (if (jc > 0) " Jc=$jc" else "")
+        /** Версия AmneziaWG по набору параметров — для журнала и экрана. */
+        val version: String
+            get() = when {
+                headerKey != null || randomTrailers -> "3"
+                s3 != 0 || s4 != 0 || listOf(h1, h2, h3, h4).any { it.first != it.last } -> "2"
+                ipackets.isNotEmpty() -> "1.5"
+                else -> "1"
+            }
+
+        fun describe(): String = "AmneziaWG $version: H1=${r(h1)} H2=${r(h2)} H3=${r(h3)} H4=${r(h4)} S1=$s1 S2=$s2" +
+            (if (s3 != 0 || s4 != 0) " S3=$s3 S4=$s4" else "") + (if (jc > 0) " Jc=$jc" else "") +
+            (if (ipackets.isNotEmpty()) " · подписи I1–I5: ${ipackets.size}" else "") +
+            (if (headerKey != null) " · защита заголовков" else "") +
+            (if (randomTrailers) " · хвосты" else "") +
+            (if (notApplied.isNotEmpty()) " · не нужны клиенту: ${notApplied.joinToString(", ")}" else "") +
+            (if (problems.isNotEmpty()) " · не разобралось: ${problems.joinToString("; ")}" else "")
 
         private fun r(x: LongRange) = if (x.first == x.last) "${x.first}" else "${x.first}-${x.last}"
     }
+
+    /**
+     * Наибольший отправленный пакет данных — от него длина «хвостов» (у amneziawg-go это udpWindow
+     * пира: начинается с 500 байт и растёт с пакетами данных).
+     */
+    @Volatile
+    private var udpWindow = DEFAULT_UDP_WINDOW
 
     override fun send(packet: ByteArray) {
         val type = if (packet.size >= 4) u32(packet, 0) else -1L
         when {
             type == Wg.TYPE_INITIATION.toLong() && packet.size == Wg.INITIATION_LEN -> {
+                // Порядок как у amneziawg-go: подписи I1–I5, потом Jc пакетов шума, потом инициация.
+                for (chain in p.ipackets) runCatching { inner.send(chain.build(random)) }
                 repeat(p.jc.coerceIn(0, 16)) {
                     val lo = p.jmin.coerceIn(1, 1280)
                     val hi = p.jmax.coerceIn(lo, 1280)
@@ -531,32 +576,76 @@ class AwgChannel(
                 val msg = packet.copyOf()
                 Crypto.le32(pick(p.h1).toInt()).copyInto(msg, 0)
                 Wg.remac1(msg, remotePublic)
-                inner.send(padded(p.s1, msg))
+                inner.send(frame(p.s1, msg, wholeMessage = true, trailer = true))
+            }
+            type == Wg.TYPE_RESPONSE.toLong() && packet.size == Wg.RESPONSE_LEN -> {
+                val msg = packet.copyOf()
+                Crypto.le32(pick(p.h2).toInt()).copyInto(msg, 0)
+                Wg.remac1(msg, remotePublic)
+                inner.send(frame(p.s2, msg, wholeMessage = true, trailer = true))
             }
             type == Wg.TYPE_TRANSPORT.toLong() && packet.size >= 32 -> {
                 val msg = packet.copyOf()
                 Crypto.le32(pick(p.h4).toInt()).copyInto(msg, 0)
-                inner.send(padded(p.s4, msg))
+                val out = frame(p.s4, msg, wholeMessage = false, trailer = false)
+                if (out.size > udpWindow) udpWindow = out.size
+                inner.send(out)
             }
             else -> inner.send(packet)
         }
     }
 
+    /**
+     * Пакет как у amneziawg-go: [S случайных байт][сообщение][хвост]. С ключом защиты заголовков
+     * сообщение (у данных — первые 16 байт: тип, индекс, номер) складывается XOR с потоком ChaCha20;
+     * nonce — первые 12 байт пакета до этого XOR (у amneziawg-go — `crypt[:12]`; при S ≥ 12 это сами
+     * случайные байты, и сервер берёт те же 12 байт из пришедшего пакета).
+     */
+    private fun frame(pad: Int, msg: ByteArray, wholeMessage: Boolean, trailer: Boolean): ByteArray {
+        val n = pad.coerceAtLeast(0)
+        val size = n + msg.size
+        val window = udpWindow
+        val tail = if (trailer && p.randomTrailers && window > size) random.nextInt(window - size) else 0
+        val out = ByteArray(size + tail)
+        if (n > 0) ByteArray(n).also { random.nextBytes(it) }.copyInto(out, 0)
+        msg.copyInto(out, n)
+        p.headerKey?.let { key ->
+            val nonce = out.copyOfRange(0, NONCE)
+            Crypto.chacha20Xor(key, nonce, out, n, if (wholeMessage) msg.size else HEADER)
+        }
+        if (tail > 0) ByteArray(tail).also { random.nextBytes(it) }.copyInto(out, size)
+        return out
+    }
+
     override fun receive(): ByteArray? {
         val pkt = inner.receive() ?: return null
-        if (pkt.size == p.s2 + Wg.RESPONSE_LEN && u32(pkt, p.s2) in p.h2) {
-            val msg = pkt.copyOfRange(p.s2, pkt.size)
+        if (pkt.size < 32) return pkt
+        val key = p.headerKey
+        // Защита заголовков: тип открывается первыми 4 байтами потока ChaCha20 (nonce — первые 12
+        // байт пакета), остальное сообщение — следующими. Так же разбирает и amneziawg-go.
+        val nonce = if (key != null) pkt.copyOfRange(0, NONCE) else null
+        val mask = if (key != null && nonce != null) {
+            ByteArray(4).also { Crypto.chacha20Xor(key, nonce, it, 0, 4) }.let { u32(it, 0) }
+        } else 0L
+        fun typeAt(pad: Int): Long = u32(pkt, pad) xor mask
+        fun fits(pad: Int, len: Int) = pkt.size == pad + len || (p.randomTrailers && pkt.size > pad + len)
+
+        if (fits(p.s2, Wg.RESPONSE_LEN) && typeAt(p.s2) in p.h2) {
+            val msg = pkt.copyOfRange(p.s2, p.s2 + Wg.RESPONSE_LEN)
+            if (key != null && nonce != null) Crypto.chacha20Xor(key, nonce, msg, 0, msg.size)
             Crypto.le32(Wg.TYPE_RESPONSE).copyInto(msg, 0)
             Wg.remac1(msg, localPublic)
             return msg
         }
-        if (pkt.size == p.s3 + Wg.COOKIE_MSG_LEN && u32(pkt, p.s3) in p.h3) {
-            val msg = pkt.copyOfRange(p.s3, pkt.size)
+        if (fits(p.s3, Wg.COOKIE_MSG_LEN) && typeAt(p.s3) in p.h3) {
+            val msg = pkt.copyOfRange(p.s3, p.s3 + Wg.COOKIE_MSG_LEN)
+            if (key != null && nonce != null) Crypto.chacha20Xor(key, nonce, msg, 0, msg.size)
             Crypto.le32(Wg.TYPE_COOKIE).copyInto(msg, 0)
             return msg
         }
-        if (pkt.size >= p.s4 + 32 && u32(pkt, p.s4) in p.h4) {
+        if (pkt.size >= p.s4 + 32 && typeAt(p.s4) in p.h4) {
             val msg = pkt.copyOfRange(p.s4, pkt.size)
+            if (key != null && nonce != null) Crypto.chacha20Xor(key, nonce, msg, 0, HEADER)
             Crypto.le32(Wg.TYPE_TRANSPORT).copyInto(msg, 0)
             return msg
         }
@@ -564,15 +653,6 @@ class AwgChannel(
     }
 
     override fun close() = inner.close()
-
-    private fun padded(n: Int, msg: ByteArray): ByteArray {
-        if (n <= 0) return msg
-        val out = ByteArray(n + msg.size)
-        val pad = ByteArray(n).also { random.nextBytes(it) }
-        System.arraycopy(pad, 0, out, 0, n)
-        System.arraycopy(msg, 0, out, n, msg.size)
-        return out
-    }
 
     private fun pick(r: LongRange): Long {
         val span = r.last - r.first
@@ -583,6 +663,17 @@ class AwgChannel(
     private fun u32(b: ByteArray, off: Int): Long = Crypto.readLe32(b, off).toLong() and 0xFFFFFFFFL
 
     companion object {
+        /** Начальное окно для «хвостов», как DefaultUdpWindow у amneziawg-go. */
+        const val DEFAULT_UDP_WINDOW = 500
+        private const val NONCE = 12
+        private const val HEADER = 16
+
+        /** Параметры AmneziaWG 3, которые сервер учитывает сам; клиенту их применять не нужно. */
+        private val NOT_APPLIED = listOf(
+            "ContentPaddingAddition", "DisableCookies", "RekeyAfterTime", "RekeyTimeout",
+            "RejectAfterTime", "KeepaliveTimeout", "MaxHandshakeAttempts",
+        )
+
         /** Параметры из текста конфига; null — обычный WireGuard (обёртка не нужна) или не разобралось. */
         fun paramsOf(conf: String): Params? {
             val iface = runCatching { WgConf.parse(conf).iface }.getOrNull() ?: return null
@@ -595,6 +686,22 @@ class AwgChannel(
                 return a..b
             }
             fun int(key: String): Int = iface.get(key)?.trim()?.toIntOrNull()?.coerceIn(0, 65535) ?: 0
+            val problems = ArrayList<String>()
+            val ipackets = (1..5).mapNotNull { k ->
+                val spec = iface.get("I$k")?.trim().orEmpty()
+                if (spec.isEmpty()) return@mapNotNull null
+                runCatching { AwgObf.parse(spec) }.getOrElse { t ->
+                    problems += "I$k: ${t.message}"
+                    null
+                }
+            }
+            val headerKey = iface.get("HeaderProtectionKey")?.trim()?.takeIf { it.isNotEmpty() }?.let { raw ->
+                headerKeyOf(raw) ?: run {
+                    problems += "HeaderProtectionKey: нужен ключ 32 байта (base64 или hex)"
+                    null
+                }
+            }
+            val trailers = iface.get("RandomTrailers")?.trim()?.lowercase() in setOf("on", "true", "1", "yes")
             val params = Params(
                 h1 = range("H1", 1) ?: return null,
                 h2 = range("H2", 2) ?: return null,
@@ -602,8 +709,19 @@ class AwgChannel(
                 h4 = range("H4", 4) ?: return null,
                 s1 = int("S1"), s2 = int("S2"), s3 = int("S3"), s4 = int("S4"),
                 jc = int("Jc"), jmin = int("Jmin"), jmax = int("Jmax"),
+                ipackets = ipackets,
+                headerKey = headerKey,
+                randomTrailers = trailers,
+                notApplied = NOT_APPLIED.filter { !iface.get(it)?.trim().isNullOrEmpty() },
+                problems = problems,
             )
             return params.takeIf { !it.isPlain }
+        }
+
+        private fun headerKeyOf(raw: String): ByteArray? {
+            val hex = raw.removePrefix("0x")
+            if (hex.length == 64 && hex.all { Character.digit(it, 16) >= 0 }) return Crypto.unHex(hex)
+            return runCatching { Crypto.unBase64(raw) }.getOrNull()?.takeIf { it.size == 32 }
         }
     }
 }

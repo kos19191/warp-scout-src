@@ -192,14 +192,71 @@ object Wg {
     )
 
     /**
-     * Ключи сессии + счётчики. Отправитель увеличивает [sendCounter] на каждый пакет,
-     * получатель отвергает пакеты с счётчиком не больше последнего принятого (защита от повтора).
+     * Скользящее окно защиты от повторов (RFC 6479, 2048 номеров — как в эталонном WireGuard; с
+     * 1.10.49-beta1, перенесено из версии для компьютера).
+     *
+     * Раньше пакет с номером не больше последнего принятого отбрасывался. Но UDP по дороге часто
+     * переставляет пакеты местами (Wi-Fi, мобильная сеть, несколько маршрутов у оператора): опоздавший
+     * пакет терялся, TCP считал это потерей и сбавлял скорость — так тормозили медиа Telegram и
+     * загрузки. Теперь отбрасываются только настоящие повторы и пакеты старше 2048 номеров. Кольцо из
+     * 64 слов (4096 бит) — очистка новых слов не задевает биты внутри действующего окна.
+     */
+    class ReplayWindow {
+        private var last: Long = -1L
+        private val bitmap = LongArray(RING_WORDS)
+
+        /** Можно ли принять [counter] (состояние не меняет — вызывать до проверки тега AEAD). */
+        fun isAcceptable(counter: Long): Boolean {
+            if (counter < 0L) return false
+            if (last < 0L || counter > last) return true
+            if (last - counter >= WINDOW_SIZE) return false
+            val word = ((counter ushr 6) and RING_MASK).toInt()
+            val bit = 1L shl (counter.toInt() and 63)
+            return (bitmap[word] and bit) == 0L
+        }
+
+        /** Отметить принятый [counter] — ТОЛЬКО после проверки тега: поддельный пакет окно не сдвинет. */
+        fun mark(counter: Long) {
+            if (counter < 0L) return
+            if (last < 0L) {
+                bitmap.fill(0L)
+                last = counter
+            } else if (counter > last) {
+                val oldWord = last ushr 6
+                val newWord = counter ushr 6
+                if (newWord - oldWord >= RING_WORDS) {
+                    bitmap.fill(0L)
+                } else {
+                    var w = oldWord + 1L
+                    while (w <= newWord) {
+                        bitmap[(w and RING_MASK).toInt()] = 0L
+                        w++
+                    }
+                }
+                last = counter
+            }
+            val word = ((counter ushr 6) and RING_MASK).toInt()
+            bitmap[word] = bitmap[word] or (1L shl (counter.toInt() and 63))
+        }
+
+        companion object {
+            const val WINDOW_SIZE: Long = 2048L
+            private const val RING_WORDS: Int = 64
+            private const val RING_MASK: Long = (RING_WORDS - 1).toLong()
+        }
+    }
+
+    /**
+     * Ключи сессии + счётчики. Отправитель увеличивает [sendCounter] на каждый пакет; получатель
+     * проверяет номер по скользящему окну [replayWindow] (RFC 6479), [receiveCounter] — наибольший
+     * принятый номер. Окно — одно на сессию: копии сессии (`copy`) делят его.
      */
     data class Session(
         val receiveKey: ByteArray,
         val sendKey: ByteArray,
         val sendCounter: Long = 0,
-        val receiveCounter: Long = -1L
+        val receiveCounter: Long = -1L,
+        val replayWindow: ReplayWindow = ReplayWindow(),
     )
 
     /**
@@ -297,18 +354,20 @@ object Wg {
         buildTransport(receiverIndex, session.copy(sendCounter = counter), ByteArray(0)).first
 
     /**
-     * Приём transport-пакета: проверяет тип, индекс, монотонность счётчика и тег.
-     * `null` — пакет не наш (шум, повтор, битый тег).
+     * Приём transport-пакета: проверяет тип, индекс, номер по окну повторов (RFC 6479) и тег.
+     * `null` — пакет не наш (шум, повтор, слишком старый номер, битый тег). Окно сдвигается только
+     * после проверки тега Poly1305.
      */
     fun openTransport(packet: ByteArray, receiverIndex: Int, session: Session): Pair<ByteArray, Session>? {
         if (packet.size < 32 || Crypto.readLe32(packet, 0) != TYPE_TRANSPORT) return null
         if (Crypto.readLe32(packet, 4) != receiverIndex) return null
         val counter = Crypto.readLe64(packet, 8)
-        if (counter <= session.receiveCounter) return null
+        if (!session.replayWindow.isAcceptable(counter)) return null
         val nonce = ByteArray(12).also { putLe64(it, 4, counter) }
         val data = packet.copyOfRange(16, packet.size)
         val plain = Crypto.chacha20Poly1305Open(session.receiveKey, nonce, data, Crypto.EMPTY_AAD) ?: return null
-        return plain to session.copy(receiveCounter = counter)
+        session.replayWindow.mark(counter)
+        return plain to session.copy(receiveCounter = maxOf(session.receiveCounter, counter))
     }
 
     /** Публичный ключ → «sender index» (KEYID), как в WireGuard: первые 4 байта le32 от HASH(pub). */

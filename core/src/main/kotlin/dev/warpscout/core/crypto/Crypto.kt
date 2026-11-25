@@ -190,6 +190,23 @@ object Crypto {
         return if (n == out.size) out else out.copyOf(n)
     }
 
+    /**
+     * ChaCha20 (RFC 8439: 12-байтный nonce, счётчик блоков с 0) — XOR ключевого потока поверх
+     * data[off until off+len] на месте, без Poly1305. Для защиты заголовков AmneziaWG 3 (с
+     * 1.10.49-beta1): так же, как chacha20.NewUnauthenticatedCipher у amneziawg-go.
+     */
+    fun chacha20Xor(key: ByteArray, nonce: ByteArray, data: ByteArray, off: Int, len: Int) {
+        require(key.size == 32 && nonce.size == 12) { "ChaCha20: ключ 32 байта, nonce 12 байт" }
+        require(off >= 0 && len >= 0 && off + len <= data.size) { "ChaCha20: $off+$len вне 0..${data.size}" }
+        if (len == 0) return
+        val engine = org.bouncycastle.crypto.engines.ChaCha7539Engine()
+        engine.init(
+            true,
+            org.bouncycastle.crypto.params.ParametersWithIV(org.bouncycastle.crypto.params.KeyParameter(key), nonce)
+        )
+        engine.processBytes(data, off, len, data, off)
+    }
+
 // ------------------------------------------------ xchacha20poly1305 (cookie WG)
 
     /** HChaCha20 (§2.2 draft-irtf-cfrg-xchacha): 20 раундов, вывод = строки 0 и 3 без обратной связи. */
