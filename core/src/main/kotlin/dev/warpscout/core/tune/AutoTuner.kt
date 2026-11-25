@@ -284,18 +284,20 @@ class AutoTuner(
         val verified = ArrayList<Candidate>()
         val verifiedKeys = HashSet<String>()
         val tv: TunnelVerifier = tunnel
-        var workingCount = 0
+        var strongCount = 0
+        val strongThreshold = ((spec.resources.size * 8) + 9) / 10 // ≥80% ресурсов (например 8/10)
         for (cand in toVerify) {
             if (progress.isCancelled()) break
-            // Если уже нашли 3 рабочих или 2 рабочих среди первых 3 проверенных — дальше не тратим время.
-            if (workingCount >= 3 || (verified.size >= 3 && workingCount >= 2)) break
+            // Останавливаемся досрочно только если уже нашли ≥2 по-настоящему сильных узла (≥80% сайтов),
+            // а не на посредственных 6/10 (как бывает при выходе через российский узел DME).
+            if (strongCount >= 3 || (verified.size >= 3 && strongCount >= 2)) break
             val results = runCatching { tv.verify(cand.config, spec.resources, spec.tunnelSettleMs) }
                 .getOrElse {
                     notes += "Туннель не поднялся (${it.javaClass.simpleName}) — пропускаю проверку изнутри."
                     emptyList()
                 }
             val ok = results.count { it.ok }
-            if (ok > 0) workingCount++
+            if (ok >= strongThreshold) strongCount++
             progress.log("  ${cand.config.endpoint.render()} · ${cand.junk.name} → ${ok}/${spec.resources.size} ресурсов")
             val parts = Scoring.evaluate(cand.stats, cand.stats.replies > 0, ok, spec.resources.size, weights)
             verifiedKeys.add(candidateKey(cand))
@@ -421,12 +423,18 @@ class AutoTuner(
         internal fun candidateKey(c: Candidate): String =
             c.config.endpoint.render() + "|" + c.junk.name
 
+        internal fun subnet24Of(host: String): String {
+            val parts = host.split('.')
+            return if (parts.size == 4) "${parts[0]}.${parts[1]}.${parts[2]}" else host
+        }
+
         /**
          * Отбирает разнообразную выборку для проверки изнутри туннеля:
          *  1) по одному лучшему кандидату каждого вида маскировки (сначала замаскированные профили
-         *     SIP/QUIC/TLS/HTTP, затем `none`), предпочитая разные `IP:порт` — так «ловушка
-         *     рукопожатия» для чистого WireGuard (`none`) не съедает все слоты проверки;
-         *  2) оставшиеся слоты добираем лучшими кандидатами с ещё не проверенными `IP:порт`;
+         *     SIP/QUIC/TLS/HTTP, затем `none`), предпочитая РАЗНЫЕ `/24`-подсети (разные дата-центры
+         *     Cloudflare, например `162.159.192.x` → ARN вместо двух `162.159.195.x` → DME);
+         *  2) оставшиеся слоты добираем лучшими кандидатами из ещё не проверенных `/24`-подсетей
+         *     (разных узлов выхода), затем просто разных `IP:порт`;
          *  3) при малом числе точек (например, быстрый старт из 1 точки) добираем по баллу.
          */
         fun selectForVerification(ordered: List<Candidate>, maxCount: Int = 6): List<Candidate> {
@@ -434,38 +442,50 @@ class AutoTuner(
             val out = ArrayList<Candidate>(minOf(maxCount, ordered.size))
             val pickedKeys = HashSet<String>()
             val pickedEndpoints = HashSet<String>()
+            val pickedSubnets = HashSet<String>()
 
-            fun tryAdd(c: Candidate, requireNewEndpoint: Boolean): Boolean {
+            fun tryAdd(c: Candidate, requireNewSubnet: Boolean, requireNewEndpoint: Boolean): Boolean {
                 if (out.size >= maxCount) return false
                 val ep = c.config.endpoint.render()
+                val sub = subnet24Of(c.config.endpoint.host)
+                if (requireNewSubnet && sub in pickedSubnets) return false
                 if (requireNewEndpoint && ep in pickedEndpoints) return false
                 if (!pickedKeys.add(candidateKey(c))) return false
                 pickedEndpoints.add(ep)
+                pickedSubnets.add(sub)
                 out.add(c)
                 return true
             }
 
-            // Шаг 1: по одному лучшему представителю каждого вида маскировки (сначала с обфускацией, потом none).
+            // Шаг 1: по одному лучшему представителю каждого вида маскировки (сначала с обфускацией, потом none),
+            // стараясь охватить разные /24-подсети (разные PoP Cloudflare).
             val distinctKinds = ordered.map { it.junk.kind }.distinct()
                 .sortedBy { if (it == dev.warpscout.core.model.JunkKind.NONE) 1 else 0 }
             for (kind in distinctKinds) {
                 val ofKind = ordered.filter { it.junk.kind == kind }
-                val addedNewEp = ofKind.firstOrNull { tryAdd(it, requireNewEndpoint = true) } != null
-                if (!addedNewEp) {
-                    ofKind.firstOrNull { tryAdd(it, requireNewEndpoint = false) }
-                }
+                val added = ofKind.firstOrNull { tryAdd(it, requireNewSubnet = true, requireNewEndpoint = true) } != null ||
+                    ofKind.firstOrNull { tryAdd(it, requireNewSubnet = false, requireNewEndpoint = true) } != null ||
+                    ofKind.firstOrNull { tryAdd(it, requireNewSubnet = false, requireNewEndpoint = false) } != null
+                if (!added) continue
             }
 
-            // Шаг 2: добираем разные endpoint'ы с максимальным баллом.
-            for (c in ordered) {
+            // Шаг 2: добираем ещё не проверенные /24-подсети (приоритет замаскированным профилям).
+            val obfuscatedFirst = ordered.sortedBy { if (it.junk.kind == dev.warpscout.core.model.JunkKind.NONE) 1 else 0 }
+            for (c in obfuscatedFirst) {
                 if (out.size >= maxCount) break
-                tryAdd(c, requireNewEndpoint = true)
+                tryAdd(c, requireNewSubnet = true, requireNewEndpoint = true)
             }
 
-            // Шаг 3: если уникальных endpoint'ов меньше maxCount — добираем оставшихся по баллу.
+            // Шаг 3: добираем разные endpoint'ы с максимальным баллом.
             for (c in ordered) {
                 if (out.size >= maxCount) break
-                tryAdd(c, requireNewEndpoint = false)
+                tryAdd(c, requireNewSubnet = false, requireNewEndpoint = true)
+            }
+
+            // Шаг 4: если уникальных endpoint'ов меньше maxCount — добираем оставшихся по баллу.
+            for (c in ordered) {
+                if (out.size >= maxCount) break
+                tryAdd(c, requireNewSubnet = false, requireNewEndpoint = false)
             }
             return out
         }

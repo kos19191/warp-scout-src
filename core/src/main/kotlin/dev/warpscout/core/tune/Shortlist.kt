@@ -37,9 +37,24 @@ object Shortlist {
 
         val result = ArrayList<Candidate>(limit)
         val endpoints = HashSet<String>()
-        for (c in pool) {
+        val subnets = HashSet<String>()
+        // Внутри каждого уровня надёжности сначала берём разные /24-подсети (разные дата-центры
+        // Cloudflare, например 162.159.192.x ARN + 188.114.97.x HEL), затем разные IP:порт.
+        for (tier in listOf(2, 1, 0)) {
             if (result.size >= limit) break
-            if (endpoints.add(c.config.endpoint.render())) result += c
+            val tierPool = pool.filter { verifyTier(it) == tier }
+            for (c in tierPool) {
+                if (result.size >= limit) break
+                val sub = AutoTuner.subnet24Of(c.config.endpoint.host)
+                if (sub !in subnets && endpoints.add(c.config.endpoint.render())) {
+                    subnets.add(sub)
+                    result += c
+                }
+            }
+            for (c in tierPool) {
+                if (result.size >= limit) break
+                if (endpoints.add(c.config.endpoint.render())) result += c
+            }
         }
         if (result.size < limit) {
             val seen = result.mapTo(HashSet()) { key(it) }

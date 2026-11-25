@@ -273,10 +273,14 @@ class NativeWintunTunnelManager(
                     }
                     // Быстрый тест «идут ли вообще данные сквозь туннель» (~4 с вместо 30–40 с таймаутов
                     // по всем 10 сайтам, если DPI пропускает handshake, но глушит транспорт).
+                    var probeColo = ""
                     if (!skipNetConfig) {
                         val quickTrace = runCatching {
                             HttpClient(timeoutMs = 3500).get("https://1.1.1.1/cdn-cgi/trace")
                         }.getOrNull()
+                        if (quickTrace != null && quickTrace.status in 200..299) {
+                            probeColo = TraceAndSpeed.parseCloudflareTrace(quickTrace.body)["colo"].orEmpty().uppercase()
+                        }
                         val hasData = (quickTrace != null && quickTrace.status in 200..299) || plane.bytesDown > 128L
                         if (!hasData) {
                             onLog("проверка изнутри: ${config.endpoint.render()} · ${config.junk.name} — handshake прошёл, но трафик не идёт (0 Б)")
@@ -284,7 +288,28 @@ class NativeWintunTunnelManager(
                         }
                     }
                     val prober = ResourceProber(HttpClient(timeoutMs = 5500))
-                    return prober.checkAll(checks)
+                    val rawResults = prober.checkAll(checks)
+                    val isRuColo = probeColo in TraceAndSpeed.RU_COLOS
+                    val results = if (isRuColo) {
+                        // Выход через российский дата-центр Cloudflare (DME/LED/OVB) часто режется ТСПУ:
+                        // снимаем бонус с Cloudflare trace, чтобы зарубежные узлы (ARN/HEL/FRA) всегда побеждали.
+                        rawResults.map { r ->
+                            if (r.check.url.contains("cloudflare.com/cdn-cgi/trace")) {
+                                r.copy(ok = false, errorClass = "ru_colo_$probeColo")
+                            } else r
+                        }
+                    } else {
+                        rawResults
+                    }
+                    val failedNames = results.filterNot { it.ok }.map { it.check.name }
+                    val coloNote = when {
+                        probeColo.isBlank() -> ""
+                        isRuColo -> " · выход $probeColo (узел РФ!)"
+                        else -> " · выход $probeColo"
+                    }
+                    val failNote = if (failedNames.isEmpty()) " · все доступны" else " · не открылись: ${failedNames.take(5).joinToString(", ")}"
+                    onLog("проверка изнутри: ${config.endpoint.render()} · ${config.junk.name}$coloNote$failNote")
+                    return results
                 } catch (e: Exception) {
                     onLog("проверка изнутри (${config.endpoint.render()}): ${e.message}")
                     return emptyList()
@@ -559,6 +584,9 @@ class NativeWintunTunnelManager(
                 val info = runCatching { exitProber() }.getOrDefault(ExitInfo())
                 if (snapshot.isUp && snapshot.activeEndpoint == cfg.endpoint.render() && !cancelRequested.get()) {
                     onLog("Регион выхода: ${info.regionLabel()} · warp=${if (info.warpOn) "on" else "off"}${if (info.ip.isNotBlank()) " · IP ${info.ip}" else ""}")
+                    if (info.isRussianColo) {
+                        onLog("Внимание: трафик выходит через российский узел Cloudflare (${info.colo}) — часть сервисов (Telegram и др.) может ограничиваться. Попробуйте переключить точку (Топ-3) на зарубежный узел (ARN/HEL/FRA).")
+                    }
                     update { cur ->
                         cur.copy(
                             exitInfo = info,

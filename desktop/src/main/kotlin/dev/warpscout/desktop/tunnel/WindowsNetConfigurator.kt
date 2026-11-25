@@ -120,15 +120,35 @@ class WindowsNetConfigurator(
                 )
                 val dnsV4 = dnsFiltered.filter { ':' !in it }
                 if (dnsV4.isNotEmpty()) {
-                    runner.run(
-                        listOf("netsh.exe", "interface", "ipv4", "set", "dnsservers", "name=$idxStr", "source=static", "address=${dnsV4[0]}", "register=none", "validate=no"),
-                        timeoutMs = 4000L
-                    )
-                    dnsV4.drop(1).forEachIndexed { i, dns ->
-                        runner.run(
-                            listOf("netsh.exe", "interface", "ipv4", "add", "dnsservers", "name=$idxStr", "address=$dns", "index=${i + 2}", "validate=no"),
+                    var dnsSetOk = false
+                    for (attempt in 0 until 5) {
+                        val dnsRes = runner.run(
+                            listOf("netsh.exe", "interface", "ipv4", "set", "dnsservers", "name=$adapterName", "source=static", "address=${dnsV4[0]}", "register=none", "validate=no"),
                             timeoutMs = 4000L
                         )
+                        if (dnsRes.ok) {
+                            dnsSetOk = true
+                            break
+                        }
+                        Thread.sleep(150)
+                    }
+                    if (dnsSetOk) {
+                        dnsV4.drop(1).forEachIndexed { i, dns ->
+                            runner.run(
+                                listOf("netsh.exe", "interface", "ipv4", "add", "dnsservers", "name=$adapterName", "address=$dns", "index=${i + 2}", "validate=no"),
+                                timeoutMs = 4000L
+                            )
+                        }
+                    } else {
+                        // Резервный способ, если netsh не принял имя интерфейса (например, локализация/задержка NDIS).
+                        val dnsArrPs = dnsFiltered.joinToString(", ") { "'${psEscape(it)}'" }
+                        val psDns = runPs(
+                            "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @($dnsArrPs) -ErrorAction Stop",
+                            timeoutMs = 8000L
+                        )
+                        if (!psDns.ok) {
+                            onLog("Предупреждение: не удалось назначить DNS на $adapterName: ${psDns.combined.take(120)}")
+                        }
                     }
                 }
                 if (cleanV6 != null) {
@@ -143,9 +163,15 @@ class WindowsNetConfigurator(
                     val dnsV6 = dnsFiltered.filter { ':' in it }
                     if (dnsV6.isNotEmpty()) {
                         runner.run(
-                            listOf("netsh.exe", "interface", "ipv6", "set", "dnsservers", "name=$idxStr", "source=static", "address=${dnsV6[0]}", "register=none", "validate=no"),
+                            listOf("netsh.exe", "interface", "ipv6", "set", "dnsservers", "name=$adapterName", "source=static", "address=${dnsV6[0]}", "register=none", "validate=no"),
                             timeoutMs = 4000L
                         )
+                        dnsV6.drop(1).forEachIndexed { i, dns ->
+                            runner.run(
+                                listOf("netsh.exe", "interface", "ipv6", "add", "dnsservers", "name=$adapterName", "address=$dns", "index=${i + 2}", "validate=no"),
+                                timeoutMs = 4000L
+                            )
+                        }
                     }
                 }
                 CommandResult(0, "ifIndex=$ifIndex (native)", "")

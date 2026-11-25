@@ -102,4 +102,25 @@ class SelectionAndProfileTest {
         val parsedNone = WgConf.toWarpConfig("None", WgConf.render(noneCfg))!!
         assertEquals("none", parsedNone.junk.name)
     }
+
+    @Test
+    fun `selectForVerification and Shortlist diversify across Cloudflare slash-24 subnets`() {
+        val ordered = listOf(
+            cand("162.159.195.5", 500, JunkLibrary.sip()),
+            cand("162.159.195.6", 891, JunkLibrary.tlsFixed()),
+            cand("162.159.195.7", 2408, JunkLibrary.quic("akbars.ru")),
+            cand("162.159.192.10", 880, JunkLibrary.sip()),
+            cand("188.114.97.4", 4500, JunkLibrary.tlsFixed())
+        )
+        val toVerify = AutoTuner.selectForVerification(ordered, maxCount = 5)
+        val top3Subnets = toVerify.take(3).map { AutoTuner.subnet24Of(it.config.endpoint.host) }.toSet()
+        assertEquals(3, top3Subnets.size, "Top-3 verification slots must cover 3 distinct /24 PoP subnets: $top3Subnets")
+
+        val picked = Shortlist.pick(ordered, limit = 3)
+        val pickedSubnets = picked.map { AutoTuner.subnet24Of(it.config.endpoint.host) }.toSet()
+        assertEquals(3, pickedSubnets.size, "Shortlist Top-3 must prefer distinct /24 PoP subnets: $pickedSubnets")
+
+        assertTrue(ExitInfo(colo = "DME", warpOn = true).isRussianColo)
+        assertTrue(!ExitInfo(colo = "ARN", warpOn = true).isRussianColo)
+    }
 }

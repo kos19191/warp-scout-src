@@ -15,10 +15,16 @@ data class ExitInfo(
     val country: String = "",
     val org: String = ""
 ) {
-    /** Краткая метка региона выхода: например «HEL · RU» или «AMS · NL». */
+    /** True, если Cloudflare WARP вышел через российский дата-центр (DME/LED/OVB и т.д.). */
+    val isRussianColo: Boolean
+        get() = colo.uppercase() in TraceAndSpeed.RU_COLOS
+
+    /** Краткая метка региона выхода: например «ARN · SE» или «DME (узел РФ)». */
     fun regionLabel(): String {
         val parts = buildList {
-            if (colo.isNotBlank()) add(colo)
+            if (colo.isNotBlank()) {
+                add(if (isRussianColo) "$colo (узел РФ)" else colo)
+            }
             val cc = country.ifBlank { loc }
             if (cc.isNotBlank()) add(cc)
             if (city.isNotBlank() && city != colo) add(city)
@@ -38,6 +44,9 @@ data class SpeedTestResult(
 }
 
 object TraceAndSpeed {
+
+    /** Коды российских дата-центров Cloudflare (IATA): выход через них часто ограничен ТСПУ. */
+    val RU_COLOS: Set<String> = setOf("DME", "LED", "KJA", "OVB", "SVX", "KHV", "VVO", "ROV", "KUF", "UFA")
 
     /** Разбор key=value ответа `https://www.cloudflare.com/cdn-cgi/trace`. */
     fun parseCloudflareTrace(body: String): Map<String, String> =
