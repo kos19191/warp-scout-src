@@ -60,7 +60,7 @@ fun RoutesScreen(state: DesktopUiState, controller: DesktopController) {
 
             if (s.routeMode == RouteMode.PRESET) {
                 Text(
-                    "Встроена база RIPE RU (8 690 IPv4 + 2 164 IPv6 подсетей): Яндекс, VK, банки (Сбер, Т-Банк, Альфа, ВТБ), Госуслуги, Ozon, Wildberries, Авито и локальная сеть идут напрямую. Всё зарубежное — через туннель.",
+                    "Компактный пресет обхода РФ (~900 маршрутов, без нагрузки на службы Windows): Яндекс, VK, банки (Сбер, Т-Банк, Альфа, ВТБ), Госуслуги, Ozon, Wildberries, Авито, российские облака/провайдеры и локальная сеть идут напрямую. Всё зарубежное — через туннель.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

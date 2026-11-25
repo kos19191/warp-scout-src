@@ -20,8 +20,11 @@ class RuBypassRoutesTest {
 
     @Test
     fun `russian services and LAN bypass tunnel while foreign services go through tunnel`() {
-        assertTrue(RuBypassRoutes.russianIpv4Cidrs.size > 8_000, "RIPE RU IPv4 list must be bundled")
-        assertTrue(RuBypassRoutes.foreignIpv4Cidrs.size > 15_000, "Foreign IPv4 complement must be computed")
+        assertTrue(RuBypassRoutes.russianIpv4Cidrs.size in 80..250, "Compact RU IPv4 list expected, got ${RuBypassRoutes.russianIpv4Cidrs.size}")
+        assertTrue(
+            RuBypassRoutes.foreignIpv4Cidrs.size in 400..1_500,
+            "Foreign IPv4 route count must stay compact (<1500) to avoid overloading Windows netprofm/BFE, got ${RuBypassRoutes.foreignIpv4Cidrs.size}"
+        )
 
         val foreignRanges = RuBypassRoutes.foreignIpv4Cidrs.mapNotNull { CidrMath.parseIpv4Cidr(it) }
         fun inForeign(ip: String): Boolean {
@@ -78,9 +81,9 @@ class RuBypassRoutesTest {
 
     @Test
     fun `ipv6 complement excludes russian IPv6 and keeps foreign IPv6`() {
-        assertTrue(RuBypassRoutes.russianIpv6Cidrs.size > 2_000, "RIPE RU IPv6 list must be bundled")
+        assertTrue(RuBypassRoutes.russianIpv6Cidrs.size in 5..50, "Compact RU IPv6 list expected")
         val foreignV6 = RuBypassRoutes.foreignIpv6Cidrs
-        assertTrue(foreignV6.size > 10_000)
+        assertTrue(foreignV6.size in 30..400, "Foreign IPv6 routes must stay compact, got ${foreignV6.size}")
 
         fun ipv6InList(ipStr: String, cidrs: List<String>): Boolean {
             val addr = InetAddress.getByName(ipStr) as Inet6Address

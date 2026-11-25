@@ -4,7 +4,8 @@ import dev.warpscout.core.config.SplitRoutes
 
 data class PhysicalGateway(
     val nextHop: String,
-    val interfaceIndex: Int
+    val interfaceIndex: Int,
+    val interfaceLuid: Long = 0L
 )
 
 /**
@@ -26,9 +27,15 @@ class WindowsNetConfigurator(
 ) {
 
     fun detectPhysicalGateway(): PhysicalGateway? {
+        // 1. Быстрый нативный Win32 GetBestRoute2 (~0.2 мс, работает на Ethernet/Wi-Fi/PPPoE/модемах без PowerShell).
+        if (WindowsAutostart.isWindows()) {
+            val nativeGw = runCatching { WindowsIpHelper.getBestIpv4Route("1.1.1.1") }.getOrNull()
+            if (nativeGw != null) return nativeGw
+        }
+
+        // 2. Резервный путь через PowerShell (включая PPPoE с NextHop=0.0.0.0).
         val ps = """
             ${'$'}r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                Where-Object { ${'$'}_.NextHop -and ${'$'}_.NextHop -ne '0.0.0.0' } |
                 Sort-Object -Property { ${'$'}_.RouteMetric + ${'$'}_.InterfaceMetric } |
                 Select-Object -First 1
             if (${'$'}r) { Write-Output "${'$'}(${'$'}r.NextHop)|${'$'}(${'$'}r.InterfaceIndex)" }
@@ -45,7 +52,15 @@ class WindowsNetConfigurator(
         if (valid.isEmpty()) return emptyList()
         val added = ArrayList<String>()
         for (ip in valid) {
-            // Сначала тихо удаляем возможный старый маршрут, затем добавляем свежий.
+            if (gw.interfaceLuid != 0L && WindowsAutostart.isWindows()) {
+                val ok = runCatching { WindowsIpHelper.addHostBypassRoute(ip, gw) }.getOrDefault(false)
+                if (ok) {
+                    added.add(ip)
+                    continue
+                }
+            }
+            // Резервный путь через route.exe (для классических шлюзов с ненулевым NextHop).
+            if (gw.nextHop == "0.0.0.0") continue
             runner.run(listOf("route.exe", "DELETE", ip), timeoutMs = 4000L)
             val res = runner.run(
                 listOf("route.exe", "ADD", ip, "MASK", "255.255.255.255", gw.nextHop, "METRIC", "5", "IF", gw.interfaceIndex.toString()),
@@ -60,8 +75,12 @@ class WindowsNetConfigurator(
         return added
     }
 
-    fun removeBypassHostRoutes(ipv4Hosts: List<String>) {
+    fun removeBypassHostRoutes(ipv4Hosts: List<String>, gateway: PhysicalGateway? = null) {
         for (ip in ipv4Hosts.distinct()) {
+            if (gateway != null && gateway.interfaceLuid != 0L && WindowsAutostart.isWindows()) {
+                val deleted = runCatching { WindowsIpHelper.deleteHostBypassRoute(ip, gateway) }.getOrDefault(false)
+                if (deleted) continue
+            }
             runner.run(listOf("route.exe", "DELETE", ip), timeoutMs = 4000L)
         }
     }
@@ -130,16 +149,17 @@ class WindowsNetConfigurator(
         allowedIpsCsv: String,
         extraCidrs: List<String> = emptyList(),
         enableIpv6: Boolean = true,
-        adapterLuid: Long? = null
+        adapterLuid: Long? = null,
+        excludeIpv4s: List<String> = emptyList()
     ): CommandResult {
-        val allPrefixes = expandSafeRoutes(allowedIpsCsv, extraCidrs, enableIpv6)
+        val allPrefixes = expandSafeRoutes(allowedIpsCsv, extraCidrs, enableIpv6, excludeIpv4s)
         if (allPrefixes.isEmpty()) return CommandResult(0, "нет маршрутов", "")
 
         val v4List = allPrefixes.filter { ':' !in it }
         var v6List = allPrefixes.filter { ':' in it }
 
-        // Для большого split-списка IPv6 (пресет обхода РФ) не захламляем таблицу маршрутов на IPv4-only провайдерах.
-        if (v6List.size > 100 && !hasPhysicalIpv6DefaultRoute()) {
+        // Для split-списка IPv6 не добавляем IPv6-маршруты на IPv4-only провайдерах.
+        if (v6List.size > 4 && !hasPhysicalIpv6DefaultRoute()) {
             onLog("Физический IPv6 у провайдера отсутствует — пропускаю ${v6List.size} IPv6-маршрутов")
             v6List = emptyList()
         }
@@ -207,12 +227,15 @@ class WindowsNetConfigurator(
 
         /**
          * Разворачивает `0.0.0.0/0` → `0.0.0.0/1, 128.0.0.0/1` и `::/0` → `::/1, 8000::/1`,
-         * чтобы не затирать физический шлюз по умолчанию, и объединяет с `extraCidrs` (Второй выход).
+         * чтобы не затирать физический шлюз по умолчанию, объединяет с `extraCidrs` (Второй выход)
+         * и **всегда вырезает `excludeIpv4s`** (IP точек WARP/Второго выхода) — петля маршрутизации
+         * невозможна даже при сбое определения шлюза.
          */
         fun expandSafeRoutes(
             allowedIpsCsv: String,
             extraCidrs: List<String> = emptyList(),
-            enableIpv6: Boolean = true
+            enableIpv6: Boolean = true,
+            excludeIpv4s: List<String> = emptyList()
         ): List<String> {
             val raw = SplitRoutes.prefixesOf(allowedIpsCsv) + extraCidrs.map { it.trim() }.filter { '/' in it }
             val out = LinkedHashSet<String>()
@@ -233,7 +256,10 @@ class WindowsNetConfigurator(
                     else -> out.add(c)
                 }
             }
-            return out.toList()
+            val cleanExcludes = excludeIpv4s.filter { CidrMath.parseIpv4(it) != null }.distinct()
+            if (cleanExcludes.isEmpty()) return out.toList()
+            val excludedCsv = CidrMath.excludeIpv4(out.joinToString(", "), cleanExcludes)
+            return SplitRoutes.prefixesOf(excludedCsv)
         }
     }
 }

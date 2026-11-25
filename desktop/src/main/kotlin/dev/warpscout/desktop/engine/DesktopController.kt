@@ -173,6 +173,9 @@ class DesktopController(
     private val currentTunnelUp: Boolean
         get() = if (isBuiltinMode) nativeTunnel.snapshot.isUp else externalAwgTunnel.snapshot.isUp
 
+    private val currentTunnelBusy: Boolean
+        get() = if (isBuiltinMode) nativeTunnel.snapshot.isBusy else externalAwgTunnel.snapshot.isBusy
+
     private val currentActiveEndpoint: String
         get() = if (isBuiltinMode) nativeTunnel.snapshot.activeEndpoint else externalAwgTunnel.snapshot.activeEndpoint
 
@@ -419,9 +422,12 @@ class DesktopController(
         worker.execute {
             val startedMs = System.currentTimeMillis()
             val wasUp = currentTunnelUp
+            val wasActiveOrBusy = wasUp || currentTunnelBusy
             try {
-                if (wasUp && !silentBackground) {
+                if (wasActiveOrBusy && !silentBackground) {
                     appendLog("Приостанавливаю текущий туннель на время чистого сканирования…")
+                    nativeTunnel.requestCancel()
+                    externalAwgTunnel.requestCancel()
                     if (isBuiltinMode) nativeTunnel.disconnect("Приостановлен на время подбора")
                     else externalAwgTunnel.disconnect("Приостановлен на время подбора")
                 }

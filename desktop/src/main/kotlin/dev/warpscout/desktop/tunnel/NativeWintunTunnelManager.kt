@@ -256,12 +256,14 @@ class NativeWintunTunnelManager(
                         return emptyList()
                     }
                     if (!skipNetConfig) {
-                        // Для короткой 5-секундной проверки кандидатов достаточно 2 маршрутов (0.0.0.0/1 + 128.0.0.0/1).
+                        // Для короткой 5-секундной проверки кандидатов достаточно 2 маршрутов (0.0.0.0/1 + 128.0.0.0/1)
+                        // с обязательным вырезанием IP самой точки, чтобы исключить петлю маршрутизации.
                         netConfig.applyRoutes(
                             adapterName = PROBE_ADAPTER_NAME,
                             allowedIpsCsv = "0.0.0.0/0",
                             enableIpv6 = false,
-                            adapterLuid = tun.adapterLuid
+                            adapterLuid = tun.adapterLuid,
+                            excludeIpv4s = bypassIps
                         )
                     }
                     if (settleMs > 0) {
@@ -278,7 +280,7 @@ class NativeWintunTunnelManager(
                     probePlane = null
                     probeTun = null
                     if (added.isNotEmpty() && !skipNetConfig) {
-                        netConfig.removeBypassHostRoutes(added)
+                        netConfig.removeBypassHostRoutes(added, gw)
                     }
                 }
             }
@@ -333,12 +335,12 @@ class NativeWintunTunnelManager(
 
             teardownActiveSession()
 
-            // 1. Добавляем /32 bypass-маршруты до IP текущей точки WARP (и Второго выхода) через физический шлюз.
+            // 1. Определяем IP текущей точки WARP (и Второго выхода) и добавляем /32 bypass-маршруты через физический шлюз.
+            val bypassTargets = buildList {
+                addAll(resolveIpv4s(cfg.endpoint.host))
+                if (secondParsed != null) addAll(resolveIpv4s(secondParsed.endpoint.host))
+            }
             if (!skipNetConfig) {
-                val bypassTargets = buildList {
-                    addAll(resolveIpv4s(cfg.endpoint.host))
-                    if (secondParsed != null) addAll(resolveIpv4s(secondParsed.endpoint.host))
-                }
                 val added = netConfig.addBypassHostRoutes(bypassTargets, physicalGateway)
                 bypassRoutesAdded.addAll(added)
             }
@@ -496,13 +498,15 @@ class NativeWintunTunnelManager(
             }
 
             // 5. Handshake подтверждён — накатываем маршруты туннеля на Wintun-адаптер!
+            // Обязательно вырезаем IP точек (bypassTargets) из маршрутов Wintun — петля невозможна.
             if (!skipNetConfig) {
                 val routeRes = netConfig.applyRoutes(
                     adapterName = ADAPTER_NAME,
                     allowedIpsCsv = cfg.allowedIps,
                     extraCidrs = if (secondUp) exitRouter.cidrs else emptyList(),
                     enableIpv6 = cfg.enableIpv6Address,
-                    adapterLuid = tun.adapterLuid
+                    adapterLuid = tun.adapterLuid,
+                    excludeIpv4s = bypassTargets
                 )
                 if (!routeRes.ok) {
                     onLog("Предупреждение при установке маршрутов: ${routeRes.combined.take(160)}")
@@ -585,7 +589,7 @@ class NativeWintunTunnelManager(
         val copy = bypassRoutesAdded.toList()
         bypassRoutesAdded.clear()
         if (!skipNetConfig) {
-            netConfig.removeBypassHostRoutes(copy)
+            netConfig.removeBypassHostRoutes(copy, physicalGateway)
         }
     }
 
@@ -636,11 +640,13 @@ class NativeWintunTunnelManager(
     }
 
     private fun triggerAutoFailover() {
+        if (cancelRequested.get()) return
         val now = System.currentTimeMillis()
         if (now < cooldownUntilMs) return
         if (!reconnecting.compareAndSet(false, true)) return
         scheduler.execute {
             try {
+                if (cancelRequested.get()) return@execute
                 if (consecutiveAutoSwitches >= MAX_FAILOVER_QUEUE) {
                     cooldownUntilMs = System.currentTimeMillis() + COOLDOWN_MS
                     consecutiveAutoSwitches = 0
@@ -650,6 +656,7 @@ class NativeWintunTunnelManager(
                 consecutiveAutoSwitches++
                 stopStatsPoller()
                 teardownActiveSession()
+                if (cancelRequested.get()) return@execute
                 val nextIdx = if (activeQueue.isEmpty()) 0 else (activeQueueIndex + 1) % activeQueue.size
                 if (activeQueue.isNotEmpty()) {
                     tryQueueFrom(nextIdx, activeSecondExit, isFailover = true)

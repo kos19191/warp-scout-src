@@ -216,21 +216,39 @@ class WintunDevice private constructor(
         private const val ERROR_OPERATION_ABORTED = 995
         private const val ERROR_DEVICE_NOT_CONNECTED = 1167
 
-        /** Постоянный GUID адаптера WarpScout, чтобы Windows не плодила «WarpScout 2, 3…». */
-        private val ADAPTER_GUID = Guid.GUID("{E47A3C19-9D81-4B27-A6F4-8215D3C04E71}")
+        /** Раздельные постоянные GUID для основного и проверочного адаптеров (чтобы не было ERROR_ALREADY_EXISTS). */
+        private val MAIN_ADAPTER_GUID = Guid.GUID("{E47A3C19-9D81-4B27-A6F4-8215D3C04E71}")
+        private val PROBE_ADAPTER_GUID = Guid.GUID("{C93B72D4-5A18-4F92-8E11-96B40C2A73D5}")
+
+        private const val ERROR_ACCESS_DENIED = 5
+        private const val ERROR_ALREADY_EXISTS = 183
+        private const val HRESULT_ALREADY_EXISTS = -2147024713 // 0x800700B7
 
         fun open(name: String, nativeCacheDir: File): WintunDevice {
             val api = WintunLoader.load(nativeCacheDir)
-            // Если от предыдущего падения остался старый адаптер — аккуратно переиспользуем или пересоздаём.
+            val guid = if (name.contains("Probe", ignoreCase = true)) PROBE_ADAPTER_GUID else MAIN_ADAPTER_GUID
+            // Если от предыдущего запуска остался адаптер с тем же именем — закрываем его.
             val existing = runCatching { api.WintunOpenAdapter(WString(name)) }.getOrNull()
             if (existing != null) {
                 runCatching { api.WintunCloseAdapter(existing) }
             }
-            val adapter = api.WintunCreateAdapter(WString(name), WString("WarpScout"), ADAPTER_GUID)
-                ?: throw IOException(
-                    "Не удалось создать Wintun-адаптер (код Windows ${Native.getLastError()}). " +
-                        "Для создания виртуального сетевого адаптера требуются права администратора."
-                )
+            var adapter = api.WintunCreateAdapter(WString(name), WString("WarpScout"), guid)
+            if (adapter == null) {
+                val err = Native.getLastError()
+                // Если GUID занят (например, предыдущая сессия ещё завершается) — пробуем без фиксированного GUID.
+                if (err == ERROR_ALREADY_EXISTS || err == HRESULT_ALREADY_EXISTS) {
+                    adapter = api.WintunCreateAdapter(WString(name), WString("WarpScout"), null)
+                }
+                if (adapter == null) {
+                    val finalErr = Native.getLastError()
+                    val reason = when (finalErr) {
+                        ERROR_ACCESS_DENIED -> "Для создания виртуального сетевого адаптера требуются права администратора."
+                        ERROR_ALREADY_EXISTS, HRESULT_ALREADY_EXISTS -> "Адаптер «$name» уже занят другим процессом или ещё закрывается."
+                        else -> "Проверьте права администратора и антивирус."
+                    }
+                    throw IOException("Не удалось создать Wintun-адаптер (код Windows $finalErr). $reason")
+                }
+            }
             val session = api.WintunStartSession(adapter, RING_CAPACITY)
             if (session == null) {
                 val err = Native.getLastError()

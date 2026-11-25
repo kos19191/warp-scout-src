@@ -35,6 +35,19 @@ import javax.imageio.ImageIO
 fun main(args: Array<String>) {
     val startMinimized = args.any { it.equals("--minimized", ignoreCase = true) }
     val autoConnect = args.any { it.equals("--autoconnect", ignoreCase = true) }
+    val noAutoElevate = args.any { it.equals("--no-elevate", ignoreCase = true) }
+
+    // Резервный автозапрос UAC при запуске без встроенного манифеста (например, если exe запустили без него).
+    if (!noAutoElevate && dev.warpscout.desktop.tunnel.WindowsAutostart.isWindows()) {
+        val elevated = runCatching { dev.warpscout.desktop.tunnel.ProcessCommandRunner().isElevated() }.getOrDefault(true)
+        if (!elevated) {
+            val forwardArgs = args.toList() + "--no-elevate"
+            if (dev.warpscout.desktop.tunnel.WindowsAutostart.relaunchElevated(forwardArgs)) {
+                kotlin.system.exitProcess(0)
+            }
+        }
+    }
+
     val paths = DesktopPaths.resolveDefault()
     val singleInstance = SingleInstanceGuard(paths.lockFile)
 

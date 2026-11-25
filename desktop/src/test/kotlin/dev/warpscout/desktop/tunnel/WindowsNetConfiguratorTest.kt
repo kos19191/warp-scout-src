@@ -36,6 +36,20 @@ class WindowsNetConfiguratorTest {
     }
 
     @Test
+    fun `excludes endpoint IPs from Wintun routes to make routing loops impossible`() {
+        val routes = WindowsNetConfigurator.expandSafeRoutes(
+            allowedIpsCsv = "0.0.0.0/0",
+            enableIpv6 = false,
+            excludeIpv4s = listOf("162.159.192.10")
+        )
+        val endpointIp = CidrMath.parseIpv4("162.159.192.10")!!
+        val cloudflareDns = CidrMath.parseIpv4("1.1.1.1")!!
+        val ranges = routes.mapNotNull { CidrMath.parseIpv4Cidr(it) }
+        assertTrue(ranges.none { endpointIp in it.start..it.end }, "Endpoint IP must never be routed into Wintun")
+        assertTrue(ranges.any { cloudflareDns in it.start..it.end }, "Other foreign IPs must remain routed")
+    }
+
+    @Test
     fun `adds and cleans up bypass host routes for endpoints`() {
         val calls = mutableListOf<List<String>>()
         val fakeRunner = object : CommandRunner {

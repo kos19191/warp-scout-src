@@ -116,17 +116,81 @@ jobs:
             exit 1
           }
 
-      - name: "Сборка MSI-установщика Windows"
+      - name: "Вшивание UAC-манифеста (requireAdministrator) в WarpScout.exe и добавление bin/wintun.dll"
         shell: pwsh
         run: |
-          ./gradlew --no-daemon :desktop:packageMsi --stacktrace 2>&1 | Tee-Object -FilePath build-msi.log
+          $ErrorActionPreference = "Stop"
+          $appDir = "desktop/build/compose/binaries/main/app/WarpScout"
+          $exe = Join-Path $appDir "WarpScout.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Host "::error title=manifest::Не найден $exe"
+            exit 1
+          }
+          $mt = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\mt.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if ($null -eq $mt) {
+            Write-Host "::error title=manifest::Не найден Windows SDK mt.exe для вшивания UAC-манифеста"
+            exit 1
+          }
+          Write-Host "Используем mt.exe: $($mt.FullName)"
+          & $mt.FullName -nologo -manifest "desktop/windows/WarpScout.manifest" -outputresource:"$exe;#1"
           if ($LASTEXITCODE -ne 0) {
-            Get-Content build-msi.log | Select-String -Pattern 'FAILURE|Caused by|Error|Exception|FAILED|jpackage|candle|light|wix' | Select-Object -First 25 | ForEach-Object {
-              Write-Host "::error title=packageMsi::$($_.Line.Substring(0, [Math]::Min(190, $_.Line.Length)))"
-            }
-            Get-Content build-msi.log -Tail 25 | ForEach-Object {
+            Write-Host "::error title=manifest::mt.exe завершился с кодом $LASTEXITCODE"
+            exit 1
+          }
+          & $mt.FullName -nologo -inputresource:"$exe;#1" -out:"verify.manifest"
+          $manifestText = Get-Content "verify.manifest" -Raw
+          if ($manifestText -notmatch "requireAdministrator") {
+            Write-Host "::error title=manifest::requireAdministrator не найден в ресурсах WarpScout.exe"
+            exit 1
+          }
+          Write-Host "UAC-манифест requireAdministrator успешно вшит и проверен в WarpScout.exe"
+
+          New-Item -ItemType Directory -Force -Path "$appDir/bin" | Out-Null
+          Copy-Item "desktop/src/main/resources/native/win32-x86-64/wintun.dll" "$appDir/bin/wintun.dll" -Force
+
+      - name: "Сборка MSI-установщика Windows (из патченного WarpScout.exe с UAC)"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $versionLine = Select-String -Path "desktop/build.gradle.kts" -Pattern 'val appVersion = "([^"]+)"'
+          $version = $versionLine.Matches[0].Groups[1].Value
+          $appDir = (Resolve-Path "desktop/build/compose/binaries/main/app/WarpScout").Path
+          $iconPath = (Resolve-Path "desktop/src/main/resources/icons/warpscout.ico").Path
+          $msiDest = "out-msi"
+          New-Item -ItemType Directory -Force -Path $msiDest | Out-Null
+
+          # Добавляем WiX Toolset в PATH (jpackage использует candle.exe/light.exe).
+          $wixBin = @(
+            $env:WIX,
+            "C:\Program Files (x86)\WiX Toolset v3.14\bin",
+            "C:\Program Files (x86)\WiX Toolset v3.11\bin"
+          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          if ($wixBin) {
+            $env:PATH = "$wixBin;$env:PATH"
+          }
+
+          $jpackage = Join-Path $env:JAVA_HOME "bin\jpackage.exe"
+          & $jpackage `
+            --type msi `
+            --app-image $appDir `
+            --name "WarpScout" `
+            --app-version $version `
+            --vendor "WarpScout" `
+            --description "WarpScout Desktop - Cloudflare WARP and AmneziaWG auto-tuner and tunnel" `
+            --copyright "MIT License" `
+            --icon $iconPath `
+            --win-menu `
+            --win-menu-group "WarpScout" `
+            --win-shortcut `
+            --win-dir-chooser `
+            --win-upgrade-uuid "7a6b3e1d-8c42-4d91-9b0f-45b9b9188a3c" `
+            --dest $msiDest 2>&1 | Tee-Object -FilePath build-msi.log
+
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content build-msi.log -Tail 30 | ForEach-Object {
               if ($_.Trim().Length -gt 0) {
-                Write-Host "::error title=tail::$($_.Substring(0, [Math]::Min(190, $_.Length)))"
+                Write-Host "::error title=jpackage-msi::$($_.Substring(0, [Math]::Min(190, $_.Length)))"
               }
             }
             exit 1
@@ -146,16 +210,13 @@ jobs:
           if (-not (Test-Path $appDir)) {
             throw "Не найден каталог сборки: $appDir"
           }
-          # Дублируем wintun.dll в bin/ рядом с WarpScout.exe (помимо встроенного ресурса в JAR)
-          New-Item -ItemType Directory -Force -Path "$appDir/bin" | Out-Null
-          Copy-Item "desktop/src/main/resources/native/win32-x86-64/wintun.dll" "$appDir/bin/wintun.dll" -Force
 
           $zipPath = "out-win/WarpScout-$version-windows-x64-portable.zip"
           Compress-Archive -Path "$appDir/*" -DestinationPath $zipPath -Force
 
-          $msi = Get-ChildItem -Path "desktop/build/compose/binaries/main/msi" -Filter "*.msi" | Select-Object -First 1
+          $msi = Get-ChildItem -Path "out-msi" -Filter "*.msi" | Select-Object -First 1
           if ($null -eq $msi) {
-            throw "Не найден MSI-установщик"
+            throw "Не найден MSI-установщик в out-msi"
           }
           $msiOut = "out-win/WarpScout-$version-windows-x64.msi"
           Copy-Item $msi.FullName $msiOut -Force

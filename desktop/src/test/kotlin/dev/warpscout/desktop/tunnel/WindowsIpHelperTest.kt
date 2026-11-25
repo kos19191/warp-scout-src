@@ -2,6 +2,8 @@ package dev.warpscout.desktop.tunnel
 
 import com.sun.jna.Memory
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 
@@ -20,5 +22,14 @@ class WindowsIpHelperTest {
         assertEquals(-1, buf.getInt(WindowsIpHelper.OFF_VALID_LIFETIME), "ValidLifetime offset mismatch")
         assertEquals(-1, buf.getInt(WindowsIpHelper.OFF_PREFERRED_LIFETIME), "PreferredLifetime offset mismatch")
         assertEquals(-1, buf.getInt(WindowsIpHelper.OFF_METRIC), "Metric offset mismatch")
+    }
+
+    @Test
+    fun `GetBestRoute2 resolves real physical gateway on Windows without PowerShell`() {
+        assumeTrue(WindowsAutostart.isWindows(), "Windows-only Win32 GetBestRoute2 verification")
+        val gw = WindowsIpHelper.getBestIpv4Route("1.1.1.1")
+        assertNotNull(gw, "GetBestRoute2 should return active Windows default route")
+        assertTrue(gw!!.interfaceLuid != 0L || gw.interfaceIndex > 0)
+        assertNotNull(CidrMath.parseIpv4(gw.nextHop), "NextHop must be valid IPv4: ${gw.nextHop}")
     }
 }
