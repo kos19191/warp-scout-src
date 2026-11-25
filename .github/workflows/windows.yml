@@ -57,10 +57,36 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: "Сборка портативного приложения (WarpScout.exe + встроенный JRE)"
-        run: ./gradlew --no-daemon :desktop:createDistributable
+        shell: pwsh
+        run: |
+          ./gradlew --no-daemon :desktop:createDistributable --stacktrace 2>&1 | Tee-Object -FilePath build-dist.log
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content build-dist.log | Select-String -Pattern 'FAILURE|Caused by|Error|Exception|FAILED|jpackage' | Select-Object -First 25 | ForEach-Object {
+              Write-Host "::error title=createDistributable::$($_.Line.Substring(0, [Math]::Min(190, $_.Line.Length)))"
+            }
+            Get-Content build-dist.log -Tail 25 | ForEach-Object {
+              if ($_.Trim().Length -gt 0) {
+                Write-Host "::error title=tail::$($_.Substring(0, [Math]::Min(190, $_.Length)))"
+              }
+            }
+            exit 1
+          }
 
       - name: "Сборка MSI-установщика Windows"
-        run: ./gradlew --no-daemon :desktop:packageMsi
+        shell: pwsh
+        run: |
+          ./gradlew --no-daemon :desktop:packageMsi --stacktrace 2>&1 | Tee-Object -FilePath build-msi.log
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content build-msi.log | Select-String -Pattern 'FAILURE|Caused by|Error|Exception|FAILED|jpackage|candle|light|wix' | Select-Object -First 25 | ForEach-Object {
+              Write-Host "::error title=packageMsi::$($_.Line.Substring(0, [Math]::Min(190, $_.Line.Length)))"
+            }
+            Get-Content build-msi.log -Tail 25 | ForEach-Object {
+              if ($_.Trim().Length -gt 0) {
+                Write-Host "::error title=tail::$($_.Substring(0, [Math]::Min(190, $_.Length)))"
+              }
+            }
+            exit 1
+          }
 
       - name: "Упаковка артефактов и SHA-256"
         shell: pwsh

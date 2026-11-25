@@ -40,12 +40,13 @@ compose.desktop {
             targetFormats(TargetFormat.Msi, TargetFormat.Exe)
             packageName = "WarpScout"
             packageVersion = appVersion
-            description = "WarpScout — автоматический подбор WARP/AmneziaWG и туннель в один клик"
+            description = "WarpScout Desktop - Cloudflare WARP and AmneziaWG auto-tuner and tunnel"
             vendor = "WarpScout"
             copyright = "MIT License"
 
             // jdk.crypto.ec и java.net.http нужны в собранном JRE для HTTPS/DoH/Cloudflare.
             modules(
+                "java.desktop",
                 "java.instrument",
                 "java.logging",
                 "java.management",
