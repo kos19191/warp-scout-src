@@ -121,27 +121,100 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $appDir = "desktop/build/compose/binaries/main/app/WarpScout"
-          $exe = Join-Path $appDir "WarpScout.exe"
-          if (-not (Test-Path $exe)) {
-            Write-Host "::error title=manifest::Не найден $exe"
-            exit 1
+          $exe = (Resolve-Path (Join-Path $appDir "WarpScout.exe")).Path
+          $fallbackManifest = (Resolve-Path "desktop/windows/WarpScout.manifest").Path
+
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          using System.Text;
+
+          public static class PeManifestPatcher {
+              [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+              static extern IntPtr LoadLibraryExW(string lpFileName, IntPtr hFile, uint dwFlags);
+
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern bool FreeLibrary(IntPtr hModule);
+
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern IntPtr FindResourceW(IntPtr hModule, IntPtr lpName, IntPtr lpType);
+
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern IntPtr LoadResource(IntPtr hModule, IntPtr hResInfo);
+
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern IntPtr LockResource(IntPtr hResData);
+
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern uint SizeofResource(IntPtr hModule, IntPtr hResInfo);
+
+              [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+              static extern IntPtr BeginUpdateResourceW(string pFileName, bool bDeleteExistingResources);
+
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern bool UpdateResourceW(IntPtr hUpdate, IntPtr lpType, IntPtr lpName, ushort wLanguage, byte[] lpData, uint cbData);
+
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern bool EndUpdateResourceW(IntPtr hUpdate, bool fDiscard);
+
+              const uint LOAD_LIBRARY_AS_DATAFILE = 0x00000002;
+              static readonly IntPtr RT_MANIFEST = (IntPtr)24;
+              static readonly IntPtr CREATEPROCESS_MANIFEST_RESOURCE_ID = (IntPtr)1;
+
+              public static string ReadManifest(string exePath) {
+                  IntPtr hMod = LoadLibraryExW(exePath, IntPtr.Zero, LOAD_LIBRARY_AS_DATAFILE);
+                  if (hMod == IntPtr.Zero) throw new Exception("LoadLibraryExW failed: " + Marshal.GetLastWin32Error());
+                  try {
+                      IntPtr hRes = FindResourceW(hMod, CREATEPROCESS_MANIFEST_RESOURCE_ID, RT_MANIFEST);
+                      if (hRes == IntPtr.Zero) return null;
+                      uint size = SizeofResource(hMod, hRes);
+                      IntPtr hData = LoadResource(hMod, hRes);
+                      IntPtr ptr = LockResource(hData);
+                      byte[] buf = new byte[size];
+                      Marshal.Copy(ptr, buf, 0, (int)size);
+                      return Encoding.UTF8.GetString(buf);
+                  } finally {
+                      FreeLibrary(hMod);
+                  }
+              }
+
+              public static void WriteManifest(string exePath, string xml) {
+                  byte[] bytes = new UTF8Encoding(false).GetBytes(xml);
+                  IntPtr hUpd = BeginUpdateResourceW(exePath, false);
+                  if (hUpd == IntPtr.Zero) throw new Exception("BeginUpdateResourceW failed: " + Marshal.GetLastWin32Error());
+                  // Удаляем стандартный слот en-US (1033) и нейтральный (0), затем пишем в нейтральный (0).
+                  UpdateResourceW(hUpd, RT_MANIFEST, CREATEPROCESS_MANIFEST_RESOURCE_ID, 1033, null, 0);
+                  if (!UpdateResourceW(hUpd, RT_MANIFEST, CREATEPROCESS_MANIFEST_RESOURCE_ID, 0, bytes, (uint)bytes.Length)) {
+                      int err = Marshal.GetLastWin32Error();
+                      EndUpdateResourceW(hUpd, true);
+                      throw new Exception("UpdateResourceW failed: " + err);
+                  }
+                  if (!EndUpdateResourceW(hUpd, false)) {
+                      throw new Exception("EndUpdateResourceW failed: " + Marshal.GetLastWin32Error());
+                  }
+              }
           }
-          $mt = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\mt.exe" -ErrorAction SilentlyContinue |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if ($null -eq $mt) {
-            Write-Host "::error title=manifest::Не найден Windows SDK mt.exe для вшивания UAC-манифеста"
-            exit 1
+          "@
+
+          $orig = [PeManifestPatcher]::ReadManifest($exe)
+          if ([string]::IsNullOrWhiteSpace($orig)) {
+            Write-Host "Встроенный манифест не найден — используем desktop/windows/WarpScout.manifest"
+            $patched = Get-Content $fallbackManifest -Raw -Encoding UTF8
+          } elseif ($orig -match 'level="asInvoker"') {
+            Write-Host "Найден встроенный манифест jpackage (asInvoker) — меняем на requireAdministrator"
+            $patched = $orig -replace 'level="asInvoker"', 'level="requireAdministrator"'
+          } elseif ($orig -match 'requireAdministrator') {
+            $patched = $orig
+          } else {
+            Write-Host "Встраиваем trustInfo/requireAdministrator из desktop/windows/WarpScout.manifest"
+            $patched = Get-Content $fallbackManifest -Raw -Encoding UTF8
           }
-          Write-Host "Используем mt.exe: $($mt.FullName)"
-          & $mt.FullName -nologo -manifest "desktop/windows/WarpScout.manifest" -outputresource:"$exe;#1"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::error title=manifest::mt.exe завершился с кодом $LASTEXITCODE"
-            exit 1
-          }
-          & $mt.FullName -nologo -inputresource:"$exe;#1" -out:"verify.manifest"
-          $manifestText = Get-Content "verify.manifest" -Raw
-          if ($manifestText -notmatch "requireAdministrator") {
-            Write-Host "::error title=manifest::requireAdministrator не найден в ресурсах WarpScout.exe"
+
+          [PeManifestPatcher]::WriteManifest($exe, $patched)
+
+          $verify = [PeManifestPatcher]::ReadManifest($exe)
+          if (-not ($verify -match 'requireAdministrator')) {
+            Write-Host "::error title=manifest::requireAdministrator не найден после записи в WarpScout.exe"
             exit 1
           }
           Write-Host "UAC-манифест requireAdministrator успешно вшит и проверен в WarpScout.exe"
