@@ -9,8 +9,6 @@ import android.widget.BaseAdapter
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDialog
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.core.widget.doAfterTextChanged
 import dev.warpscout.app.databinding.DialogWelcomeBinding
 import dev.warpscout.app.databinding.ItemAppRowBinding
@@ -126,26 +124,10 @@ class WelcomeScreens(
     /**
      * Окно во весь экран: системные панели (вверху — строка состояния, внизу — три кнопки навигации или
      * полоска жестов), вырез камеры и клавиатура не должны закрывать текст и кнопки. Там, где Android
-     * сам ставит окно между панелями (так у WarpScout на всех версиях), сюда приходят нули — отступы
-     * остаются как в разметке; отступ добавляется, только если окно легло под панели.
+     * сам ставит окно между панелями, сюда приходят нули — отступы остаются как в разметке; отступ
+     * добавляется, только если окно легло под панели. С 1.10.47 — общий [SystemBars], как у главного экрана.
      */
-    private fun padForSystemBars(root: View) {
-        val start = root.paddingStart
-        val top = root.paddingTop
-        val end = root.paddingEnd
-        val bottom = root.paddingBottom
-        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
-            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
-            view.setPaddingRelative(
-                start + bars.left,
-                top + bars.top,
-                end + bars.right,
-                bottom + maxOf(bars.bottom, ime.bottom),
-            )
-            insets
-        }
-    }
+    private fun padForSystemBars(root: View) = SystemBars.keepClear(root)
 
     // ------------------------------------------------------------------ 1. приложения
 

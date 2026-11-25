@@ -245,6 +245,9 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             ServiceSettingsStore.syncFromPrefs(this)
             binding = ActivityMainBinding.inflate(layoutInflater)
             setContentView(binding.root)
+            // С 1.10.47: если окно легло под строку состояния и панель навигации (так бывает на части
+            // телефонов), строка статуса и вкладки отступают от них сами; иначе отступы нулевые.
+            SystemBars.keepClear(binding.root)
 
             prefs = Prefs(this)
             // Подключаемся к состоянию туннеля из его процесса (идемпотентно, см. TunnelStatusBus).

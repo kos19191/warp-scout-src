@@ -112,6 +112,8 @@ object SafeMode {
             setBackgroundColor(ContextCompat.getColor(activity, R.color.colorSurface))
             addView(column)
         }
+        // Текст и кнопки — не под строкой состояния и панелью навигации (с 1.10.47, см. SystemBars).
+        runCatching { SystemBars.keepClear(scroll) }
         runCatching { activity.setContentView(scroll) }
     }
 
