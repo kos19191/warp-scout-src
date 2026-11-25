@@ -161,11 +161,11 @@ class SelectionAndProfileTest {
         assertEquals(setOf("8", "162", "188"), families, "First 3 refine slots must cover 8.*, 162.*, and 188.*")
 
         val ordered = listOf(
-            cand("8.34.70.2", 859, JunkLibrary.quic("akbars.ru"), score = 2000),
-            cand("8.35.211.6", 854, JunkLibrary.sip(), score = 1990),
-            cand("8.39.204.9", 864, JunkLibrary.tlsFixed(), score = 1980),
-            cand("162.159.195.1", 2408, JunkLibrary.tlsFixed(), score = 1800),
-            cand("188.114.96.1", 2408, JunkLibrary.sip(), score = 1790)
+            cand("8.34.70.2", 859, JunkLibrary.quic("akbars.ru")),
+            cand("8.35.211.6", 854, JunkLibrary.sip()),
+            cand("8.39.204.9", 864, JunkLibrary.tlsFixed()),
+            cand("162.159.195.1", 2408, JunkLibrary.tlsFixed()),
+            cand("188.114.96.1", 2408, JunkLibrary.sip())
         )
         val verify = AutoTuner.selectForVerification(ordered, maxCount = 5)
         val verifyFamilies = verify.take(3).map { AutoTuner.prefixFamilyOf(it.config.endpoint.host) }.toSet()
