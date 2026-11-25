@@ -447,7 +447,7 @@ class ProtonConnect(
         try {
             showVerification(e, onCancel, onToken)
         } catch (t: Throwable) {
-            TunnelDebug.error("Proton: окно проверки не открылось — ${SafeMode.describe(t)}")
+            TunnelDebug.problem("Proton: окно проверки не открылось — ${SafeMode.describe(t)}")
             onCancel()
             fail(ProtonException(s(R.string.proton_err_webview, SafeMode.describe(t))))
         }
@@ -503,7 +503,7 @@ class ProtonConnect(
         if (cancelled) return
         val e = t as? ProtonException
         val detail = e?.message ?: SafeMode.describe(t)
-        TunnelDebug.error("Proton: $detail")
+        TunnelDebug.problem("Proton: $detail")
         val text = when (e?.reason) {
             ProtonException.Reason.NETWORK -> s(if (service) R.string.proton_err_service_network else R.string.proton_err_network, detail)
             ProtonException.Reason.APP_VERSION -> s(R.string.proton_err_version, detail)
@@ -543,7 +543,7 @@ class ProtonConnect(
     private fun ui(block: () -> Unit) {
         activity.runOnUiThread {
             if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
-            runCatching(block).onFailure { t -> TunnelDebug.error("Proton: окно — ${SafeMode.describe(t)}") }
+            runCatching(block).onFailure { t -> TunnelDebug.problem("Proton: окно — ${SafeMode.describe(t)}") }
         }
     }
 

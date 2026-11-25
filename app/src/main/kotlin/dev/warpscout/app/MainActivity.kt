@@ -1770,6 +1770,14 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             banner(getString(R.string.scan_busy_scan))
             return
         }
+        // Работает VPN другого приложения — подбор не запускаем (с 1.10.45, см. ForeignVpn): замеры
+        // шли бы через чужой туннель, а проверка изнутри молча отключила бы его. Выключить чужой VPN
+        // может только человек — говорим ему. Смотрим до остановки своего туннеля: свой — не чужой.
+        val foreignVpn = ForeignVpn.find(this, ownUp = tunnel.supported && (tunnel.isUp || tunnel.active))
+        if (foreignVpn != null) {
+            warnForeignVpn(foreignVpn)
+            return
+        }
         autoConnectAfterScan = autoConnect
         scanAutoConnect = autoConnect
         persistUi()
@@ -1817,6 +1825,28 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             val ui = shown?.takeIf { it.uiReady() } ?: this
             ui.onScanDone(result, error, autoConnect, tunnelWasUp, mode)
         }
+    }
+
+    /**
+     * Подбор не запущен: работает VPN другого приложения (с 1.10.45). Говорим, что делать, и даём
+     * дорогу в настройки VPN Android — там его можно отключить и снять «Постоянную VPN».
+     */
+    private fun warnForeignVpn(iface: String) {
+        TunnelDebug.stage("подбор не запущен: работает другой VPN ($iface) — попросил его выключить")
+        banner(getString(R.string.foreign_vpn_banner), error = true)
+        if (isFinishing || isDestroyed) return
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.foreign_vpn_title)
+            .setMessage(getString(R.string.foreign_vpn_msg, iface))
+            .setPositiveButton(R.string.foreign_vpn_settings) { _, _ -> openVpnSettings() }
+            .setNegativeButton(R.string.foreign_vpn_ok, null)
+            .show()
+    }
+
+    /** Системные настройки VPN; нет такого экрана — общие настройки сетей. */
+    private fun openVpnSettings() {
+        val opened = runCatching { startActivity(Intent(android.provider.Settings.ACTION_VPN_SETTINGS)) }.isSuccess
+        if (!opened) runCatching { startActivity(Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS)) }
     }
 
     /** Подбор закончился (или его остановили): показать итог и сделать то, что было обещано. */
@@ -2013,7 +2043,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         // сервис.
         binding.btnProtonConnect.setOnClickListener {
             runCatching { startProtonConnect() }.onFailure { t ->
-                TunnelDebug.error("второй выход: Proton кнопкой — " + SafeMode.describe(t))
+                TunnelDebug.problem("второй выход: Proton кнопкой — " + SafeMode.describe(t))
                 banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
             }
         }
@@ -5384,14 +5414,56 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
 
     // ------------------------------------------------ Proton кнопкой (с 1.10.44-beta5)
 
-    /** «Подключить второй выход (Proton)»: ключ у Proton без сайта — см. ProtonConnect. */
+    /**
+     * «Подключить второй выход (Proton)»: ключ у Proton без сайта — см. ProtonConnect.
+     *
+     * С 1.10.45 — сначала туннель. Proton из России закрыт, ключ приложение получает через свой
+     * туннель; при выключенном запрос уходил напрямую и падал с «Unable to resolve host
+     * vpn-api.proton.me» (скриншот 25.11). Теперь кнопка говорит, что туннель выключен, и даёт включить
+     * его ([beginSecondSetup] сам откроет выбор, когда туннель заработает); «Всё равно продолжить» —
+     * для тех, у кого Proton открыт и без туннеля.
+     */
     private fun startProtonConnect() {
+        if (tunnel.supported && !tunnel.isUp) {
+            askTunnelForProton()
+            return
+        }
+        launchProtonConnect()
+    }
+
+    private fun launchProtonConnect() {
         ProtonConnect(this, prefs) { result ->
             runCatching { applyProtonResult(result) }.onFailure { t ->
-                TunnelDebug.error("второй выход: Proton кнопкой — " + SafeMode.describe(t))
+                // problem, а не error: сбой ключа Proton — не «Не удалось подключиться» туннеля.
+                TunnelDebug.problem("второй выход: Proton кнопкой — " + SafeMode.describe(t))
                 banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
             }
         }.start()
+    }
+
+    /** Туннель выключен или ещё подключается — без него Proton кнопкой из России не дойдёт. */
+    private fun askTunnelForProton() {
+        if (isFinishing || isDestroyed) return
+        val held = tunnel.active || connecting || engine.running
+        val foreign = if (held) null else ForeignVpn.find(this, ownUp = false)
+        TunnelDebug.stage(
+            "Proton: туннель " + (if (held) "ещё подключается" else "выключен") + " — прошу сначала туннель" +
+                (foreign?.let { "; работает другой VPN ($it)" } ?: "")
+        )
+        val msg = StringBuilder(getString(if (held) R.string.proton_need_tunnel_wait else R.string.proton_need_tunnel_msg))
+        if (foreign != null) msg.append("\n\n").append(getString(R.string.proton_need_tunnel_foreign, foreign))
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.proton_need_tunnel_title)
+            .setMessage(msg.toString())
+            .setPositiveButton(if (held) R.string.proton_need_tunnel_later else R.string.proton_need_tunnel_on) { _, _ ->
+                runCatching { beginSecondSetup() }.onFailure { t ->
+                    TunnelDebug.problem("второй выход: туннель для Proton — " + SafeMode.describe(t))
+                    banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+                }
+            }
+            .setNeutralButton(R.string.proton_need_tunnel_anyway) { _, _ -> launchProtonConnect() }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     /**
@@ -5974,7 +6046,8 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     }
 
     /**
-     * «Настроить» второй выход из начальных экранов. Proton из России без туннеля не открывается
+     * «Настроить» второй выход из начальных экранов и «Включить туннель» в окне Proton-кнопки (с 1.10.45,
+     * см. [askTunnelForProton]). Proton из России без туннеля не открывается
      * (proton_connect_tunnel_hint): туннель работает — сразу выбор способа; нет — включаем его, как
      * большой кнопкой (после новой установки — с подбором точки), и открываем выбор, как только он
      * заработает ([continueSecondSetup]). Ждём не дольше 15 минут; «Выключить» и «Отменить» — не ждём.
@@ -5985,13 +6058,13 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             return
         }
         if (tunnel.isUp && !connecting && !engine.running) {
-            TunnelDebug.stage("начальные экраны: туннель работает — открываю выбор Proton")
+            TunnelDebug.stage("второй выход: туннель работает — открываю выбор Proton")
             openProtonConnect()
             return
         }
         secondSetupUntil = System.currentTimeMillis() + SECOND_SETUP_WAIT_MS
         secondSetupUpSince = 0L
-        TunnelDebug.stage("начальные экраны: второй выход — сначала туннель, потом выбор Proton")
+        TunnelDebug.stage("второй выход: сначала туннель, потом выбор Proton")
         // Туннель уже поднимается (подбор, перебор точек, сервис ждёт повтора) — просто ждём.
         if (!connecting && !engine.running && !tunnel.active) toggleTunnel()
         banner(getString(R.string.welcome_second_wait))
@@ -6002,7 +6075,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         val now = System.currentTimeMillis()
         if (now > secondSetupUntil) {
             secondSetupUntil = 0L
-            TunnelDebug.stage("начальные экраны: туннель за 15 минут не заработал — выбор второго выхода не открываю")
+            TunnelDebug.stage("второй выход: туннель за 15 минут не заработал — выбор Proton не открываю")
             return
         }
         if (!upNow || connecting || engine.running) {
@@ -6015,13 +6088,13 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         }
         if (now - secondSetupUpSince < 2_000L || !screenResumed || isFinishing) return
         secondSetupUntil = 0L
-        TunnelDebug.stage("начальные экраны: туннель заработал — открываю выбор Proton")
+        TunnelDebug.stage("второй выход: туннель заработал — открываю выбор Proton")
         openProtonConnect()
     }
 
     private fun openProtonConnect() {
         runCatching { startProtonConnect() }.onFailure { t ->
-            TunnelDebug.error("второй выход: Proton кнопкой — " + SafeMode.describe(t))
+            TunnelDebug.problem("второй выход: Proton кнопкой — " + SafeMode.describe(t))
             banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
         }
     }

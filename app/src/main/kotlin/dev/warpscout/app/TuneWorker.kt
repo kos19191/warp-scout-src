@@ -24,6 +24,13 @@ class TuneWorker(appContext: Context, params: WorkerParameters) : Worker(appCont
         val tunnel = TunnelFactory.create(context)
         val tunnelUp = runCatching { tunnel.isUp }.getOrDefault(false)
         val tunnelHeld = runCatching { tunnel.active }.getOrDefault(false)
+        // Работает VPN другого приложения — пропускаем (с 1.10.45, см. ForeignVpn): замеры шли бы через
+        // него, а проверка изнутри молча его отключила бы. Следующий раз придёт по расписанию сам.
+        val foreignVpn = ForeignVpn.find(context, ownUp = tunnelUp || tunnelHeld)
+        if (foreignVpn != null) {
+            TunnelDebug.stage("фоновый подбор пропущен: работает другой VPN ($foreignVpn) — сам его не выключаю")
+            return Result.success()
+        }
         if (tunnelUp) {
             // С 1.10.29 работающий туннель — не повод отказаться навсегда: раньше при включённом
             // туннеле подбор откладывался каждый раз, то есть «иногда подбирать заново» не работало

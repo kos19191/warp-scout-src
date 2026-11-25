@@ -834,4 +834,18 @@
     <string name="welcome_second_wait">Включаю туннель. Когда он заработает, откроется подключение второго выхода (Proton).</string>
     <string name="second_file_applying">Второй выход: конфиг из файла, сервер %1$s — применяю…</string>
     <string name="second_file_saved">Второй выход: конфиг из файла, сервер %1$s — сохранено, заработает при подключении туннеля</string>
+    <!-- Подбор при VPN другого приложения (с 1.10.45, см. ForeignVpn) -->
+    <string name="foreign_vpn_title">Сначала выключи другой VPN</string>
+    <string name="foreign_vpn_msg">Сейчас работает VPN другого приложения (интерфейс %1$s). Подбор при нём не запускаю: замеры шли бы через чужой туннель, а не через твою сеть, и точка подобралась бы неправильная. Выключить чужой VPN WarpScout сам не может — так устроен Android.\n\nВыключи его в его приложении или в настройках VPN и запусти подбор снова. Если у того приложения включена «Постоянная VPN», сними её там же.</string>
+    <string name="foreign_vpn_settings">Настройки VPN</string>
+    <string name="foreign_vpn_ok">Понятно</string>
+    <string name="foreign_vpn_banner">Подбор не запущен: работает другой VPN — выключи его и повтори</string>
+    <!-- Proton кнопкой при выключенном туннеле (с 1.10.45) -->
+    <string name="proton_need_tunnel_title">Сначала включи туннель</string>
+    <string name="proton_need_tunnel_msg">Proton из России закрыт, поэтому ключ WarpScout получает через свой туннель, а он сейчас выключен: без него запрос не дойдёт (так выглядит ошибка «Unable to resolve host vpn-api.proton.me»).\n\n«Включить туннель» — включу его и сам открою выбор способа, как только туннель заработает. Нужен режим «весь трафик» или «всё, кроме российских сетей».</string>
+    <string name="proton_need_tunnel_wait">Туннель ещё подключается. Proton из России закрыт, и ключ WarpScout получает только через работающий туннель — открою выбор способа, как только он заработает.</string>
+    <string name="proton_need_tunnel_foreign">Сейчас работает VPN другого приложения (интерфейс %1$s). Когда включится туннель WarpScout, Android его отключит: два VPN сразу не работают. Если у того приложения включена «Постоянная VPN», сначала сними её в настройках VPN.</string>
+    <string name="proton_need_tunnel_on">Включить туннель</string>
+    <string name="proton_need_tunnel_later">Открыть, когда заработает</string>
+    <string name="proton_need_tunnel_anyway">Всё равно продолжить</string>
 </resources>

@@ -27,6 +27,9 @@ import java.util.concurrent.TimeUnit
  *
  * Если non-VPN сеть не отдаётся (Always-on с «блокировать другие приложения») — честно говорим об
  * этом в [describe]: молча врать про «чистую сеть» хуже, чем предупредить.
+ *
+ * С 1.10.45 подбор при чужом VPN не запускается вовсе (см. [ForeignVpn]): Android пускает мимо VPN,
+ * только если тот сам это разрешил, — по умолчанию замеры шли бы через чужой туннель.
  */
 object CleanNetwork {
 
@@ -72,7 +75,9 @@ object CleanNetwork {
     fun bind(context: Context): Boolean {
         val net = clean ?: return false
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager ?: return false
-        bound = runCatching { cm.bindProcessToNetwork(net) }.isSuccess
+        // Отказ bindProcessToNetwork — это false, а не исключение (VPN без allowBypass): с isSuccess
+        // журнал писал «замеры идут в обход», когда обхода не было (до 1.10.45).
+        bound = runCatching { cm.bindProcessToNetwork(net) }.getOrDefault(false)
         return bound
     }
 

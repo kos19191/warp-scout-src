@@ -148,6 +148,15 @@ object TunnelDebug {
         add("✗ $message" + (hint?.let { " · подсказка: $it" }.orEmpty()))
     }
 
+    /**
+     * ✗ в журнал, но не «последняя ошибка туннеля» (с 1.10.45). [error] встаёт в строку состояния как
+     * «Не удалось подключиться: …», а сбой, скажем, получения ключа Proton — не сбой подключения: на
+     * скриншоте 25.11 туннель был просто выключен, а строка винила его в ошибке Proton.
+     */
+    fun problem(message: String, hint: String? = null) {
+        add("✗ $message" + (hint?.let { " · подсказка: $it" }.orEmpty()))
+    }
+
     fun ok(message: String) {
         touched = true
         add("✓ $message")

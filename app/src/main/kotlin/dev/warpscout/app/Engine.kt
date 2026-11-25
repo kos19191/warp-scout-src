@@ -336,15 +336,20 @@ class Engine(private val context: Context) {
         // 3) Авто-применение: либо по галочке, либо восстанавливаем только что остановленный туннель.
         val best = result.best
         if (best != null && tunnel.supported) {
-            val allowed = runCatching { android.net.VpnService.prepare(context) == null }.getOrDefault(false)
             val autoApply = prefs.autoApply && allowAutoApply
             if (prefs.autoApply && !allowAutoApply && !wasUp) {
                 sink.log("авто-применение пропущено: туннель выключен вручную — сам его не включаю")
             }
+            // VpnService.prepare() — не вопрос «есть ли разрешение», а «сделай меня VPN»: приложению,
+            // которому разрешение уже давали, Android тут же отключает работающий VPN другого
+            // приложения. Поэтому — только когда туннель правда поднимаем (с 1.10.45; раньше вызов шёл
+            // после каждого удачного подбора, даже если туннель потом не поднимался).
+            val wantUp = autoApply || wasUp
+            val allowed = wantUp && runCatching { android.net.VpnService.prepare(context) == null }.getOrDefault(false)
             when {
                 autoApply && !allowed ->
                     sink.log("авто-применение пропущено: нет разрешения на VPN — открой приложение и нажми «Туннель»")
-                autoApply || wasUp -> {
+                wantUp -> {
                     val withRoutes = ConfigComposer.applyPrefs(best, prefs, prefs.junkPool)
                     val up = runCatching { tunnel.startAndAwait(withRoutes, 25000) }.getOrDefault(false)
                     if (up) {
