@@ -466,7 +466,7 @@ object AppUpdater {
     private fun httpGetText(url: String, timeoutMs: Int = 10_000): String? = runCatching {
         val conn = openWithRedirects(url, timeoutMs, "application/vnd.github+json")
         try {
-            if (conn.responseCode !in 200..299) return null
+            if (conn.responseCode !in 200..299) return@runCatching null
             conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
         } finally {
             conn.disconnect()
@@ -478,41 +478,43 @@ object AppUpdater {
         targetFile: File,
         expectedSize: Long,
         onProgress: (Long, Long) -> Unit
-    ): String? = try {
-        val conn = openWithRedirects(url, timeoutMs = 25_000, accept = "application/octet-stream")
-        try {
-            if (conn.responseCode !in 200..299) {
-                return "GitHub вернул HTTP ${conn.responseCode}"
-            }
-            val total = conn.contentLengthLong.takeIf { it > 0L } ?: expectedSize
-            var downloaded = 0L
-            var lastNotify = 0L
-            conn.inputStream.use { input ->
-                FileOutputStream(targetFile).use { output ->
-                    val buf = ByteArray(64 * 1024)
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        output.write(buf, 0, n)
-                        downloaded += n
-                        val now = System.currentTimeMillis()
-                        if (now - lastNotify >= 150L || (total > 0L && downloaded >= total)) {
-                            lastNotify = now
-                            onProgress(downloaded, total)
+    ): String? {
+        return try {
+            val conn = openWithRedirects(url, timeoutMs = 25_000, accept = "application/octet-stream")
+            try {
+                if (conn.responseCode !in 200..299) {
+                    return "GitHub вернул HTTP ${conn.responseCode}"
+                }
+                val total = conn.contentLengthLong.takeIf { it > 0L } ?: expectedSize
+                var downloaded = 0L
+                var lastNotify = 0L
+                conn.inputStream.use { input ->
+                    FileOutputStream(targetFile).use { output ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            output.write(buf, 0, n)
+                            downloaded += n
+                            val now = System.currentTimeMillis()
+                            if (now - lastNotify >= 150L || (total > 0L && downloaded >= total)) {
+                                lastNotify = now
+                                onProgress(downloaded, total)
+                            }
                         }
                     }
                 }
+                if (downloaded < 1024L) {
+                    "Загруженный файл слишком мал ($downloaded Б)"
+                } else {
+                    onProgress(downloaded, total.coerceAtLeast(downloaded))
+                    null
+                }
+            } finally {
+                conn.disconnect()
             }
-            if (downloaded < 1024L) {
-                "Загруженный файл слишком мал ($downloaded Б)"
-            } else {
-                onProgress(downloaded, total.coerceAtLeast(downloaded))
-                null
-            }
-        } finally {
-            conn.disconnect()
+        } catch (e: Exception) {
+            "${e.javaClass.simpleName}: ${e.message}"
         }
-    } catch (e: Exception) {
-        "${e.javaClass.simpleName}: ${e.message}"
     }
 }
