@@ -352,6 +352,14 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         val bad = back.copyOf().also { it[20] = (it[20].toInt() xor 0x40).toByte() }
         check("transport: битый тег отвергнут", Wg.openTransport(bad, 0x0badf00d, cliAfter) == null)
 
+        // переупорядоченные UDP-пакеты принимаются по скользящему окну (RFC 6479), повторы отвергаются
+        val (ooo1, cliOoo1) = Wg.buildTransport(0x5a5a5a5a, cliAfter, "p1".toByteArray())
+        val (ooo2, _) = Wg.buildTransport(0x5a5a5a5a, cliOoo1, "p2".toByteArray())
+        val got2 = Wg.openTransport(ooo2, 0x5a5a5a5a, srvAfter)
+        val got1 = got2?.let { Wg.openTransport(ooo1, 0x5a5a5a5a, it.second) }
+        check("transport: переупорядоченный UDP-пакет принят (RFC 6479)", got1?.first?.contentEquals("p1".toByteArray()) == true)
+        check("transport: повтор переупорядоченного пакета отвергнут", got1?.let { Wg.openTransport(ooo1, 0x5a5a5a5a, it.second) } == null)
+
         // ---- cookie reply: сервер «под нагрузкой»
         val cookie = ByteArray(16) { (it + 1).toByte() }
         val init2 = Wg.buildInitiation(clientPriv, clientPub, serverPub, 0x77)

@@ -42,6 +42,10 @@ class SocketUdpChannel(
     private val txPacket = java.net.DatagramPacket(ByteArray(1), 0)
 
     init {
+        // На Windows стандартный UDP-буфер сокета всего 64 КБ (~50 пакетов), чего не хватает
+        // при параллельной загрузке медиа в Telegram/YouTube — просим 4 МБ (ОС ограничит максимумом).
+        runCatching { socket.receiveBufferSize = 4 * 1024 * 1024 }
+        runCatching { socket.sendBufferSize = 4 * 1024 * 1024 }
         if (!socket.isConnected) socket.connect(InetSocketAddress(endpoint.host, endpoint.port))
         socket.soTimeout = timeoutMs
     }
@@ -216,6 +220,13 @@ class DataPlane(
     private var peerIndex: Int = 0
     private var localIndex: Int = 0
 
+    /**
+     * Предыдущая сессия для бесшовного rekey: сервер ещё ~1 RTT (100–250 мс) продолжает слать
+     * пакеты в старую сессию, пока до него не дойдёт наш первый transport-пакет новой сессии.
+     */
+    private var prevSession: Wg.Session? = null
+    private var prevLocalIndex: Int = 0
+
     /** Ответы на наши инициации (тип 2/3): один читатель — сюда, ожидающий — оттуда. */
     private val handshakeInbox = LinkedBlockingQueue<ByteArray>(16)
 
@@ -374,10 +385,17 @@ class DataPlane(
     private fun deliver(pkt: ByteArray) {
         val plain = synchronized(lock) {
             val s = session ?: return
-            val idx = localIndex
-            val opened = Wg.openTransport(pkt, idx, s) ?: return
-            session = opened.second
-            opened.first
+            val openedCur = Wg.openTransport(pkt, localIndex, s)
+            if (openedCur != null) {
+                session = openedCur.second
+                openedCur.first
+            } else {
+                // В первые ~100–250 мс после rekey сервер ещё досылает пакеты предыдущей сессии.
+                val ps = prevSession ?: return
+                val openedPrev = Wg.openTransport(pkt, prevLocalIndex, ps) ?: return
+                prevSession = openedPrev.second
+                openedPrev.first
+            }
         }
         if (plain.isEmpty()) return
         try {
@@ -521,6 +539,13 @@ class DataPlane(
 
     private fun install(s: Wg.Session, peer: Int, local: Int, initial: Boolean) {
         synchronized(lock) {
+            if (!initial && session != null) {
+                prevSession = session
+                prevLocalIndex = localIndex
+            } else {
+                prevSession = null
+                prevLocalIndex = 0
+            }
             session = s
             peerIndex = peer
             localIndex = local
@@ -737,10 +762,14 @@ class DataPlane(
                 continue
             }
             // Первый пакет после долгой тишины: сессия, скорее всего, уже выброшена сервером
-            // (REJECT_AFTER_TIME), и отправлять им бессмысленно. Пересогласовываем здесь, на
-            // отправителе: таймер в это время спит и радио не будит, а ожидание ответа (0,2–0,4 с)
-            // случается ровно тогда, когда пользователь и так ждёт загрузки.
-            if (sessionAgeMs() > settings.rekeyAfterMs) rekey()
+            // (REJECT_AFTER_TIME), а таймер в тишине спал. Пересогласовываем на месте.
+            // При активном трафике (idleMs < rekeyAfterMs) пересогласованием занимается отдельный
+            // поток timerLoop — отправитель не блокируется и пакеты продолжают идти без паузы.
+            val ageMs = sessionAgeMs()
+            val idleMs = if (lastUserTrafficAt == 0L) Long.MAX_VALUE else System.currentTimeMillis() - lastUserTrafficAt
+            if (ageMs > settings.rekeyAfterMs && (idleMs >= settings.rekeyAfterMs || ageMs >= 175_000L)) {
+                rekey()
+            }
             // Без копии: буфер tun переиспользуется, а длина передаётся отдельно. Раньше под
             // каждый пакет делался ByteArray(n) только ради того, чтобы «подрезать» буфер.
             val packet: ByteArray? = synchronized(lock) {

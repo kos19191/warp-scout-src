@@ -236,4 +236,51 @@ class NativeWintunTunnelManagerTest {
             manager.shutdown()
         }
     }
+
+    @Test
+    fun `Wg openTransport accepts out-of-order UDP packets via RFC 6479 window and rejects replays`() {
+        val sendKey = ByteArray(32) { (it * 7 + 1).toByte() }
+        val recvKey = ByteArray(32) { (it * 11 + 3).toByte() }
+        var sender = Wg.Session(receiveKey = recvKey, sendKey = sendKey)
+        var receiver = Wg.Session(receiveKey = sendKey, sendKey = recvKey)
+        val idx = 0x11223344
+
+        // Генерируем пакеты 0..5, доставляем в перемешанном порядке: 5, 2, 4, 0, 3, 1.
+        val packets = (0..5).map { i ->
+            val (pkt, next) = Wg.buildTransport(idx, sender, "msg-$i".toByteArray())
+            sender = next
+            i to pkt
+        }.toMap()
+
+        for (i in listOf(5, 2, 4, 0, 3, 1)) {
+            val opened = Wg.openTransport(packets.getValue(i), idx, receiver)
+            assertTrue(opened != null, "out-of-order packet $i must be accepted")
+            assertEquals("msg-$i", String(opened!!.first))
+            receiver = opened.second
+        }
+
+        // Любой повтор (и самого свежего, и старого) обязан отвергаться.
+        for (i in listOf(5, 2, 0)) {
+            assertEquals(null, Wg.openTransport(packets.getValue(i), idx, receiver), "duplicate $i must be rejected")
+        }
+
+        // Поддельный пакет с огромным счётчиком не должен сдвигать replay-окно.
+        val forged = Wg.buildTransport(idx, Wg.Session(recvKey, ByteArray(32) { 9 }, sendCounter = 50_000L), "bad".toByteArray()).first
+        assertEquals(null, Wg.openTransport(forged, idx, receiver))
+        val (pkt6, _) = Wg.buildTransport(idx, sender, "msg-6".toByteArray())
+        val opened6 = Wg.openTransport(pkt6, idx, receiver)
+        assertTrue(opened6 != null && String(opened6.first) == "msg-6", "forged packet must not shift replay window")
+
+        // Большой скачок через границу кольца (0 -> 5000): старые вне окна 2048 отвергаются, внутри окна принимаются.
+        val win = Wg.ReplayWindow()
+        win.mark(0L)
+        win.mark(5000L)
+        assertFalse(win.isAcceptable(2952L), "5000 - 2952 = 2048 -> outside window")
+        assertTrue(win.isAcceptable(2953L), "5000 - 2953 = 2047 -> inside window")
+        win.mark(2953L)
+        assertFalse(win.isAcceptable(2953L), "replayed 2953 must be rejected")
+        assertTrue(win.isAcceptable(4999L))
+        win.mark(4999L)
+        assertFalse(win.isAcceptable(4999L))
+    }
 }

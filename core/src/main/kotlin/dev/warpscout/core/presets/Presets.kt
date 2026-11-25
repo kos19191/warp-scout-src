@@ -53,6 +53,7 @@ object Presets {
         ResourceCheck("ChatGPT", "https://chatgpt.com/cdn-cgi/trace", 200..399),
         ResourceCheck("OpenAI API", "https://api.openai.com/v1/models", 200..499),
         ResourceCheck("Telegram web", "https://web.telegram.org/a/", 200..399),
+        ResourceCheck("Telegram DC2", "https://venus.web.telegram.org/apiw1", 200..499),
         ResourceCheck("Discord", "https://discord.com/api/guilds", 200..499),
         ResourceCheck("WhatsApp web", "https://web.whatsapp.com/", 200..399),
         ResourceCheck("X", "https://x.com/", 200..399),

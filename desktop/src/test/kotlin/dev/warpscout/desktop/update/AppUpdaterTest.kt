@@ -121,4 +121,36 @@ class AppUpdaterTest {
         val sums = AppUpdater.parseSha256Sums("$digest  WarpScout-1.10.25-windows-x64.msi\n")
         assertEquals(digest, sums["WarpScout-1.10.25-windows-x64.msi"])
     }
+
+    @Test
+    fun `picks newest asset when rolling release contains multiple versions`() {
+        val json = """
+            [
+              {
+                "tag_name": "desktop-windows-preview",
+                "name": "WarpScout Desktop 1.10.27 (Windows)",
+                "prerelease": true,
+                "draft": false,
+                "published_at": "2026-11-25T16:00:00Z",
+                "html_url": "https://github.com/kos19191/warp-scout-src/releases/tag/desktop-windows-preview",
+                "assets": [
+                  {
+                    "name": "WarpScout-1.10.25-windows-x64.msi",
+                    "browser_download_url": "https://example.invalid/old.msi",
+                    "size": 100,
+                    "updated_at": "2026-11-25T12:00:00Z"
+                  },
+                  {
+                    "name": "WarpScout-1.10.27-windows-x64.msi",
+                    "browser_download_url": "https://example.invalid/new.msi",
+                    "size": 200,
+                    "updated_at": "2026-11-25T16:00:00Z"
+                  }
+                ]
+              }
+            ]
+        """.trimIndent()
+        val parsed = AppUpdater.parseReleasesJson(json)
+        assertEquals("WarpScout-1.10.27-windows-x64.msi", parsed.single().msiAsset?.name)
+    }
 }
