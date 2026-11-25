@@ -91,8 +91,67 @@ fun HomeScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // --- 1. Предупреждение, если движок AmneziaWG не найден ---
-        if (!state.engine.available) {
+        // --- 1. Подсказка по правам администратора или внешнему движку ---
+        if (state.tunnel.needsElevation) {
+            WarpCard(
+                containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                borderColor = warp.accentOrange.copy(alpha = 0.55f)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(Icons.Rounded.AdminPanelSettings, contentDescription = null, tint = warp.accentOrange, modifier = Modifier.size(20.dp))
+                    Text(
+                        "Нужны права администратора",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Text(
+                    "Встроенный туннель создаёт виртуальный сетевой адаптер Wintun. Нажмите кнопку ниже — Windows запросит UAC, и туннель поднимется сам.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Button(
+                    onClick = { controller.relaunchAsAdministrator(autoConnect = true) },
+                    colors = ButtonDefaults.buttonColors(containerColor = warp.accentOrange, contentColor = Color.White),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                ) {
+                    Icon(Icons.Rounded.Shield, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Перезапустить от администратора и подключиться", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        } else if (state.settings.backendMode == dev.warpscout.desktop.storage.TunnelBackendMode.BUILTIN_WINTUN && !state.wintunReady) {
+            WarpCard(
+                containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
+                borderColor = warp.error.copy(alpha = 0.5f)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(Icons.Rounded.WarningAmber, contentDescription = null, tint = warp.error, modifier = Modifier.size(20.dp))
+                    Text(
+                        "Драйвер wintun.dll не найден",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Text(
+                    "В готовом релизе Windows драйвер уже вшит. При запуске из исходников положите официальный wintun.dll (amd64) в папку bin/ рядом с проектом или переключитесь на внешний движок в Настройках.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedButton(
+                    onClick = { controller.refreshEngineAndPrivileges() },
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text("Проверить снова", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        } else if (state.settings.backendMode == dev.warpscout.desktop.storage.TunnelBackendMode.EXTERNAL_AWG && !state.engine.available) {
             WarpCard(
                 containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f),
                 borderColor = warp.error.copy(alpha = 0.5f)
@@ -103,31 +162,33 @@ fun HomeScreen(
                 ) {
                     Icon(Icons.Rounded.WarningAmber, contentDescription = null, tint = warp.error, modifier = Modifier.size(20.dp))
                     Text(
-                        "AmneziaWG не найден на компьютере",
+                        "Внешний AmneziaWG не найден",
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.onErrorContainer,
                         fontWeight = FontWeight.SemiBold
                     )
                 }
                 Text(
-                    "Подбор точек работает уже сейчас, а для запуска системного туннеля установите бесплатный клиент AmneziaWG для Windows или укажите путь к amneziawg.exe в Настройках.",
+                    "Можно переключиться на встроенный туннель WarpScout (Wintun) — сторонние программы не понадобятся — или установить AmneziaWG.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton(
+                        onClick = {
+                            controller.updateSettings {
+                                it.copy(backendMode = dev.warpscout.desktop.storage.TunnelBackendMode.BUILTIN_WINTUN)
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text("Включить встроенный", style = MaterialTheme.typography.labelMedium)
+                    }
+                    OutlinedButton(
                         onClick = { DesktopPlatform.openUrl(EngineLocator.AMNEZIAWG_RELEASES_URL) },
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                     ) {
-                        Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Скачать AmneziaWG", style = MaterialTheme.typography.labelMedium)
-                    }
-                    OutlinedButton(
-                        onClick = { controller.refreshEngineAndPrivileges() },
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                    ) {
-                        Text("Проверить снова", style = MaterialTheme.typography.labelMedium)
+                        Text("Скачать AWG", style = MaterialTheme.typography.labelMedium)
                     }
                 }
             }
@@ -487,12 +548,12 @@ fun HomeScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "Движок: ${state.engine.kind.title}",
+                    state.backendTitle,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 TextButton(onClick = onNavigateToSettings, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
-                    Text("Настроить движок / импорт .conf", style = MaterialTheme.typography.labelSmall)
+                    Text("Настройки / импорт .conf", style = MaterialTheme.typography.labelSmall)
                 }
             }
         }

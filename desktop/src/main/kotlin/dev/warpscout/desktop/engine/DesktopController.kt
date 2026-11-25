@@ -34,10 +34,12 @@ import dev.warpscout.desktop.storage.DesktopPoolMode
 import dev.warpscout.desktop.storage.DesktopSettings
 import dev.warpscout.desktop.storage.DesktopStore
 import dev.warpscout.desktop.storage.ShortlistEntry
+import dev.warpscout.desktop.storage.TunnelBackendMode
 import dev.warpscout.desktop.tunnel.CommandRunner
 import dev.warpscout.desktop.tunnel.EngineInfo
 import dev.warpscout.desktop.tunnel.EngineKind
 import dev.warpscout.desktop.tunnel.EngineLocator
+import dev.warpscout.desktop.tunnel.NativeWintunTunnelManager
 import dev.warpscout.desktop.tunnel.ProcessCommandRunner
 import dev.warpscout.desktop.tunnel.SecondExitSpec
 import dev.warpscout.desktop.tunnel.SpeedTestResult
@@ -46,6 +48,7 @@ import dev.warpscout.desktop.tunnel.TunnelPhase
 import dev.warpscout.desktop.tunnel.TunnelSnapshot
 import dev.warpscout.desktop.tunnel.WindowsAutostart
 import dev.warpscout.desktop.tunnel.WindowsTunnelManager
+import dev.warpscout.desktop.tunnel.WintunLoader
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -67,6 +70,7 @@ data class LogEntry(
 data class DesktopUiState(
     val settings: DesktopSettings = DesktopSettings(),
     val tunnel: TunnelSnapshot = TunnelSnapshot(),
+    val wintunReady: Boolean = false,
     val engine: EngineInfo = EngineInfo(EngineKind.NONE, null, null, "Проверка…"),
     val isElevated: Boolean = false,
     val shortlist: List<ShortlistEntry> = emptyList(),
@@ -101,12 +105,24 @@ data class DesktopUiState(
 ) {
     val hasConfig: Boolean get() = !activeConfText.isNullOrBlank() || shortlist.isNotEmpty()
     val effectivePhase: TunnelPhase get() = if (scanning) TunnelPhase.SCANNING else tunnel.phase
+    val tunnelBackendReady: Boolean
+        get() = when (settings.backendMode) {
+            TunnelBackendMode.BUILTIN_WINTUN -> wintunReady
+            TunnelBackendMode.EXTERNAL_AWG -> engine.available
+        }
+    val backendTitle: String
+        get() = when (settings.backendMode) {
+            TunnelBackendMode.BUILTIN_WINTUN -> "Встроенный туннель (Wintun)"
+            TunnelBackendMode.EXTERNAL_AWG -> engine.kind.title
+        }
 }
 
 class DesktopController(
     val store: DesktopStore,
     private val runner: CommandRunner = ProcessCommandRunner(),
-    private val onTrayNotify: (title: String, message: String) -> Unit = { _, _ -> }
+    private val autoConnectRequested: Boolean = false,
+    private val onTrayNotify: (title: String, message: String) -> Unit = { _, _ -> },
+    private val onRelaunchElevated: (extraArgs: List<String>) -> Boolean = { false }
 ) {
     private val _state = MutableStateFlow(DesktopUiState())
     val state: StateFlow<DesktopUiState> = _state.asStateFlow()
@@ -126,15 +142,39 @@ class DesktopController(
 
     val listStore = FileListStore(store.paths.listsDir)
 
-    val tunnelManager = WindowsTunnelManager(
+    /** Встроенный туннель (по умолчанию): ядро :core (DataPlane + ExitRouter) поверх wintun.dll. */
+    val nativeTunnel = NativeWintunTunnelManager(
+        nativeDir = store.paths.nativeDir,
+        runner = runner,
+        onState = { snap ->
+            if (_state.value.settings.backendMode == TunnelBackendMode.BUILTIN_WINTUN) {
+                _state.update { it.copy(tunnel = snap) }
+            }
+        },
+        onLog = { msg -> appendLog(msg) }
+    )
+
+    /** Опциональный внешний движок AmneziaWG (если пользователь выбрал его в Настройках). */
+    val externalAwgTunnel = WindowsTunnelManager(
         tunnelsDir = store.paths.tunnelsDir,
         runner = runner,
         onState = { snap ->
-            _state.update { it.copy(tunnel = snap) }
+            if (_state.value.settings.backendMode == TunnelBackendMode.EXTERNAL_AWG) {
+                _state.update { it.copy(tunnel = snap) }
+            }
         },
         onLog = { msg -> appendLog(msg) },
         autoElevateUac = { _state.value.settings.autoElevateUac }
     )
+
+    private val isBuiltinMode: Boolean
+        get() = _state.value.settings.backendMode == TunnelBackendMode.BUILTIN_WINTUN
+
+    private val currentTunnelUp: Boolean
+        get() = if (isBuiltinMode) nativeTunnel.snapshot.isUp else externalAwgTunnel.snapshot.isUp
+
+    private val currentActiveEndpoint: String
+        get() = if (isBuiltinMode) nativeTunnel.snapshot.activeEndpoint else externalAwgTunnel.snapshot.activeEndpoint
 
     init {
         val loaded = store.loadSettings()
@@ -155,7 +195,10 @@ class DesktopController(
         refreshEngineAndPrivileges()
         rescheduleBackgroundTune(loaded)
 
-        if (loaded.autoConnectOnStart && activeConf != null) {
+        if (autoConnectRequested) {
+            appendLog("Запуск с автоподключением (--autoconnect)…")
+            if (activeConf != null) connectActive() else runScan(autoConnectAfter = true)
+        } else if (loaded.autoConnectOnStart && activeConf != null) {
             appendLog("Автоподключение при запуске включено — поднимаю туннель…")
             connectActive()
         }
@@ -163,15 +206,33 @@ class DesktopController(
 
     fun refreshEngineAndPrivileges() {
         auxWorker.execute {
-            val customPath = _state.value.settings.customEnginePath
-            val engine = EngineLocator.locate(customPath = customPath, runner = runner)
+            val s = _state.value.settings
+            val wintunOk = WintunLoader.isAvailable(store.paths.nativeDir)
+            val engine = EngineLocator.locate(customPath = s.customEnginePath, runner = runner)
             val elevated = runCatching { runner.isElevated() }.getOrDefault(false)
-            _state.update { it.copy(engine = engine, isElevated = elevated) }
+            _state.update { it.copy(wintunReady = wintunOk, engine = engine, isElevated = elevated) }
+
+            val modeInfo = when (s.backendMode) {
+                TunnelBackendMode.BUILTIN_WINTUN ->
+                    if (wintunOk) "Встроенный туннель WarpScout (Wintun готов)"
+                    else "Встроенный туннель (wintun.dll не найден в bin/)"
+                TunnelBackendMode.EXTERNAL_AWG ->
+                    if (engine.available) "Внешний движок: ${engine.kind.title} (${engine.sourceLabel})"
+                    else "Внешний движок AmneziaWG не найден"
+            }
             appendLog(
-                if (engine.available) "Движок: ${engine.kind.title} (${engine.sourceLabel})${if (elevated) " · права админа" else ""}"
-                else "Движок AmneziaWG не найден — установите AmneziaWG или укажите путь в Настройках",
-                if (engine.available) LogLevel.OK else LogLevel.WARN
+                "$modeInfo${if (elevated) " · права администратора" else ""}",
+                if ((s.backendMode == TunnelBackendMode.BUILTIN_WINTUN && wintunOk) || engine.available) LogLevel.OK else LogLevel.WARN
             )
+        }
+    }
+
+    /** Перезапускает WarpScout с правами администратора (UAC) и сразу подключается. */
+    fun relaunchAsAdministrator(autoConnect: Boolean = true) {
+        val args = if (autoConnect) listOf("--autoconnect") else emptyList()
+        val ok = onRelaunchElevated(args)
+        if (!ok) {
+            showBanner("Запрос прав администратора отменён или недоступен. Запустите WarpScout.exe правой кнопкой → «От имени администратора».", isError = true)
         }
     }
 
@@ -189,9 +250,16 @@ class DesktopController(
         store.saveSettings(next)
         _state.update { it.copy(settings = next) }
 
-        if (prev.customEnginePath != next.customEnginePath) {
+        if (prev.backendMode != next.backendMode) {
+            worker.execute {
+                if (nativeTunnel.snapshot.isUp) nativeTunnel.disconnect("Смена движка туннеля")
+                if (externalAwgTunnel.snapshot.isUp) externalAwgTunnel.disconnect("Смена движка туннеля")
+            }
+            refreshEngineAndPrivileges()
+        } else if (prev.customEnginePath != next.customEnginePath) {
             refreshEngineAndPrivileges()
         }
+
         if (prev.autostartWindows != next.autostartWindows) {
             auxWorker.execute {
                 val res = WindowsAutostart.setEnabled(next.autostartWindows, runner)
@@ -217,8 +285,12 @@ class DesktopController(
                 cancelScan()
             }
             s.tunnel.isBusy -> {
-                tunnelManager.requestCancel()
-                worker.execute { tunnelManager.disconnect("Подключение отменено") }
+                nativeTunnel.requestCancel()
+                externalAwgTunnel.requestCancel()
+                worker.execute {
+                    if (isBuiltinMode) nativeTunnel.disconnect("Подключение отменено")
+                    else externalAwgTunnel.disconnect("Подключение отменено")
+                }
             }
             s.tunnel.isUp -> {
                 disconnect()
@@ -254,27 +326,45 @@ class DesktopController(
 
         val secondExit = buildSecondExitSpec(s.settings)
         worker.execute {
-            val engine = resolveFreshEngine()
-            val ok = tunnelManager.connect(engine, appliedPrimary, fallbacks, secondExit)
-            if (ok) {
-                store.saveActiveConfigText(WgConf.render(appliedPrimary))
-                _state.update { it.copy(activeConfText = WgConf.render(appliedPrimary)) }
-                onTrayNotify("WarpScout подключён", "Точка: ${tunnelManager.snapshot.activeEndpoint}")
+            if (s.settings.backendMode == TunnelBackendMode.BUILTIN_WINTUN) {
+                val elevated = runCatching { runner.isElevated() }.getOrDefault(false)
+                _state.update { it.copy(isElevated = elevated) }
+                if (!elevated && s.settings.autoElevateUac && WindowsAutostart.isWindows()) {
+                    appendLog("Запрашиваю права администратора (UAC) для запуска встроенного туннеля…")
+                    if (onRelaunchElevated(listOf("--autoconnect"))) {
+                        return@execute
+                    }
+                }
+                val ok = nativeTunnel.connect(appliedPrimary, fallbacks, secondExit)
+                if (ok) {
+                    store.saveActiveConfigText(WgConf.render(appliedPrimary))
+                    _state.update { it.copy(activeConfText = WgConf.render(appliedPrimary)) }
+                    onTrayNotify("WarpScout подключён", "Точка: ${nativeTunnel.snapshot.activeEndpoint}")
+                }
+            } else {
+                val engine = resolveFreshEngine()
+                val ok = externalAwgTunnel.connect(engine, appliedPrimary, fallbacks, secondExit)
+                if (ok) {
+                    store.saveActiveConfigText(WgConf.render(appliedPrimary))
+                    _state.update { it.copy(activeConfText = WgConf.render(appliedPrimary)) }
+                    onTrayNotify("WarpScout подключён", "Точка: ${externalAwgTunnel.snapshot.activeEndpoint}")
+                }
             }
         }
     }
 
     fun disconnect() {
         worker.execute {
-            tunnelManager.disconnect("Туннель выключен пользователем")
+            if (isBuiltinMode) nativeTunnel.disconnect("Туннель выключен пользователем")
+            else externalAwgTunnel.disconnect("Туннель выключен пользователем")
         }
     }
 
     fun switchToNextEndpoint() {
         worker.execute {
-            val ok = tunnelManager.switchToNextEndpoint()
+            val ok = if (isBuiltinMode) nativeTunnel.switchToNextEndpoint() else externalAwgTunnel.switchToNextEndpoint()
             if (ok) {
-                onTrayNotify("WarpScout", "Сменил точку на ${tunnelManager.snapshot.activeEndpoint}")
+                onTrayNotify("WarpScout", "Сменил точку на $currentActiveEndpoint")
             } else {
                 showBanner("Не удалось сменить точку — попробуйте запустить подбор", isError = true)
             }
@@ -326,11 +416,12 @@ class DesktopController(
 
         worker.execute {
             val startedMs = System.currentTimeMillis()
-            val wasUp = tunnelManager.snapshot.isUp
+            val wasUp = currentTunnelUp
             try {
                 if (wasUp && !silentBackground) {
                     appendLog("Приостанавливаю текущий туннель на время чистого сканирования…")
-                    tunnelManager.disconnect("Приостановлен на время подбора")
+                    if (isBuiltinMode) nativeTunnel.disconnect("Приостановлен на время подбора")
+                    else externalAwgTunnel.disconnect("Приостановлен на время подбора")
                 }
 
                 val settings = _state.value.settings
@@ -338,9 +429,12 @@ class DesktopController(
                 val spec = buildTuningSpec(settings)
                 val keySource = KeySource(store = AccountStore.file(store.paths.accountCacheFile.absolutePath))
 
-                // Проверяем изнутри туннеля, если включено и движок найден (и не фоновый режим при поднятом туннеле).
-                val verifier = if (settings.verifyThroughTunnel && engine.available && (!wasUp || !silentBackground)) {
-                    tunnelManager.createVerifier(engine)
+                // Проверяем топ-3 изнутри туннеля (встроенного Wintun или внешнего AmneziaWG).
+                val verifier = if (settings.verifyThroughTunnel && (!wasUp || !silentBackground)) {
+                    when (settings.backendMode) {
+                        TunnelBackendMode.BUILTIN_WINTUN -> nativeTunnel.createVerifier()
+                        TunnelBackendMode.EXTERNAL_AWG -> if (engine.available) externalAwgTunnel.createVerifier(engine) else null
+                    }
                 } else null
 
                 val tuner = AutoTuner(
@@ -442,11 +536,7 @@ class DesktopController(
 
                 val shouldConnect = autoConnectAfter || (wasUp && !silentBackground) || (silentBackground && settings.autoApplyScheduled)
                 if (shouldConnect && bestConfText != null) {
-                    val primary = applyCurrentNetworkSettings(result.best!!, _state.value.settings)
-                    val fallbacks = newShortlist.drop(1)
-                        .mapNotNull { WgConf.toWarpConfig("Shortlist", it.confText) }
-                        .map { applyCurrentNetworkSettings(it, _state.value.settings) }
-                    tunnelManager.connect(engine, primary, fallbacks, buildSecondExitSpec(_state.value.settings))
+                    connectActive()
                 }
             } catch (e: Exception) {
                 appendLog("Ошибка подбора: ${e.javaClass.simpleName}: ${e.message}", LogLevel.ERROR)
@@ -465,7 +555,7 @@ class DesktopController(
                 appendLog("Проверяю доступность сайтов и DNS…")
                 val checks = buildList {
                     addAll(Presets.RESOURCE_CHECKS)
-                    if (tunnelManager.snapshot.isUp) addAll(Presets.TUNNEL_ONLY_CHECKS)
+                    if (currentTunnelUp) addAll(Presets.TUNNEL_ONLY_CHECKS)
                 }
                 val prober = ResourceProber(HttpClient(timeoutMs = 7000))
                 val results = prober.checkAll(checks)
@@ -618,7 +708,7 @@ class DesktopController(
 
     /** Применяет изменённые настройки маршрутов/сети и переподключает туннель, если он был поднят. */
     fun applySettingsAndReconnect() {
-        if (tunnelManager.snapshot.isUp) {
+        if (currentTunnelUp) {
             appendLog("Настройки изменены — переподключаю туннель…")
             showBanner("Настройки сохранены — переподключаю туннель")
             connectActive()
@@ -700,10 +790,14 @@ class DesktopController(
     fun shutdown(disconnectTunnel: Boolean = _state.value.settings.disconnectOnExit) {
         scheduledTune?.cancel(false)
         scanCancel.set(true)
-        if (disconnectTunnel && tunnelManager.snapshot.isUp) {
-            tunnelManager.disconnect("Туннель остановлен при закрытии приложения")
+        if (nativeTunnel.snapshot.isUp) {
+            nativeTunnel.disconnect("Туннель остановлен при закрытии приложения")
         }
-        tunnelManager.shutdown()
+        if (disconnectTunnel && externalAwgTunnel.snapshot.isUp) {
+            externalAwgTunnel.disconnect("Туннель остановлен при закрытии приложения")
+        }
+        nativeTunnel.shutdown()
+        externalAwgTunnel.shutdown()
         scheduler.shutdownNow()
         worker.shutdownNow()
         auxWorker.shutdownNow()
@@ -712,9 +806,10 @@ class DesktopController(
     // ---------------------------------------------------------------- helpers
 
     private fun resolveFreshEngine(): EngineInfo {
+        val wintunOk = WintunLoader.isAvailable(store.paths.nativeDir)
         val engine = EngineLocator.locate(_state.value.settings.customEnginePath, runner = runner)
         val elevated = runCatching { runner.isElevated() }.getOrDefault(false)
-        _state.update { it.copy(engine = engine, isElevated = elevated) }
+        _state.update { it.copy(wintunReady = wintunOk, engine = engine, isElevated = elevated) }
         return engine
     }
 

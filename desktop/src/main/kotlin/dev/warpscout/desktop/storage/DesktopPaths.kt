@@ -12,6 +12,7 @@ import java.io.File
 class DesktopPaths(val root: File) {
 
     val tunnelsDir: File get() = File(root, "tunnels")
+    val nativeDir: File get() = File(root, "native")
     val listsDir: File get() = File(root, "lists")
     val reportsDir: File get() = File(root, "reports")
     val backupsDir: File get() = File(root, "backups")
@@ -25,7 +26,7 @@ class DesktopPaths(val root: File) {
     val lockFile: File get() = File(root, "instance.lock")
 
     fun ensureDirs() {
-        listOf(root, tunnelsDir, listsDir, reportsDir, backupsDir, logsDir).forEach { it.mkdirs() }
+        listOf(root, tunnelsDir, nativeDir, listsDir, reportsDir, backupsDir, logsDir).forEach { it.mkdirs() }
     }
 
     companion object {

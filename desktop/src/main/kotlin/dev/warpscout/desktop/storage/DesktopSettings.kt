@@ -9,6 +9,17 @@ enum class ThemeMode(val title: String) {
     SYSTEM("Системная")
 }
 
+enum class TunnelBackendMode(val title: String, val subtitle: String) {
+    BUILTIN_WINTUN(
+        "Встроенный туннель WarpScout (Wintun)",
+        "Собственный WireGuard/AmneziaWG туннель из ядра :core — сторонние программы не нужны"
+    ),
+    EXTERNAL_AWG(
+        "Внешний движок AmneziaWG",
+        "Использовать установленный на ПК amneziawg.exe как системную службу"
+    )
+}
+
 enum class DesktopPoolMode(val title: String) {
     DEFAULT("Пул генератора"),
     MASQUE("Только MASQUE (443/8443)"),
@@ -42,7 +53,8 @@ data class DesktopSettings(
     val autoConnectOnStart: Boolean = false,
     val disconnectOnExit: Boolean = true,
 
-    // Движок AmneziaWG
+    // Движок туннеля (по умолчанию — встроенный Wintun + DataPlane из :core, без сторонних программ)
+    val backendMode: TunnelBackendMode = TunnelBackendMode.BUILTIN_WINTUN,
     val customEnginePath: String = "",
     val autoElevateUac: Boolean = true,
 

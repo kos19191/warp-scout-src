@@ -42,7 +42,20 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: "Самопроверка :core и тесты :desktop"
-        run: ./gradlew --no-daemon :cli:selftest :desktop:test
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon :cli:selftest :desktop:test --stacktrace 2>&1 | tee test.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            grep -E '^e: |FAILURE:|FAILED|AssertionFailedError|Exception:' test.log | head -n 30 | while IFS= read -r line; do
+              echo "::error title=desktop-test::${line:0:190}"
+            done
+            tail -n 25 test.log | while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error title=tail::${line:0:190}"
+            done
+            exit "$rc"
+          fi
 
   windows-package:
     name: "Windows: Portable ZIP + MSI установщик"
@@ -56,7 +69,37 @@ jobs:
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: "Сборка портативного приложения (WarpScout.exe + встроенный JRE)"
+      - name: "Загрузка и проверка официального драйвера Wintun 0.14.1 (amd64)"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $wintunZip = "$env:TEMP\wintun-0.14.1.zip"
+          $wintunDir = "$env:TEMP\wintun-extract"
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile $wintunZip
+          $zipHash = (Get-FileHash $wintunZip -Algorithm SHA256).Hash.ToLower()
+          Write-Host "wintun-0.14.1.zip SHA-256: $zipHash"
+          if ($zipHash -ne "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51") {
+            Write-Host "::error title=wintun::Неожиданный SHA-256 архива wintun-0.14.1.zip: $zipHash"
+            exit 1
+          }
+          Expand-Archive -Path $wintunZip -DestinationPath $wintunDir -Force
+          $dll = Join-Path $wintunDir "wintun\bin\amd64\wintun.dll"
+          if (-not (Test-Path $dll)) {
+            Write-Host "::error title=wintun::Не найден amd64/wintun.dll в архиве"
+            exit 1
+          }
+          $sig = Get-AuthenticodeSignature -FilePath $dll
+          Write-Host "Wintun Authenticode: Status=$($sig.Status) Subject=$($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne "Valid") {
+            Write-Host "::error title=wintun::Подпись wintun.dll невалидна: $($sig.Status)"
+            exit 1
+          }
+          $resDir = "desktop/src/main/resources/native/win32-x86-64"
+          New-Item -ItemType Directory -Force -Path $resDir | Out-Null
+          Copy-Item $dll (Join-Path $resDir "wintun.dll") -Force
+          Write-Host "Вшит подписанный wintun.dll → $resDir/wintun.dll"
+
+      - name: "Сборка портативного приложения (WarpScout.exe + встроенный JRE + Wintun)"
         shell: pwsh
         run: |
           ./gradlew --no-daemon :desktop:createDistributable --stacktrace 2>&1 | Tee-Object -FilePath build-dist.log
@@ -102,6 +145,9 @@ jobs:
           if (-not (Test-Path $appDir)) {
             throw "Не найден каталог сборки: $appDir"
           }
+          # Дублируем wintun.dll в bin/ рядом с WarpScout.exe (помимо встроенного ресурса в JAR)
+          New-Item -ItemType Directory -Force -Path "$appDir/bin" | Out-Null
+          Copy-Item "desktop/src/main/resources/native/win32-x86-64/wintun.dll" "$appDir/bin/wintun.dll" -Force
 
           $zipPath = "out-win/WarpScout-$version-windows-x64-portable.zip"
           Compress-Archive -Path "$appDir/*" -DestinationPath $zipPath -Force
@@ -153,14 +199,15 @@ jobs:
             echo "WarpScout Desktop $VERSION для Windows 10/11 (x64)."
             echo
             echo "Подбирает рабочую точку Cloudflare WARP и профиль шума AmneziaWG, поднимает"
-            echo "системный туннель одной кнопкой через движок AmneziaWG и живёт в системном трее."
+            echo "собственный системный туннель одной кнопкой (встроенное ядро :core + подписанный драйвер Wintun)"
+            echo "и живёт в системном трее. Сторонние VPN-клиенты устанавливать не нужно."
             echo
             echo "| Файл | Описание |"
             echo "|---|---|"
-            echo "| \`WarpScout-$VERSION-windows-x64.msi\` | Установщик Windows (ярлык в меню Пуск, встроенный JRE) |"
+            echo "| \`WarpScout-$VERSION-windows-x64.msi\` | Установщик Windows (ярлык в меню Пуск, встроенный JRE и Wintun) |"
             echo "| \`WarpScout-$VERSION-windows-x64-portable.zip\` | Портативная версия — распакуй и запусти \`WarpScout.exe\` |"
             echo
-            echo "**Что нужно:** Windows 10/11 (x64) и установленный клиент AmneziaWG (или \`amneziawg.exe\` + \`awg.exe\` в папке \`bin/\` рядом с приложением). Java устанавливать не нужно."
+            echo "**Что нужно:** только Windows 10/11 (x64). Java, AmneziaWG и сторонние драйверы устанавливать не нужно — всё уже внутри."
           } > notes.md
 
           if gh release view "$TAG" > /dev/null 2>&1; then

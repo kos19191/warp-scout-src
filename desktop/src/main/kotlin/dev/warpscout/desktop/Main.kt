@@ -34,6 +34,7 @@ import javax.imageio.ImageIO
  */
 fun main(args: Array<String>) {
     val startMinimized = args.any { it.equals("--minimized", ignoreCase = true) }
+    val autoConnect = args.any { it.equals("--autoconnect", ignoreCase = true) }
     val paths = DesktopPaths.resolveDefault()
     val singleInstance = SingleInstanceGuard(paths.lockFile)
 
@@ -45,9 +46,24 @@ fun main(args: Array<String>) {
 
     val store = DesktopStore(paths)
     var trayRef: DesktopTray? = null
-    val controller = DesktopController(
+    lateinit var controller: DesktopController
+    controller = DesktopController(
         store = store,
-        onTrayNotify = { title, message -> trayRef?.notify(title, message) }
+        autoConnectRequested = autoConnect,
+        onTrayNotify = { title, message -> trayRef?.notify(title, message) },
+        onRelaunchElevated = { extraArgs ->
+            singleInstance.release()
+            val launched = dev.warpscout.desktop.tunnel.WindowsAutostart.relaunchElevated(extraArgs)
+            if (launched) {
+                runCatching { trayRef?.remove() }
+                runCatching { controller.shutdown(disconnectTunnel = false) }
+                kotlin.system.exitProcess(0)
+            } else {
+                // Пользователь отменил UAC — возвращаем замок экземпляра обратно.
+                singleInstance.tryAcquire()
+                false
+            }
+        }
     )
 
     Runtime.getRuntime().addShutdownHook(Thread {

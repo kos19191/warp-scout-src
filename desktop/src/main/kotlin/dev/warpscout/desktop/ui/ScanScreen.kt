@@ -162,7 +162,7 @@ fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
                 }
                 Switch(
                     checked = s.verifyThroughTunnel,
-                    enabled = state.engine.available,
+                    enabled = state.tunnelBackendReady,
                     onCheckedChange = { v -> controller.updateSettings { it.copy(verifyThroughTunnel = v) } }
                 )
             }

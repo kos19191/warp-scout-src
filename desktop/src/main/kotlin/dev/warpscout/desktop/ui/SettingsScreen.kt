@@ -41,66 +41,101 @@ fun SettingsScreen(state: DesktopUiState, controller: DesktopController) {
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // --- 1. Движок AmneziaWG ---
+        // --- 1. Режим туннеля (встроенный Wintun по умолчанию / внешний AmneziaWG) ---
         WarpCard {
             SectionHeader(
-                title = "Движок туннеля (AmneziaWG)",
-                subtitle = "Поднимает виртуальный сетевой адаптер и применяет AWG-маскировку пакетов."
+                title = "Движок туннеля",
+                subtitle = "По умолчанию работает собственный туннель WarpScout (Wintun + ядро :core) — без сторонних программ."
             )
 
-            StatusPill(
-                text = if (state.engine.available)
-                    "${state.engine.kind.title} · ${state.engine.sourceLabel}"
-                else "Не найден — установите AmneziaWG",
-                dotColor = if (state.engine.available) warp.ok else warp.error
-            )
-
-            if (state.engine.tunnelExe != null) {
-                Text(
-                    state.engine.tunnelExe.absolutePath,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            dev.warpscout.desktop.storage.TunnelBackendMode.entries.forEach { mode ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = s.backendMode == mode,
+                        onClick = { controller.updateSettings { it.copy(backendMode = mode) } }
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(mode.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                        Text(mode.subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
             }
 
-            OutlinedTextField(
-                value = s.customEnginePath,
-                onValueChange = { v -> controller.updateSettings { it.copy(customEnginePath = v) } },
-                label = { Text("Путь к amneziawg.exe (пусто — автопоиск)") },
-                placeholder = { Text("C:\\Program Files\\AmneziaWG\\amneziawg.exe") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                textStyle = MaterialTheme.typography.bodySmall
-            )
-
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = {
-                        DesktopPlatform.chooseOpenFile("Выберите amneziawg.exe")?.let { file ->
-                            controller.updateSettings { it.copy(customEnginePath = file.absolutePath) }
-                        }
-                    },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Rounded.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("Указать файл", style = MaterialTheme.typography.labelMedium)
+            if (s.backendMode == dev.warpscout.desktop.storage.TunnelBackendMode.BUILTIN_WINTUN) {
+                StatusPill(
+                    text = if (state.wintunReady)
+                        "Встроенный wintun.dll готов${if (state.isElevated) " · права админа" else ""}"
+                    else "wintun.dll не найден (нужен в bin/ при запуске из исходников)",
+                    dotColor = if (state.wintunReady) warp.ok else warp.error
+                )
+                if (!state.isElevated) {
+                    OutlinedButton(
+                        onClick = { controller.relaunchAsAdministrator(autoConnect = false) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Rounded.AdminPanelSettings, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Перезапустить от имени администратора", style = MaterialTheme.typography.labelMedium)
+                    }
                 }
-                FilledTonalButton(
-                    onClick = { DesktopPlatform.openUrl(EngineLocator.AMNEZIAWG_RELEASES_URL) },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("Скачать AWG", style = MaterialTheme.typography.labelMedium)
+            } else {
+                StatusPill(
+                    text = if (state.engine.available)
+                        "${state.engine.kind.title} · ${state.engine.sourceLabel}"
+                    else "Не найден — установите AmneziaWG",
+                    dotColor = if (state.engine.available) warp.ok else warp.error
+                )
+
+                if (state.engine.tunnelExe != null) {
+                    Text(
+                        state.engine.tunnelExe.absolutePath,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                OutlinedTextField(
+                    value = s.customEnginePath,
+                    onValueChange = { v -> controller.updateSettings { it.copy(customEnginePath = v) } },
+                    label = { Text("Путь к amneziawg.exe (пусто — автопоиск)") },
+                    placeholder = { Text("C:\\Program Files\\AmneziaWG\\amneziawg.exe") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    textStyle = MaterialTheme.typography.bodySmall
+                )
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            DesktopPlatform.chooseOpenFile("Выберите amneziawg.exe")?.let { file ->
+                                controller.updateSettings { it.copy(customEnginePath = file.absolutePath) }
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Rounded.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("Указать файл", style = MaterialTheme.typography.labelMedium)
+                    }
+                    FilledTonalButton(
+                        onClick = { DesktopPlatform.openUrl(EngineLocator.AMNEZIAWG_RELEASES_URL) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("Скачать AWG", style = MaterialTheme.typography.labelMedium)
+                    }
                 }
             }
 
             SettingSwitchRow(
-                title = "Запрашивать UAC при запуске туннеля",
+                title = "Автоматически запрашивать UAC при подключении",
                 subtitle = if (state.isElevated) "Приложение уже запущено с правами администратора"
-                else "Если приложение запущено без прав админа — автоматически запросит UAC",
+                else "Если запущено без прав админа — предложит перезапуск с UAC и сразу подключится",
                 checked = s.autoElevateUac,
                 onCheckedChange = { v -> controller.updateSettings { it.copy(autoElevateUac = v) } }
             )

@@ -121,4 +121,25 @@ object WindowsAutostart {
         if (localExe.exists()) return localExe.absolutePath
         return cmd
     }
+
+    /**
+     * Перезапускает текущее приложение `WarpScout.exe` с запросом UAC (от имени администратора).
+     * Возвращает `true`, если запуск нового процесса запрошен успешно.
+     */
+    fun relaunchElevated(extraArgs: List<String> = listOf("--autoconnect")): Boolean {
+        if (!isWindows()) return false
+        val exe = resolveLaunchCommand() ?: return false
+        if (!exe.lowercase().endsWith(".exe")) return false
+        val escapedExe = exe.replace("'", "''")
+        val argListPs = if (extraArgs.isEmpty()) "@()" else {
+            extraArgs.joinToString(", ", "@(", ")") { a -> "'${a.replace("'", "''")}'" }
+        }
+        val script = "Start-Process -FilePath '$escapedExe' -ArgumentList $argListPs -Verb RunAs"
+        return runCatching {
+            val proc = ProcessBuilder(
+                "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script
+            ).start()
+            proc.waitFor(10, TimeUnit.SECONDS) && proc.exitValue() == 0
+        }.getOrDefault(false)
+    }
 }

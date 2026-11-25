@@ -50,6 +50,7 @@ data class TunnelSnapshot(
     val statusMessage: String = "Туннель выключен",
     val lastError: String? = null,
     val advice: String? = null,
+    val needsElevation: Boolean = false,
     val attemptIndex: Int = 0,
     val attemptTotal: Int = 0
 ) {
