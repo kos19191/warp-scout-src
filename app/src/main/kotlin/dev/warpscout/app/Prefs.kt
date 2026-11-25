@@ -212,6 +212,34 @@ class Prefs(private val context: Context) {
             pushToService()
         }
 
+    /**
+     * Ключ второго выхода, полученный кнопкой «Подключить второй выход (Proton)» (с 1.10.44-beta5):
+     * откуда он («account» — вход в аккаунт, «anonymous» — без аккаунта у Proton, «service» —
+     * сторонний сервис), для какого аккаунта, до какого числа (мс, 0 — срок неизвестен) и открытый
+     * ключ WireGuard — срок показываем, только пока в поле конфиг с этим же ключом. Пароль и токены
+     * Proton не храним вовсе.
+     */
+    var protonKeySource: String
+        get() = sp.getString("protonKeySource", "").orEmpty()
+        set(v) = sp.edit().putString("protonKeySource", v).apply()
+
+    var protonKeyAccount: String
+        get() = sp.getString("protonKeyAccount", "").orEmpty()
+        set(v) = sp.edit().putString("protonKeyAccount", v).apply()
+
+    var protonKeyExpires: Long
+        get() = sp.getLong("protonKeyExpires", 0L)
+        set(v) = sp.edit().putLong("protonKeyExpires", v).apply()
+
+    var protonKeyPublic: String
+        get() = sp.getString("protonKeyPublic", "").orEmpty()
+        set(v) = sp.edit().putString("protonKeyPublic", v).apply()
+
+    /** Версия приложения Proton, с которой API согласился в последний раз (см. ProtonApi.newerVersion). */
+    var protonAppVersion: String
+        get() = sp.getString("protonAppVersion", "").orEmpty()
+        set(v) = sp.edit().putString("protonAppVersion", v).apply()
+
     /** Период фонового подбора в часах: 0 — выключено. */
     var scheduleHours: Int
         get() = sp.getInt("scheduleHours", 6).coerceIn(0, 24)

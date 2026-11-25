@@ -104,6 +104,27 @@ object ProtonFree {
         return Server(name = "", country = "", city = "", ip = host, publicKey = key, port = port)
     }
 
+    /**
+     * Конфиг второго выхода из ключа, который приложение получило у Proton само (с 1.10.44-beta5):
+     * тот же вид, что у конфига из кабинета Proton, — адрес 10.2.0.2, DNS 10.2.0.1, [Peer] сервера.
+     * Дальше всё как со вставленным конфигом: Proton узнаётся, сервер подбирается сам. [note] —
+     * комментарий в первой строке (откуда ключ и до какого числа).
+     */
+    fun confFor(privateKey: String, server: Server, note: String = ""): String = buildString {
+        append("[Interface]\n")
+        val comment = note.replace('\r', ' ').replace('\n', ' ').trim()
+        if (comment.isNotEmpty()) append("# ").append(comment).append('\n')
+        append("PrivateKey = ").append(privateKey).append('\n')
+        append("Address = 10.2.0.2/32\n")
+        append("DNS = 10.2.0.1\n")
+        append('\n')
+        append("[Peer]\n")
+        if (server.name.isNotBlank()) append("# ").append(server.name.replace('\n', ' ')).append('\n')
+        append("PublicKey = ").append(server.publicKey).append('\n')
+        append("AllowedIPs = 0.0.0.0/0\n")
+        append("Endpoint = ").append(server.ip).append(':').append(server.port)
+    }
+
     /** Список gluetun → бесплатные серверы WireGuard с ключом и IPv4-адресом, без повторов. */
     fun parseGluetun(json: String): List<Server> {
         val root = parseJson(json) as? JsonVal.Obj ?: return emptyList()

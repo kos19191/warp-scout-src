@@ -1991,6 +1991,14 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             }
         }
         binding.btnSecondFile.setOnClickListener { openSecondConfPicker() }
+        // Ключ Proton кнопкой (с 1.10.44-beta5, пока в бете): вход в аккаунт, без аккаунта, сторонний сервис.
+        binding.btnProtonConnect.visibility = if (BuildConfig.BETA) View.VISIBLE else View.GONE
+        binding.btnProtonConnect.setOnClickListener {
+            runCatching { startProtonConnect() }.onFailure { t ->
+                TunnelDebug.error("второй выход: Proton кнопкой — " + SafeMode.describe(t))
+                banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+            }
+        }
         binding.btnSecondResolve.setOnClickListener {
             runCatching { refreshSecondNow() }.onFailure { t ->
                 secondBusy = false
@@ -2680,6 +2688,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         binding.textSecondProton.text = buildString {
             append(getString(R.string.second_proton_info, servers.size, counts, listAge))
             if (up && peer.isNotBlank()) append("\n").append(getString(R.string.second_proton_now, peer))
+            runCatching { protonKeyLine() }.getOrNull()?.let { append("\n").append(it) }
         }
     }
 
@@ -5349,6 +5358,77 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         TunnelDebug.stage("выход приложения: ${labelOfPackage(pkg)} — ${exitLabel(rule)}")
         updateAppsState()
         markSettingsDirty(getString(R.string.dirty_app_exits))
+    }
+
+    // ------------------------------------------------ Proton кнопкой (с 1.10.44-beta5)
+
+    /** «Подключить второй выход (Proton)»: ключ у Proton без сайта — см. ProtonConnect. */
+    private fun startProtonConnect() {
+        ProtonConnect(this, prefs) { result ->
+            runCatching { applyProtonResult(result) }.onFailure { t ->
+                TunnelDebug.error("второй выход: Proton кнопкой — " + SafeMode.describe(t))
+                banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+            }
+        }.start()
+    }
+
+    /**
+     * Ключ получен, сервер выбран: конфиг встаёт во второй выход (как выбранный файл), страна и сервер
+     * — в автопоиск (сервер — «работавшим последним», с него перебор и начнётся), свежий список
+     * серверов — в proton_free.txt. И сразу «Сохранить и применить»: человек нажал «Подключить» —
+     * ждать второй кнопки незачем.
+     */
+    private fun applyProtonResult(r: ProtonConnect.Result) {
+        if (isFinishing || isDestroyed) return
+        if (r.servers.isNotEmpty() && runCatching { SecondProton.save(this, r.servers) }.getOrDefault(false)) {
+            TunnelDebug.stage("Proton: список серверов обновлён — ${r.servers.size} от Proton")
+        }
+        prefs.protonKeySource = r.via.id
+        prefs.protonKeyAccount = r.account
+        prefs.protonKeyExpires = r.expiresAt
+        prefs.protonKeyPublic = r.wgPublic
+        prefs.secondProtonCountry = r.country
+        prefs.secondProtonLast = r.server.name
+        binding.editSecondConf.setText(r.conf)
+        if (!binding.switchSecondExit.isChecked) binding.switchSecondExit.isChecked = true
+        runCatching { setupSecondCountry() }
+        updateSecondState()
+        val name = r.server.name.ifBlank { r.server.ip }
+        val where = SecondProton.countryName(this, r.server.code)
+        TunnelDebug.stage("второй выход: Proton кнопкой (${r.via.id}) — $name, страна ${r.country.ifEmpty { "любая" }}")
+        applyWithRoutes(
+            getString(R.string.dirty_second_exit),
+            getString(R.string.proton_connect_applying, name, where),
+            getString(R.string.proton_connect_saved, name, where),
+        )
+    }
+
+    /**
+     * «Ключ: вход в аккаунт kos, до 25.11.2027» — пока во втором выходе конфиг с ключом, полученным
+     * кнопкой (сверяем открытый ключ). За две недели до срока — подсказка получить новый.
+     */
+    private fun protonKeyLine(): String? {
+        val pub = prefs.protonKeyPublic
+        if (pub.isBlank()) return null
+        val priv = prefs.secondConf.lineSequence()
+            .map { it.substringBefore('#').trim() }
+            .firstOrNull { it.substringBefore('=').trim().equals("PrivateKey", ignoreCase = true) }
+            ?.substringAfter('=')?.trim() ?: return null
+        val current = dev.warpscout.core.crypto.Crypto.base64(
+            dev.warpscout.core.crypto.Crypto.publicOf(dev.warpscout.core.crypto.Crypto.unBase64(priv))
+        )
+        if (current != pub) return null
+        val source = when (prefs.protonKeySource) {
+            ProtonConnect.Via.ACCOUNT.id -> getString(R.string.proton_key_account, prefs.protonKeyAccount)
+            ProtonConnect.Via.ANONYMOUS.id -> getString(R.string.proton_key_anonymous)
+            ProtonConnect.Via.SERVICE.id -> getString(R.string.proton_key_service)
+            else -> return null
+        }
+        val exp = prefs.protonKeyExpires
+        if (exp <= 0L) return getString(R.string.proton_key_line, source, getString(R.string.proton_until_unknown))
+        val until = java.text.SimpleDateFormat("dd.MM.yyyy", java.util.Locale.getDefault()).format(java.util.Date(exp))
+        val soon = exp - System.currentTimeMillis() < 14L * 86_400_000L
+        return getString(if (soon) R.string.proton_key_line_soon else R.string.proton_key_line, source, until)
     }
 
     // ------------------------------------------------ Proton: шаги и конфиг из файла (с 1.10.39)

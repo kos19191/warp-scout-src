@@ -802,6 +802,16 @@
                     android:text="@string/second_hint"
                     android:textAppearance="?attr/textAppearanceBodySmall" />
 
+                <!-- С 1.10.44-beta5: ключ Proton кнопкой, без сайта — вход в аккаунт, без аккаунта или
+                     сторонний сервис (ProtonConnect). Пока видна только в бете. -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnProtonConnect"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/btn_proton_connect"
+                    android:visibility="gone" />
+
                 <!-- С 1.10.39: шаги Proton внутри приложения и конфиг из скачанного файла — без
                      копирования текста. -->
                 <LinearLayout

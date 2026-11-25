@@ -215,6 +215,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("бета: TikTok, ChatGPT, Claude, Gemini, Grok — второй выход по умолчанию (1.10.44-beta4)") {
             secondDefaultsChecks()
         }
+        section("Proton кнопкой: вход в аккаунт, без аккаунта, сторонний сервис (1.10.44-beta5)") {
+            ProtonChecks { name, ok, detail -> check(name, ok, detail) }.run()
+        }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
                 liveNetwork()

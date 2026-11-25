@@ -43,6 +43,23 @@ object SecondProton {
             .getOrThrow()
         val list = ProtonFree.parseGluetun(text)
         if (list.size < 5) error("в списке серверов Proton нет бесплатных (${list.size})")
+        write(context, list)
+        return list.size
+    }
+
+    /**
+     * Список, который приложение получило у самого Proton (или у стороннего сервиса) вместе с ключом
+     * (с 1.10.44-beta5): он свежее списка gluetun — с ним и работает автопоиск. Меньше пяти серверов —
+     * оставляем прежний.
+     */
+    fun save(context: Context, servers: List<ProtonFree.Server>): Boolean {
+        val list = servers.filter { it.ip.isNotBlank() && it.publicKey.length == 44 }.distinctBy { it.ip + "|" + it.publicKey }
+        if (list.size < 5) return false
+        write(context, list)
+        return true
+    }
+
+    private fun write(context: Context, list: List<ProtonFree.Server>) {
         val target = file(context)
         val tmp = File(target.parentFile, "$FILE.tmp")
         tmp.writeText(ProtonFree.render(list))
@@ -50,7 +67,6 @@ object SecondProton {
             tmp.copyTo(target, overwrite = true)
             tmp.delete()
         }
-        return list.size
     }
 
     /**

@@ -100,6 +100,9 @@ jobs:
           # «Подключено» = данные ходят: мягкий порог подозрения и честный разбор ответа Cloudflare.
           need /tmp/selftest.log "подозрение: 8 пакетов и 15 с без ответа — пора проверить связь"
           need /tmp/selftest.log "trace: мимо WARP так и называется"
+          # Вход в Proton (1.10.44-beta5): SRP байт в байт как у Proton и подпись модуля их ключом.
+          need /tmp/selftest.log "Proton: доказательство клиента M1 как у python-proton-core"
+          need /tmp/selftest.log "Proton: подменённый текст модуля отвергнут"
 
           say "галочек в selftest: $(grep -c '✓' /tmp/selftest.log || true)"
           say "галочек в интеграции: $(grep -c '✓' /tmp/integration.log || true)"
