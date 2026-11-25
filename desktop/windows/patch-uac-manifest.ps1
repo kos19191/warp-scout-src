@@ -97,6 +97,13 @@ public static class PeManifestPatcher {
         $patched = Get-Content $fallback -Raw -Encoding UTF8
     }
 
+    # jpackage помечает WarpScout.exe атрибутом ReadOnly (из-за чего BeginUpdateResourceW падал с кодом 19 ERROR_WRITE_PROTECT).
+    $item = Get-Item $exe
+    if ($item.IsReadOnly) {
+        Write-Host "Clearing ReadOnly attribute on $exe"
+        $item.IsReadOnly = $false
+    }
+
     [PeManifestPatcher]::WriteManifest($exe, $patched)
 
     $verify = [PeManifestPatcher]::ReadManifest($exe)
