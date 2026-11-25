@@ -17,6 +17,16 @@ class HttpReply(val status: Int, val body: String)
  */
 fun interface ProtonHttp {
     fun send(method: String, url: String, headers: Map<String, String>, body: String?): HttpReply
+
+    /** Двоичный GET — для DNS-over-HTTPS обходного пути (см. [ProtonAlt]); null — ответа нет. */
+    fun getBytes(url: String, headers: Map<String, String>): ByteArray? = null
+
+    /**
+     * Запрос к посреднику Proton (обходной путь, см. [ProtonAlt]): сертификат сверяется по закреплённым
+     * ключам [pins], имя — нет. Не умеет — IOException.
+     */
+    fun sendPinned(method: String, url: String, headers: Map<String, String>, body: String?, pins: List<String>): HttpReply =
+        throw IOException("обходной путь Proton здесь не поддержан")
 }
 
 /** Что пошло не так — с причиной, по которой экран решает, что показать. */
@@ -89,7 +99,9 @@ data class ProtonDevice(
  * не храним.
  *
  * Из России адреса API Proton закрыты (TCP 443 не открывается) — запросы должны идти через туннель
- * WARP; это решает приложение (WarpScout сам всегда в туннеле).
+ * WARP; это решает приложение (WarpScout сам всегда в туннеле). Но с московской площадки WARP их режут
+ * и через туннель (25.11: «Unable to resolve host» при работающем туннеле) — тогда, как приложения
+ * Proton, идём обходным путём: посредники Proton по TXT-записи через DNS-over-HTTPS ([ProtonAlt], с 1.10.46).
  */
 class ProtonApi(
     private val http: ProtonHttp,
@@ -99,6 +111,8 @@ class ProtonApi(
     private val log: (String) -> Unit = {},
     /** Версия приложения Proton новее нашей, когда API отвечает «версия устарела» (5003): берём с GitHub. */
     private val newerVersion: (() -> String?)? = null,
+    /** Оба адреса API молчат — обходной путь Proton (посредники, см. [ProtonAlt]). */
+    private val altRouting: Boolean = true,
 ) {
     /** Версия приложения Proton, от имени которого говорим («5.21.57.0»). */
     var appVersion: String = appVersion
@@ -109,6 +123,14 @@ class ProtonApi(
 
     /** Хост, который ответил последним, — с него и начинаем. */
     private var preferred: String? = null
+
+    /** Посредник Proton (обходной путь), который ответил последним, — тогда начинаем с него. */
+    private var altPreferred: String? = null
+
+    /** Найденные посредники: DoH спрашиваем один раз на клиента (не нашли — спросим в следующий раз). */
+    private var altCache: List<String>? = null
+
+    private val altAnnounced = HashSet<String>()
 
     data class Session(
         val uid: String,
@@ -442,8 +464,18 @@ class ProtonApi(
     }
 
     private fun send(method: String, path: String, body: JsonVal.Obj?, session: Session?): HttpReply {
-        val order = hosts.sortedByDescending { it == preferred }
         val failures = ArrayList<String>()
+        // Посредник уже выручал — сразу к нему: прямые адреса в этой сети закрыты, и каждый заход на них —
+        // лишние секунды (а при «чёрной дыре» и 12 с ожидания соединения).
+        altPreferred?.let { alt ->
+            try {
+                return sendAlt(alt, method, path, body, session)
+            } catch (e: IOException) {
+                failures += "посредник " + alt.substringAfter("://") + ": " + (e.message ?: e.javaClass.simpleName)
+                altPreferred = null
+            }
+        }
+        val order = hosts.sortedByDescending { it == preferred }
         for (host in order) {
             try {
                 val reply = http.send(method, host + path, headers(session, body != null), body?.render())
@@ -453,10 +485,58 @@ class ProtonApi(
                 failures += host.substringAfter("://") + ": " + (e.message ?: e.javaClass.simpleName)
             }
         }
+        if (altRouting) {
+            for (alt in altHosts(failures)) {
+                try {
+                    val reply = sendAlt(alt, method, path, body, session)
+                    if (altAnnounced.add(alt)) {
+                        log("Proton: напрямую не отвечает — ответил посредник Proton ${alt.substringAfter("://")} (обходной путь)")
+                    }
+                    altPreferred = alt
+                    return reply
+                } catch (e: IOException) {
+                    failures += "посредник " + alt.substringAfter("://") + ": " + (e.message ?: e.javaClass.simpleName)
+                }
+            }
+        }
         throw ProtonException(
             "Proton не отвечает (${failures.joinToString("; ")})",
             reason = ProtonException.Reason.NETWORK,
         )
+    }
+
+    private fun sendAlt(alt: String, method: String, path: String, body: JsonVal.Obj?, session: Session?): HttpReply =
+        http.sendPinned(method, alt + path, headers(session, body != null), body?.render(), ProtonAlt.PINS)
+
+    /**
+     * Адреса посредников Proton по TXT-записи (см. [ProtonAlt]) через DNS-over-HTTPS — по очереди у
+     * [ProtonAlt.DOH]. Найденные запоминаем на всё время работы с этим клиентом.
+     */
+    private fun altHosts(failures: MutableList<String>): List<String> {
+        altCache?.let { return it }
+        val primary = hosts.firstOrNull()?.substringAfter("://")?.substringBefore('/') ?: return emptyList()
+        val query = ProtonAlt.base64Url(ProtonAlt.encodeQuery(ProtonAlt.queryName(primary)))
+        for (doh in ProtonAlt.DOH) {
+            val name = doh.substringAfter("://").substringBefore('/')
+            val bytes = try {
+                http.getBytes("$doh?dns=$query", mapOf("Accept" to "application/dns-message"))
+            } catch (e: IOException) {
+                failures += "DoH $name: " + (e.message ?: e.javaClass.simpleName)
+                continue
+            }
+            if (bytes == null) {
+                failures += "DoH $name: нет ответа"
+                continue
+            }
+            val found = ProtonAlt.txtRecords(bytes).mapNotNull { ProtonAlt.hostOf(it) }.distinct()
+            if (found.isEmpty()) {
+                failures += "DoH $name: посредников нет"
+                continue
+            }
+            log("Proton: обходной путь — посредники от $name: ${found.joinToString(", ")}")
+            return found.map { "https://$it" }.also { altCache = it }
+        }
+        return emptyList()
     }
 }
 

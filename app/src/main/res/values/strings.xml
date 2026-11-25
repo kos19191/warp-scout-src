@@ -763,7 +763,7 @@
     <string name="proton_way_anonymous_note">Как «без регистрации» в приложении Proton для Android: одна кнопка, без посредников. Proton может закрыть такой вход в любой день.</string>
     <string name="proton_way_service">Без аккаунта — сторонний сервис</string>
     <string name="proton_way_service_note">proton-generation (warp-api.cfd) — запасной путь. Сервис видит ваш адрес и может пропасть, а аккаунт Proton у него временный: удалят — ключ перестанет работать.</string>
-    <string name="proton_connect_tunnel_hint">Из России адреса Proton закрыты: включите туннель (весь трафик или «всё, кроме российских сетей») — WarpScout сам ходит через него.</string>
+    <string name="proton_connect_tunnel_hint">Из России адреса Proton закрыты: включите туннель (весь трафик или «всё, кроме российских сетей») — WarpScout сам ходит через него, а если Proton режут и там (выход WARP в Москве), идёт обходным путём Proton.</string>
     <string name="proton_login_title">Вход в Proton</string>
     <string name="proton_login_user">Логин или почта Proton</string>
     <string name="proton_login_password">Пароль</string>
@@ -798,7 +798,7 @@
     <string name="proton_note_service">WarpScout: Proton Free через сторонний сервис proton-generation, ключ до %1$s</string>
     <string name="proton_err_title">Не получилось</string>
     <string name="proton_err_password">Неверный логин или пароль.</string>
-    <string name="proton_err_network">Proton не отвечает. Из России его адреса закрыты — включите туннель (весь трафик или «всё, кроме российских сетей») и повторите.\n\n%1$s</string>
+    <string name="proton_err_network">Proton не отвечает — ни напрямую, ни через посредников Proton (обходной путь). Из России его адреса закрыты, а если выход WARP сейчас в Москве («Выход: RU» в настройках), их режут и через туннель. Что можно: подобрать точку с выходом за рубежом (туннель при этом включён) или выбрать «Другой способ» → сторонний сервис.\n\n%1$s</string>
     <string name="proton_err_service_network">Сторонний сервис не отвечает — возможно, он закрыт или недоступен из вашей сети. Попробуйте вход в аккаунт.\n\n%1$s</string>
     <string name="proton_err_version">Proton не принимает эту версию входа — обновите WarpScout.\n\n%1$s</string>
     <string name="proton_err_hv">Proton просит подтвердить, что вы не робот, но не прислал проверку. Попробуйте позже или другой способ.</string>
@@ -842,7 +842,7 @@
     <string name="foreign_vpn_banner">Подбор не запущен: работает другой VPN — выключи его и повтори</string>
     <!-- Proton кнопкой при выключенном туннеле (с 1.10.45) -->
     <string name="proton_need_tunnel_title">Сначала включи туннель</string>
-    <string name="proton_need_tunnel_msg">Proton из России закрыт, поэтому ключ WarpScout получает через свой туннель, а он сейчас выключен: без него запрос не дойдёт (так выглядит ошибка «Unable to resolve host vpn-api.proton.me»).\n\n«Включить туннель» — включу его и сам открою выбор способа, как только туннель заработает. Нужен режим «весь трафик» или «всё, кроме российских сетей».</string>
+    <string name="proton_need_tunnel_msg">Proton из России закрыт, поэтому ключ WarpScout получает через свой туннель, а он сейчас выключен: без него запрос, скорее всего, не дойдёт (так выглядит ошибка «Unable to resolve host vpn-api.proton.me»).\n\n«Включить туннель» — включу его и сам открою выбор способа, как только туннель заработает. Нужен режим «весь трафик» или «всё, кроме российских сетей».</string>
     <string name="proton_need_tunnel_wait">Туннель ещё подключается. Proton из России закрыт, и ключ WarpScout получает только через работающий туннель — открою выбор способа, как только он заработает.</string>
     <string name="proton_need_tunnel_foreign">Сейчас работает VPN другого приложения (интерфейс %1$s). Когда включится туннель WarpScout, Android его отключит: два VPN сразу не работают. Если у того приложения включена «Постоянная VPN», сначала сними её в настройках VPN.</string>
     <string name="proton_need_tunnel_on">Включить туннель</string>

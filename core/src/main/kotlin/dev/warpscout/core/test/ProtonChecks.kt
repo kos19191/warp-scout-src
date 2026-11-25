@@ -6,6 +6,7 @@ import dev.warpscout.core.json.JsonVal
 import dev.warpscout.core.json.parseJson
 import dev.warpscout.core.lists.ProtonFree
 import dev.warpscout.core.proton.HttpReply
+import dev.warpscout.core.proton.ProtonAlt
 import dev.warpscout.core.proton.ProtonApi
 import dev.warpscout.core.proton.ProtonChoice
 import dev.warpscout.core.proton.ProtonDevice
@@ -50,6 +51,7 @@ internal class ProtonChecks(private val report: (String, Boolean, String) -> Uni
         part("Proton: без аккаунта и ключ") { anonymousAndKey() }
         part("Proton: сторонний сервис") { serviceFlows() }
         part("Proton: мелочи") { helpers() }
+        part("Proton: обходной путь") { altRouting() }
     }
 
     // ------------------------------------------------------------------ эталоны
@@ -264,6 +266,82 @@ internal class ProtonChecks(private val report: (String, Boolean, String) -> Uni
             device.frame().fields.keys.joinToString(","), "v,appLang,timezone,deviceName,regionCode,timezoneOffset,isJailbreak,preferredContentSize,storageCapacity,isDarkmodeOn,keyboards")
     }
 
+    // ------------------------------------------------------------------ обходной путь (1.10.46)
+
+    private fun altRouting() {
+        expect("Proton: обходной путь — имя записи как у Proton (base32 заглавными без «=»)",
+            ProtonAlt.queryName("vpn-api.proton.me"), "dOZYG4LLBOBUS44DSN52G63RONVSQ.protonpro.xyz")
+        expect("Proton: base32 — эталоны RFC 4648",
+            listOf("", "f", "fo", "foo", "foob", "fooba", "foobar").joinToString(",") { ProtonAlt.base32(it.toByteArray()) },
+            ",MY,MZXQ,MZXW6,MZXW6YQ,MZXW6YTB,MZXW6YTBOI")
+        expect("Proton: DNS-запрос — заголовок, метки, TXT класса IN",
+            ProtonAlt.encodeQuery("a.bc").joinToString(" ") { (it.toInt() and 0xFF).toString() },
+            "0 0 1 0 0 1 0 0 0 0 0 0 1 97 2 98 99 0 0 16 0 1")
+        val ips = listOf("3.76.252.252", "18.157.168.84")
+        val reply = dnsReply("dOZYG4LLBOBUS44DSN52G63RONVSQ.protonpro.xyz", "vpn.protonpro.xyz", ips)
+        expect("Proton: ответ DoH — TXT за CNAME, имена сжаты ссылками", ProtonAlt.txtRecords(reply), ips)
+        val nx = reply.copyOf().also { it[3] = (it[3].toInt() or 3).toByte() }
+        check("Proton: ответ DoH с ошибкой (NXDOMAIN) — посредников нет", ProtonAlt.txtRecords(nx).isEmpty())
+        check("Proton: обрезанный ответ DoH — пусто и без исключения", ProtonAlt.txtRecords(reply.copyOf(20)).isEmpty())
+        check("Proton: посредник — только адрес или имя хоста",
+            ProtonAlt.hostOf("3.76.252.252") == "3.76.252.252" && ProtonAlt.hostOf("vpn.protonpro.xyz.") == "vpn.protonpro.xyz" &&
+                ProtonAlt.hostOf("evil.example/x?y") == null && ProtonAlt.hostOf("") == null)
+
+        // Прямые адреса молчат (как 25.11 через московскую площадку WARP) — отвечает посредник.
+        val blocked = fake().apply {
+            failHosts = setOf("https://vpn-api.proton.me", "https://api.protonvpn.ch", "https://3.76.252.252")
+            altReply = reply
+        }
+        val logs = ArrayList<String>()
+        val viaAlt = ProtonApi(blocked, device, log = { logs += it })
+        val s = runCatching { viaAlt.withoutAccount() }.getOrNull()
+        check("Proton: прямые адреса молчат — сессия через посредника, с закреплёнными ключами",
+            s?.hasVpn == true && s.uid == "cl-uid" && blocked.pinned.lastOrNull() == "https://18.157.168.84" &&
+                blocked.pinnedWith == ProtonAlt.PINS)
+        check("Proton: DoH — сначала 1.1.1.1, запрос в формате RFC 8484",
+            blocked.dohUrls.firstOrNull()?.startsWith("https://1.1.1.1/dns-query?dns=") == true && blocked.dohAccept == "application/dns-message")
+        val before = blocked.hosts.size
+        val again = runCatching { viaAlt.anonymousSession() }.isSuccess
+        check("Proton: дальше — сразу к посреднику, без прямых адресов и без нового DoH",
+            again && blocked.hosts.drop(before).all { it == "https://18.157.168.84" } && blocked.dohUrls.size == 1)
+        check("Proton: в журнале — что выручил посредник", logs.any { it.contains("посредник Proton 18.157.168.84") })
+        val nothing = fake().apply { failHosts = setOf("https://vpn-api.proton.me", "https://api.protonvpn.ch") }
+        val err = runCatching { api(nothing).anonymousSession() }.exceptionOrNull() as? ProtonException
+        check("Proton: и посредников нет — причина «сеть», в тексте все три DoH",
+            err?.reason == ProtonException.Reason.NETWORK &&
+                ProtonAlt.DOH.all { d -> err.message?.contains("DoH " + d.substringAfter("://").substringBefore('/')) == true })
+    }
+
+    /** Ответ DNS: CNAME на [target] и TXT-записи [texts] у него; имена сжаты ссылками, как у настоящих серверов. */
+    private fun dnsReply(name: String, target: String, texts: List<String>): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        fun u16(v: Int) {
+            out.write(v shr 8)
+            out.write(v and 0xFF)
+        }
+        fun labels(n: String): ByteArray {
+            val b = java.io.ByteArrayOutputStream()
+            for (l in n.split('.')) {
+                b.write(l.length)
+                b.write(l.toByteArray())
+            }
+            b.write(0)
+            return b.toByteArray()
+        }
+        u16(0); u16(0x8180); u16(1); u16(1 + texts.size); u16(0); u16(0)
+        out.write(labels(name)); u16(ProtonAlt.TYPE_TXT); u16(1)
+        val cname = labels(target)
+        u16(0xC00C); u16(5); u16(1); u16(0); u16(120); u16(cname.size)
+        val targetAt = out.size()
+        out.write(cname)
+        for (t in texts) {
+            u16(0xC000 or targetAt); u16(ProtonAlt.TYPE_TXT); u16(1); u16(0); u16(120); u16(t.length + 1)
+            out.write(t.length)
+            out.write(t.toByteArray())
+        }
+        return out.toByteArray()
+    }
+
     // ------------------------------------------------------------------ подделки
 
     /** Сервер Proton на минималках: SRP по go-srp (server.go), сессии, второй фактор, «я не робот», ключи. */
@@ -280,6 +358,13 @@ internal class ProtonChecks(private val report: (String, Boolean, String) -> Uni
         var tiedOnce = false
         var requireVersion: String? = null
         var failHosts: Set<String> = emptySet()
+        /** Ответ DoH для обходного пути (null — DoH недоступен). */
+        var altReply: ByteArray? = null
+        val dohUrls = ArrayList<String>()
+        var dohAccept: String? = null
+        val pinned = ArrayList<String>()
+        var pinnedWith: List<String>? = null
+        private var pinnedCall = false
         val calls = ArrayList<String>()
         val hosts = ArrayList<String>()
         val bodies = LinkedHashMap<String, JsonVal.Obj>()
@@ -301,11 +386,32 @@ internal class ProtonChecks(private val report: (String, Boolean, String) -> Uni
         }
         private fun strs(vararg s: String) = JsonVal.arr(s.map { JsonVal.str(it) })
 
+        override fun getBytes(url: String, headers: Map<String, String>): ByteArray? {
+            dohUrls += url
+            dohAccept = headers["Accept"]
+            return altReply ?: throw IOException("DoH недоступен")
+        }
+
+        override fun sendPinned(method: String, url: String, headers: Map<String, String>, body: String?, pins: List<String>): HttpReply {
+            pinned += url.substring(0, url.indexOf('/', 8))
+            pinnedWith = pins
+            pinnedCall = true
+            try {
+                return send(method, url, headers, body)
+            } finally {
+                pinnedCall = false
+            }
+        }
+
         override fun send(method: String, url: String, headers: Map<String, String>, body: String?): HttpReply {
             val host = url.substring(0, url.indexOf('/', 8))
             val path = url.substring(host.length)
             hosts += host
             if (host in failHosts) throw IOException("connect timed out")
+            // Посредник (адрес вместо имени) — только с закреплёнными ключами, как у Proton.
+            if (Regex("https://\\d+\\.\\d+\\.\\d+\\.\\d+").matches(host) && !pinnedCall) {
+                throw IOException("посредник без закреплённых ключей")
+            }
             calls += "$method $path"
             lastHeaders = headers
             val obj = body?.let { parseJson(it) as JsonVal.Obj }

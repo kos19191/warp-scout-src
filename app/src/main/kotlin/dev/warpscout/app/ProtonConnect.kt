@@ -43,6 +43,15 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
+import java.security.cert.CertificateException
+import java.security.cert.X509Certificate
+import javax.net.ssl.HostnameVerifier
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -695,11 +704,56 @@ class ProtonConnect(
 
     /**
      * HTTP через обычный стек Android. WarpScout сам всегда в туннеле, поэтому при поднятом WARP
-     * запросы идут через него — из России адреса Proton иначе закрыты.
+     * запросы идут через него — из России адреса Proton иначе закрыты. С московской площадки WARP их режут
+     * и через туннель — тогда ProtonApi идёт обходным путём Proton (с 1.10.46): DoH ([getBytes]) и
+     * посредники с закреплёнными ключами ([sendPinned]), см. ProtonAlt.
      */
     private class AndroidHttp : ProtonHttp {
-        override fun send(method: String, url: String, headers: Map<String, String>, body: String?): HttpReply {
+        override fun send(method: String, url: String, headers: Map<String, String>, body: String?): HttpReply =
+            exchange(URL(url).openConnection() as HttpURLConnection, method, headers, body)
+
+        override fun sendPinned(method: String, url: String, headers: Map<String, String>, body: String?, pins: List<String>): HttpReply {
+            val conn = URL(url).openConnection() as? HttpsURLConnection ?: throw IOException("посредник Proton — только https")
+            conn.sslSocketFactory = pinnedFactory(pins)
+            // Сертификат посредника выписан не на его адрес: верим ключу сертификата (пины), а не имени — как Proton.
+            conn.hostnameVerifier = HostnameVerifier { _, _ -> true }
+            return exchange(conn, method, headers, body)
+        }
+
+        override fun getBytes(url: String, headers: Map<String, String>): ByteArray? {
             val conn = URL(url).openConnection() as HttpURLConnection
+            try {
+                conn.connectTimeout = 6_000
+                conn.readTimeout = 8_000
+                conn.instanceFollowRedirects = false
+                conn.useCaches = false
+                headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
+                if (conn.responseCode != 200) return null
+                return conn.inputStream.use { readBytes(it, 64 shl 10) }
+            } finally {
+                runCatching { conn.disconnect() }
+            }
+        }
+
+        /** Ключ сертификата посредника (SHA-256 SPKI, base64) — только из закреплённых; цепочку CA не смотрим. */
+        private fun pinnedFactory(pins: List<String>): SSLSocketFactory {
+            val trust = object : X509TrustManager {
+                override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
+                    val leaf = chain.firstOrNull() ?: throw CertificateException("посредник Proton: пустая цепочка сертификатов")
+                    val pin = java.util.Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-256").digest(leaf.publicKey.encoded))
+                    if (pin !in pins) throw CertificateException("посредник Proton: ключ сертификата $pin не из закреплённых")
+                }
+
+                override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
+                    throw CertificateException("клиентские сертификаты не нужны")
+                }
+
+                override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+            }
+            return SSLContext.getInstance("TLS").apply { init(null, arrayOf<TrustManager>(trust), null) }.socketFactory
+        }
+
+        private fun exchange(conn: HttpURLConnection, method: String, headers: Map<String, String>, body: String?): HttpReply {
             try {
                 conn.requestMethod = method
                 conn.connectTimeout = 12_000
@@ -715,23 +769,25 @@ class ProtonConnect(
                 }
                 val code = conn.responseCode
                 val stream = if (code >= 400) conn.errorStream else conn.inputStream
-                val text = stream?.use { readLimited(it, 16 shl 20) }.orEmpty()
+                val text = stream?.use { String(readBytes(it, 16 shl 20), Charsets.UTF_8) }.orEmpty()
                 return HttpReply(code, text)
             } finally {
                 runCatching { conn.disconnect() }
             }
         }
 
-        private fun readLimited(input: InputStream, limit: Int): String {
+        private fun readBytes(input: InputStream, limit: Int): ByteArray {
             val out = ByteArrayOutputStream()
             val buf = ByteArray(16 * 1024)
             while (true) {
                 val n = input.read(buf)
                 if (n < 0) break
                 out.write(buf, 0, n)
-                if (out.size() > limit) throw IOException("ответ больше ${limit shr 20} МБ")
+                if (out.size() > limit) {
+                    throw IOException(if (limit >= 1 shl 20) "ответ больше ${limit shr 20} МБ" else "ответ больше ${limit shr 10} КБ")
+                }
             }
-            return out.toString("UTF-8")
+            return out.toByteArray()
         }
     }
 
