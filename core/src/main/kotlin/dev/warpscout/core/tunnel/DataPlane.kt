@@ -720,7 +720,9 @@ class DataPlane(
 
     private fun tunToUdp() {
         val mtu = config.mtu.coerceIn(576, 1420)
-        val buf = ByteArray(mtu)
+        // Запас буфера сверх MTU нужен для Windows/Wintun, чтобы пакет > MTU никогда не обрезался
+        // пополам с битым IP-заголовком и неверной контрольной суммой.
+        val buf = ByteArray(maxOf(mtu, 2048))
         while (!stopped) {
             val n = try {
                 tunInput.read(buf)

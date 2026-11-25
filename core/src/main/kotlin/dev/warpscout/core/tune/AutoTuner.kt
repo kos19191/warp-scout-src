@@ -199,21 +199,48 @@ class AutoTuner(
     progress.log("Ключи: ${account.source}; кандидатов: ${endpoints.size}")
 
     // --- фаза 1: быстрый скан -------------------------------------------------------
-    val coarse = wgProber.scan(endpoints, account, peerPublic, junk = null) { d, t, _ ->
+    var coarse = wgProber.scan(endpoints, account, peerPublic, junk = null) { d, t, _ ->
         if (d % 25 == 0 || d == t) progress.progress(d, t, "первичный UDP-скан")
     }
     if (progress.isCancelled()) return finish(spec, started, notes, emptyList(), emptyList(), account, progress, endpoints.size)
 
+    val statComparator = compareBy<EndpointStats> { it.bestVerdict.rank }
+        .thenBy { it.minRtt ?: Double.MAX_VALUE }
+        .thenBy { it.lossPct }
+
+    // Если провайдер режет чистый WireGuard (junk=null) — повторяем быстрый скан с маскировкой
+    // (tls-fixed / sip-invite) по разнообразным подсетям, чтобы не остаться с 0 живых точек.
+    val initialAlive = coarse.count { it.bestVerdict in setOf(Verdict.HANDSHAKE_OK, Verdict.COOKIE_REPLY) }
+    if (endpoints.size > 1 && initialAlive < 3 && !progress.isCancelled()) {
+        val fallbackJunk = spec.junkProfiles.firstOrNull { it.name == "tls-fixed" }
+            ?: spec.junkProfiles.firstOrNull { it.name == "sip-invite" }
+            ?: spec.junkProfiles.firstOrNull { !it.isEmpty }
+        if (fallbackJunk != null) {
+            val subset = selectDiverseEndpoints(endpoints, maxCount = 48)
+            progress.log("Чистый WireGuard не ответил ($initialAlive/${endpoints.size}) — сканирую ${subset.size} точек с маскировкой ${fallbackJunk.name}…")
+            val obfScan = wgProber.scan(subset, account, peerPublic, junk = fallbackJunk) { d, t, _ ->
+                if (d % 16 == 0 || d == t) progress.progress(d, t, "скан с ${fallbackJunk.name}")
+            }
+            if (progress.isCancelled()) return finish(spec, started, notes, emptyList(), emptyList(), account, progress, endpoints.size)
+            val byEp = LinkedHashMap<Endpoint, EndpointStats>(coarse.size)
+            coarse.forEach { byEp[it.endpoint] = it }
+            for (s in obfScan) {
+                val prev = byEp[s.endpoint]
+                if (prev == null || statComparator.compare(s, prev) < 0) {
+                    byEp[s.endpoint] = s
+                }
+            }
+            coarse = byEp.values.toList()
+        }
+    }
+
     // rank у вердикта растёт по мере «ухудшения», поэтому лучший — с минимальным rank
-    val ranked = coarse.sortedWith(
-        compareBy<EndpointStats> { it.bestVerdict.rank }
-            .thenBy { it.minRtt ?: Double.MAX_VALUE }
-            .thenBy { it.lossPct }
-    )
+    val ranked = coarse.sortedWith(statComparator)
     val alive = ranked.filter { it.bestVerdict in setOf(Verdict.HANDSHAKE_OK, Verdict.COOKIE_REPLY) }
     notes += "Живых (подтверждённый handshake/cookie): ${alive.size} из ${ranked.size}"
 
-    val refineCandidates = (if (alive.size >= 2) alive else ranked).take(maxOf(3, spec.refineTop))
+    val refineSource = if (alive.size >= 2) alive else ranked
+    val refineCandidates = pickRefineCandidates(refineSource, maxOf(3, spec.refineTop))
 
     // --- фаза 2: подробно, по профилям шума ---------------------------------------
     val perProfile = LinkedHashMap<Endpoint, MutableMap<String, EndpointStats>>()
@@ -498,6 +525,51 @@ class AutoTuner(
             for (c in ordered) {
                 if (out.size >= maxCount) break
                 tryAdd(c, requireNewSubnet = false, requireNewEndpoint = false)
+            }
+            return out
+        }
+
+        /** Отбирает до [maxCount] точек, равномерно распределённых по `/24`-подсетям (round-robin). */
+        fun selectDiverseEndpoints(endpoints: List<Endpoint>, maxCount: Int): List<Endpoint> {
+            if (maxCount <= 0 || endpoints.isEmpty()) return emptyList()
+            if (endpoints.size <= maxCount) return endpoints
+            val bySubnet = LinkedHashMap<String, ArrayDeque<Endpoint>>()
+            for (ep in endpoints) {
+                bySubnet.getOrPut(subnet24Of(ep.host)) { ArrayDeque() }.addLast(ep)
+            }
+            val out = ArrayList<Endpoint>(maxCount)
+            while (out.size < maxCount) {
+                var addedAny = false
+                for (q in bySubnet.values) {
+                    val next = q.removeFirstOrNull() ?: continue
+                    out.add(next)
+                    addedAny = true
+                    if (out.size >= maxCount) break
+                }
+                if (!addedAny) break
+            }
+            return out
+        }
+
+        /** Отбирает кандидатов для фазы 2, охватывая разные `/24`-подсети, а затем добирая по рангу. */
+        fun pickRefineCandidates(ranked: List<EndpointStats>, limit: Int): List<EndpointStats> {
+            if (limit <= 0 || ranked.isEmpty()) return emptyList()
+            val out = ArrayList<EndpointStats>(minOf(limit, ranked.size))
+            val usedEndpoints = HashSet<String>()
+            val usedSubnets = HashSet<String>()
+            for (st in ranked) {
+                if (out.size >= limit) break
+                val sub = subnet24Of(st.endpoint.host)
+                if (sub !in usedSubnets && usedEndpoints.add(st.endpoint.render())) {
+                    usedSubnets.add(sub)
+                    out.add(st)
+                }
+            }
+            for (st in ranked) {
+                if (out.size >= limit) break
+                if (usedEndpoints.add(st.endpoint.render())) {
+                    out.add(st)
+                }
             }
             return out
         }

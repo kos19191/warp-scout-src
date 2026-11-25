@@ -99,7 +99,9 @@ class WindowsNetConfigurator(
         val dnsFiltered = dnsServers.map { it.trim() }.filter { it.isNotEmpty() }
 
         // Быстрый нативный путь (~120 мс вместо 5–6 с запуска PowerShell):
-        // IPv4/IPv6 через iphlpapi.dll CreateUnicastIpAddressEntry, MTU/метрика/DNS через netsh.exe.
+        // IPv4/IPv6 через CreateUnicastIpAddressEntry, MTU и метрика через SetIpInterfaceEntry
+        // (как в wireguard-windows — гарантированно сбивает дефолтный MTU 65535 до 1280),
+        // DNS через netsh по имени адаптера с откатом на Set-DnsClientServerAddress.
         if (adapterLuid != null && adapterLuid != 0L && WindowsAutostart.isWindows()) {
             val fastOk = runCatching {
                 val ipOk = WindowsIpHelper.addUnicastIpv4(adapterLuid, cleanV4, 32)
@@ -108,17 +110,25 @@ class WindowsNetConfigurator(
                     runCatching { WindowsIpHelper.addUnicastIpv6(adapterLuid, cleanV6, 128) }
                 }
                 val ifIndex = WindowsIpHelper.luidToIndex(adapterLuid) ?: return@runCatching null
-                val idxStr = ifIndex.toString()
 
-                runner.run(
-                    listOf("netsh.exe", "interface", "ipv4", "set", "subinterface", idxStr, "mtu=$mtu", "store=active"),
-                    timeoutMs = 4000L
-                )
-                runner.run(
-                    listOf("netsh.exe", "interface", "ipv4", "set", "interface", idxStr, "metric=5"),
-                    timeoutMs = 4000L
-                )
+                // 1. Жёстко ставим MTU и низкую метрику (metric=1) через нативный Win32 SetIpInterfaceEntry.
+                var v4If = WindowsIpHelper.setInterfaceMtuAndMetric(adapterLuid, mtu = mtu, metric = 1, isIpv6 = false)
+                if (!v4If.ok) {
+                    onLog("SetIpInterfaceEntry IPv4 не сработал (rc=${v4If.win32Error}, mtu=${v4If.mtu}) — применяю MTU через PowerShell…")
+                    val psMtu = runPs(
+                        "Set-NetIPInterface -InterfaceIndex $ifIndex -AddressFamily IPv4 -InterfaceMetric 1 -NlMtuBytes $mtu -ErrorAction Stop",
+                        timeoutMs = 8000L
+                    )
+                    if (!psMtu.ok) {
+                        onLog("Предупреждение: не удалось выставить MTU=$mtu на $adapterName: ${psMtu.combined.take(120)}")
+                    } else {
+                        v4If = WindowsIpHelper.getInterfaceConfig(adapterLuid, isIpv6 = false)
+                    }
+                }
+
+                // 2. Назначаем DNS на адаптер (с проверкой и откатом на Set-DnsClientServerAddress).
                 val dnsV4 = dnsFiltered.filter { ':' !in it }
+                var dnsMethod = "none"
                 if (dnsV4.isNotEmpty()) {
                     var dnsSetOk = false
                     for (attempt in 0 until 5) {
@@ -133,6 +143,7 @@ class WindowsNetConfigurator(
                         Thread.sleep(150)
                     }
                     if (dnsSetOk) {
+                        dnsMethod = "netsh"
                         dnsV4.drop(1).forEachIndexed { i, dns ->
                             runner.run(
                                 listOf("netsh.exe", "interface", "ipv4", "add", "dnsservers", "name=$adapterName", "address=$dns", "index=${i + 2}", "validate=no"),
@@ -140,47 +151,56 @@ class WindowsNetConfigurator(
                             )
                         }
                     } else {
-                        // Резервный способ, если netsh не принял имя интерфейса (например, локализация/задержка NDIS).
-                        val dnsArrPs = dnsFiltered.joinToString(", ") { "'${psEscape(it)}'" }
+                        val dnsArrPs = (if (cleanV6 != null) dnsFiltered else dnsV4).joinToString(", ") { "'${psEscape(it)}'" }
                         val psDns = runPs(
                             "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @($dnsArrPs) -ErrorAction Stop",
                             timeoutMs = 8000L
                         )
-                        if (!psDns.ok) {
+                        if (psDns.ok) {
+                            dnsMethod = "ps"
+                        } else {
+                            dnsMethod = "failed"
                             onLog("Предупреждение: не удалось назначить DNS на $adapterName: ${psDns.combined.take(120)}")
                         }
                     }
                 }
+
+                // 3. IPv6 MTU/метрика/DNS — только если IPv6 действительно включён на адаптере.
                 if (cleanV6 != null) {
-                    runner.run(
-                        listOf("netsh.exe", "interface", "ipv6", "set", "subinterface", idxStr, "mtu=$mtu", "store=active"),
-                        timeoutMs = 4000L
-                    )
-                    runner.run(
-                        listOf("netsh.exe", "interface", "ipv6", "set", "interface", idxStr, "metric=5"),
-                        timeoutMs = 4000L
-                    )
+                    val v6If = WindowsIpHelper.setInterfaceMtuAndMetric(adapterLuid, mtu = mtu, metric = 1, isIpv6 = true)
+                    if (!v6If.ok) {
+                        runPs(
+                            "Set-NetIPInterface -InterfaceIndex $ifIndex -AddressFamily IPv6 -InterfaceMetric 1 -NlMtuBytes $mtu -ErrorAction SilentlyContinue",
+                            timeoutMs = 6000L
+                        )
+                    }
                     val dnsV6 = dnsFiltered.filter { ':' in it }
                     if (dnsV6.isNotEmpty()) {
-                        runner.run(
+                        val v6DnsRes = runner.run(
                             listOf("netsh.exe", "interface", "ipv6", "set", "dnsservers", "name=$adapterName", "source=static", "address=${dnsV6[0]}", "register=none", "validate=no"),
                             timeoutMs = 4000L
                         )
-                        dnsV6.drop(1).forEachIndexed { i, dns ->
-                            runner.run(
-                                listOf("netsh.exe", "interface", "ipv6", "add", "dnsservers", "name=$adapterName", "address=$dns", "index=${i + 2}", "validate=no"),
-                                timeoutMs = 4000L
-                            )
+                        if (v6DnsRes.ok) {
+                            dnsV6.drop(1).forEachIndexed { i, dns ->
+                                runner.run(
+                                    listOf("netsh.exe", "interface", "ipv6", "add", "dnsservers", "name=$adapterName", "address=$dns", "index=${i + 2}", "validate=no"),
+                                    timeoutMs = 4000L
+                                )
+                            }
                         }
                     }
                 }
-                CommandResult(0, "ifIndex=$ifIndex (native)", "")
+
+                val summary = "ifIndex=$ifIndex, IP=$cleanV4, MTU=${v4If.mtu}, metric=${v4If.metric}, DNS=${dnsV4.joinToString(",")} ($dnsMethod)"
+                onLog("Адаптер $adapterName настроен: $summary")
+                CommandResult(0, summary, "")
             }.getOrNull()
             if (fastOk != null) return fastOk
         }
 
         val safeName = psEscape(adapterName)
-        val dnsArrayPs = dnsFiltered.joinToString(", ") { "'${psEscape(it)}'" }
+        val effectiveDnsForPs = if (cleanV6 != null) dnsFiltered else dnsFiltered.filter { ':' !in it }
+        val dnsArrayPs = effectiveDnsForPs.joinToString(", ") { "'${psEscape(it)}'" }
 
         val script = buildString {
             appendLine("\$ErrorActionPreference = 'Stop'")
@@ -194,17 +214,30 @@ class WindowsNetConfigurator(
             appendLine("\$idx = \$adapter.ifIndex")
             appendLine("Get-NetIPAddress -InterfaceIndex \$idx -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:\$false -ErrorAction SilentlyContinue")
             appendLine("New-NetIPAddress -InterfaceIndex \$idx -IPAddress '${psEscape(cleanV4)}' -PrefixLength 32 -AddressFamily IPv4 -ErrorAction Stop | Out-Null")
-            appendLine("Set-NetIPInterface -InterfaceIndex \$idx -AddressFamily IPv4 -InterfaceMetric 5 -NlMtuBytes $mtu -ErrorAction SilentlyContinue")
+            appendLine("Set-NetIPInterface -InterfaceIndex \$idx -AddressFamily IPv4 -InterfaceMetric 1 -NlMtuBytes $mtu -ErrorAction SilentlyContinue")
             if (cleanV6 != null) {
                 appendLine("New-NetIPAddress -InterfaceIndex \$idx -IPAddress '${psEscape(cleanV6)}' -PrefixLength 128 -AddressFamily IPv6 -ErrorAction SilentlyContinue | Out-Null")
-                appendLine("Set-NetIPInterface -InterfaceIndex \$idx -AddressFamily IPv6 -InterfaceMetric 5 -NlMtuBytes $mtu -ErrorAction SilentlyContinue")
+                appendLine("Set-NetIPInterface -InterfaceIndex \$idx -AddressFamily IPv6 -InterfaceMetric 1 -NlMtuBytes $mtu -ErrorAction SilentlyContinue")
             }
-            if (dnsFiltered.isNotEmpty()) {
+            if (effectiveDnsForPs.isNotEmpty()) {
                 appendLine("Set-DnsClientServerAddress -InterfaceIndex \$idx -ServerAddresses @($dnsArrayPs) -ErrorAction SilentlyContinue")
             }
             appendLine("Write-Output \"ifIndex=\$idx\"")
         }
         return runPs(script, timeoutMs = 15_000L)
+    }
+
+    /**
+     * Решает, нужно ли включать IPv6 на адаптере Wintun (адрес + DNS + маршруты).
+     * В split-режиме (пресет обхода РФ) на IPv4-only провайдере нельзя вешать глобальный IPv6-адрес
+     * без IPv6-маршрутов: Windows начнёт запрашивать AAAA и зависать на попытках IPv6.
+     */
+    fun shouldEnableIpv6(allowedIpsCsv: String, enableIpv6Requested: Boolean): Boolean {
+        if (!enableIpv6Requested) return false
+        val v6Prefixes = SplitRoutes.prefixesOf(allowedIpsCsv).filter { ':' in it }
+        if (v6Prefixes.isEmpty()) return false
+        if (v6Prefixes.size <= 4) return true
+        return hasPhysicalIpv6DefaultRoute()
     }
 
     /** Проверяет, есть ли у физического подключения пользователя глобальный IPv6-маршрут по умолчанию. */

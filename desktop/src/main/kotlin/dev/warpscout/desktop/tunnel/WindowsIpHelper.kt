@@ -29,6 +29,9 @@ interface IpHlpApi : Library {
     fun DeleteIpForwardEntry2(row: Pointer): Int
     fun InitializeUnicastIpAddressEntry(row: Pointer)
     fun CreateUnicastIpAddressEntry(row: Pointer): Int
+    fun InitializeIpInterfaceEntry(row: Pointer)
+    fun GetIpInterfaceEntry(row: Pointer): Int
+    fun SetIpInterfaceEntry(row: Pointer): Int
     fun ConvertInterfaceLuidToIndex(interfaceLuid: LongByReference, interfaceIndex: IntByReference): Int
     fun GetBestRoute2(
         interfaceLuid: Pointer?,
@@ -40,6 +43,14 @@ interface IpHlpApi : Library {
         bestSourceAddress: Pointer
     ): Int
 }
+
+data class IpInterfaceConfigResult(
+    val ok: Boolean,
+    val mtu: Int,
+    val metric: Int,
+    val useAutomaticMetric: Boolean,
+    val win32Error: Int = 0
+)
 
 data class RouteInstallSummary(
     val total: Int,
@@ -108,6 +119,26 @@ object WindowsIpHelper {
     internal const val OFF_UNI_DAD_STATE = 64L
     private const val IP_DAD_STATE_PREFERRED = 4
 
+    /**
+     * Размер и смещения полей структуры `MIB_IPINTERFACE_ROW` (Windows SDK `netioapi.h`, x64):
+     *  • 0..1     : Family (ADDRESS_FAMILY / USHORT) + 6 байт выравнивания
+     *  • 8..15    : InterfaceLuid (NET_LUID / ULONG64)
+     *  • 16..19   : InterfaceIndex (NET_IFINDEX / ULONG)
+     *  • 44       : UseAutomaticMetric (BOOLEAN)
+     *  • 144..147 : SitePrefixLength (ULONG; по документации Microsoft для IPv4 обязан быть 0)
+     *  • 148..151 : Metric (ULONG)
+     *  • 152..155 : NlMtu (ULONG)
+     *  • итого 176 байт (выделяем 256 байт с запасом).
+     */
+    internal const val IP_IF_ROW_SIZE = 256
+    internal const val OFF_IF_FAMILY = 0L
+    internal const val OFF_IF_LUID = 8L
+    internal const val OFF_IF_INDEX = 16L
+    internal const val OFF_IF_USE_AUTO_METRIC = 44L
+    internal const val OFF_IF_SITE_PREFIX_LEN = 144L
+    internal const val OFF_IF_METRIC = 148L
+    internal const val OFF_IF_NL_MTU = 152L
+
     private const val AF_INET: Short = 2
     private const val AF_INET6: Short = 23
     private const val NO_ERROR = 0
@@ -164,6 +195,76 @@ object WindowsIpHelper {
         buf.setInt(OFF_UNI_DAD_STATE, IP_DAD_STATE_PREFERRED)
         val rc = api.CreateUnicastIpAddressEntry(buf)
         return rc == NO_ERROR || rc == ERROR_OBJECT_ALREADY_EXISTS
+    }
+
+    /** Читает текущие `NlMtu`, `Metric` и `UseAutomaticMetric` интерфейса через `GetIpInterfaceEntry`. */
+    fun getInterfaceConfig(adapterLuid: Long, isIpv6: Boolean = false): IpInterfaceConfigResult {
+        if (adapterLuid == 0L) return IpInterfaceConfigResult(false, 0, 0, true, ERROR_NOT_FOUND)
+        val api = loadApi()
+        val buf = Memory(IP_IF_ROW_SIZE.toLong()).apply { clear() }
+        api.InitializeIpInterfaceEntry(buf)
+        buf.setShort(OFF_IF_FAMILY, if (isIpv6) AF_INET6 else AF_INET)
+        buf.setLong(OFF_IF_LUID, adapterLuid)
+        val rc = api.GetIpInterfaceEntry(buf)
+        if (rc != NO_ERROR) {
+            return IpInterfaceConfigResult(false, 0, 0, true, rc)
+        }
+        return IpInterfaceConfigResult(
+            ok = true,
+            mtu = buf.getInt(OFF_IF_NL_MTU),
+            metric = buf.getInt(OFF_IF_METRIC),
+            useAutomaticMetric = buf.getByte(OFF_IF_USE_AUTO_METRIC).toInt() != 0,
+            win32Error = NO_ERROR
+        )
+    }
+
+    /**
+     * Напрямую через Win32 `GetIpInterfaceEntry` + `SetIpInterfaceEntry` (как в официальном
+     * `wireguard-windows`) задаёт `NlMtu` (1280) и фиксированную низкую метрику (`UseAutomaticMetric=0`).
+     *
+     * Без этого Wintun остаётся с MTU по умолчанию 65535 байт: браузеры (post-quantum TLS ~1600 Б)
+     * и Telegram шлют пакеты > 1280 Б и объявляют MSS=65495, из-за чего трафик через WARP зависает.
+     */
+    fun setInterfaceMtuAndMetric(
+        adapterLuid: Long,
+        mtu: Int,
+        metric: Int = 1,
+        isIpv6: Boolean = false
+    ): IpInterfaceConfigResult {
+        if (adapterLuid == 0L) return IpInterfaceConfigResult(false, 0, 0, true, ERROR_NOT_FOUND)
+        val api = loadApi()
+        val family = if (isIpv6) AF_INET6 else AF_INET
+        val buf = Memory(IP_IF_ROW_SIZE.toLong())
+
+        var lastRc = ERROR_NOT_FOUND
+        for (attempt in 0 until 15) {
+            buf.clear()
+            api.InitializeIpInterfaceEntry(buf)
+            buf.setShort(OFF_IF_FAMILY, family)
+            buf.setLong(OFF_IF_LUID, adapterLuid)
+            lastRc = api.GetIpInterfaceEntry(buf)
+            if (lastRc == NO_ERROR) break
+            runCatching { Thread.sleep(100) }
+        }
+        if (lastRc != NO_ERROR) {
+            return IpInterfaceConfigResult(false, 0, 0, true, lastRc)
+        }
+
+        buf.setByte(OFF_IF_USE_AUTO_METRIC, 0.toByte())
+        if (!isIpv6) {
+            // Требование Microsoft для SetIpInterfaceEntry на AF_INET.
+            buf.setInt(OFF_IF_SITE_PREFIX_LEN, 0)
+        }
+        buf.setInt(OFF_IF_METRIC, metric)
+        buf.setInt(OFF_IF_NL_MTU, mtu)
+
+        val setRc = api.SetIpInterfaceEntry(buf)
+        if (setRc != NO_ERROR) {
+            return IpInterfaceConfigResult(false, 0, 0, true, setRc)
+        }
+
+        val verify = getInterfaceConfig(adapterLuid, isIpv6)
+        return if (verify.ok) verify.copy(ok = verify.mtu == mtu) else IpInterfaceConfigResult(true, mtu, metric, false, NO_ERROR)
     }
 
     /**

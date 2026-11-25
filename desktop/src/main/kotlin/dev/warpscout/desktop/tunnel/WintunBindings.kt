@@ -129,16 +129,18 @@ class WintunDevice private constructor(
             while (!closed.get()) {
                 val pktPtr = api.WintunReceivePacket(session, sizeRef)
                 if (pktPtr != null) {
-                    return try {
-                        val pktLen = sizeRef.value
-                        val copyLen = minOf(pktLen, len)
-                        if (copyLen > 0) {
-                            pktPtr.read(0L, b, off, copyLen)
+                    val pktLen = sizeRef.value
+                    try {
+                        if (pktLen in 1..len) {
+                            pktPtr.read(0L, b, off, pktLen)
+                            return pktLen
                         }
-                        copyLen
+                        // Не обрезаем пакет, превышающий буфер: обрезанный IP-пакет имеет битую длину
+                        // и контрольную сумму и всё равно отбрасывается сервером.
                     } finally {
                         api.WintunReleaseReceivePacket(session, pktPtr)
                     }
+                    continue
                 }
                 val err = Native.getLastError()
                 when (err) {

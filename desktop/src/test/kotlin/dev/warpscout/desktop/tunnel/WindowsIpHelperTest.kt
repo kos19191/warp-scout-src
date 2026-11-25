@@ -54,4 +54,32 @@ class WindowsIpHelperTest {
         assertEquals(-1, buf.getInt(WindowsIpHelper.OFF_UNI_PREFERRED_LIFETIME), "PreferredLifetime offset mismatch")
         assertEquals((-1).toByte(), buf.getByte(WindowsIpHelper.OFF_UNI_PREFIX_LEN), "OnLinkPrefixLength offset mismatch")
     }
+
+    @Test
+    fun `MIB_IPINTERFACE_ROW offsets match real Windows iphlpapi GetIpInterfaceEntry`() {
+        assumeTrue(WindowsAutostart.isWindows(), "Windows-only Win32 MIB_IPINTERFACE_ROW verification")
+        val gw = WindowsIpHelper.getBestIpv4Route("1.1.1.1")
+        assertNotNull(gw, "GetBestRoute2 should return active route")
+        assertTrue(gw!!.interfaceLuid != 0L, "Expected non-zero interfaceLuid")
+
+        val cfg = WindowsIpHelper.getInterfaceConfig(gw.interfaceLuid, isIpv6 = false)
+        assertTrue(cfg.ok, "GetIpInterfaceEntry failed with Win32 rc=${cfg.win32Error}")
+        assertTrue(cfg.mtu in 1200..9216, "Unexpected NlMtu=${cfg.mtu} (offset mismatch?)")
+        assertTrue(cfg.metric in 0..10_000, "Unexpected Metric=${cfg.metric} (offset mismatch?)")
+
+        // Сверяем прочитанный NlMtu с PowerShell Get-NetIPInterface.
+        val ps = ProcessCommandRunner().run(
+            listOf(
+                "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                "(Get-NetIPInterface -InterfaceIndex ${gw.interfaceIndex} -AddressFamily IPv4).NlMtu"
+            ),
+            timeoutMs = 8000L
+        )
+        if (ps.ok) {
+            val psMtu = ps.stdout.trim().toIntOrNull()
+            if (psMtu != null) {
+                assertEquals(psMtu, cfg.mtu, "MIB_IPINTERFACE_ROW NlMtu offset must match Get-NetIPInterface")
+            }
+        }
+    }
 }

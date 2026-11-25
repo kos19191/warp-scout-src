@@ -42,7 +42,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class NativeWintunTunnelManager(
     private val nativeDir: File,
     private val runner: CommandRunner = ProcessCommandRunner(),
-    private val netConfig: WindowsNetConfigurator = WindowsNetConfigurator(runner),
+    netConfig: WindowsNetConfigurator? = null,
     private val tunFactory: (String) -> TunDevice = { name -> WintunDevice.open(name, nativeDir) },
     private val udpFactory: (Endpoint) -> UdpChannel = { ep -> SocketUdpChannel(DatagramSocket(), ep, timeoutMs = 1500) },
     private val onState: (TunnelSnapshot) -> Unit = {},
@@ -53,6 +53,8 @@ class NativeWintunTunnelManager(
     private val requireElevationCheck: Boolean = true,
     private val skipNetConfig: Boolean = false
 ) {
+    private val netConfig: WindowsNetConfigurator = netConfig ?: WindowsNetConfigurator(runner, onLog = onLog)
+
     companion object {
         const val ADAPTER_NAME = "WarpScout"
         const val PROBE_ADAPTER_NAME = "WarpScoutProbe"
@@ -228,7 +230,7 @@ class NativeWintunTunnelManager(
                         val cfgRes = netConfig.configureAdapter(
                             adapterName = PROBE_ADAPTER_NAME,
                             ipv4 = config.account.ipv4,
-                            ipv6 = if (config.enableIpv6Address) config.account.ipv6 else null,
+                            ipv6 = null, // Проверка изнутри идёт по IPv4 (0.0.0.0/1 + 128.0.0.0/1) — не вешаем лишний IPv6 без маршрутов.
                             mtu = config.mtu,
                             dnsServers = config.dns,
                             adapterLuid = tun.adapterLuid
@@ -405,11 +407,12 @@ class NativeWintunTunnelManager(
             }
             activeTun = tun
 
+            val useIpv6 = !skipNetConfig && netConfig.shouldEnableIpv6(cfg.allowedIps, cfg.enableIpv6Address)
             if (!skipNetConfig) {
                 val cfgRes = netConfig.configureAdapter(
                     adapterName = ADAPTER_NAME,
                     ipv4 = cfg.account.ipv4,
-                    ipv6 = if (cfg.enableIpv6Address) cfg.account.ipv6 else null,
+                    ipv6 = if (useIpv6) cfg.account.ipv6 else null,
                     mtu = cfg.mtu,
                     dnsServers = cfg.dns,
                     adapterLuid = tun.adapterLuid
@@ -544,7 +547,7 @@ class NativeWintunTunnelManager(
                     adapterName = ADAPTER_NAME,
                     allowedIpsCsv = cfg.allowedIps,
                     extraCidrs = if (secondUp) exitRouter.cidrs else emptyList(),
-                    enableIpv6 = cfg.enableIpv6Address,
+                    enableIpv6 = useIpv6,
                     adapterLuid = tun.adapterLuid,
                     excludeIpv4s = bypassTargets
                 )

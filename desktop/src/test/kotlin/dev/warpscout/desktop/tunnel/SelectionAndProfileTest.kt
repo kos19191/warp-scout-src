@@ -9,6 +9,8 @@ import dev.warpscout.core.model.JunkProfile
 import dev.warpscout.core.model.Verdict
 import dev.warpscout.core.model.WarpAccount
 import dev.warpscout.core.model.WarpConfig
+import dev.warpscout.core.net.EndpointPool
+import dev.warpscout.core.net.EndpointSpec
 import dev.warpscout.core.tune.AutoTuner
 import dev.warpscout.core.tune.Scoring
 import dev.warpscout.core.tune.Shortlist
@@ -122,5 +124,25 @@ class SelectionAndProfileTest {
 
         assertTrue(ExitInfo(colo = "DME", warpOn = true).isRussianColo)
         assertTrue(!ExitInfo(colo = "ARN", warpOn = true).isRussianColo)
+    }
+
+    @Test
+    fun `EndpointPool stratified mode covers all Cloudflare subnets even at maxEndpoints 120`() {
+        val pool = EndpointPool.build(EndpointSpec(maxEndpoints = 120))
+        assertEquals(120, pool.size)
+        val subnets = pool.map { AutoTuner.subnet24Of(it.host) }.toSet()
+        assertTrue(subnets.size >= 12, "Stratified pool of 120 endpoints must cover >=12 subnets, got ${subnets.size}: $subnets")
+        assertTrue("162.159.192" in subnets)
+        assertTrue("162.159.195" in subnets)
+        assertTrue("188.114.96" in subnets)
+        assertTrue("188.114.97" in subnets)
+
+        // pickRefineCandidates также охватывает разные /24-подсети даже при одинаковом вердикте UDP_SILENT.
+        val silentRanked = pool.map { ep ->
+            EndpointStats(ep, emptyList(), Verdict.UDP_SILENT, replies = 0, attempts = 3)
+        }
+        val refine = AutoTuner.pickRefineCandidates(silentRanked, limit = 10)
+        val refineSubnets = refine.map { AutoTuner.subnet24Of(it.endpoint.host) }.toSet()
+        assertEquals(10, refineSubnets.size, "Phase-2 refine candidates must span 10 distinct /24 subnets: $refineSubnets")
     }
 }

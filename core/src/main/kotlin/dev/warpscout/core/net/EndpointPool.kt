@@ -74,11 +74,16 @@ object EndpointPool {
         val octets = spec.octetRange.filter { it in 0..255 }
 
         if (spec.mode == PoolMode.STRATIFIED) {
-            // Детерминированно, но «перемешанно»: для каждой подсети и порта берём samplesPerKey октетов.
-            for (prefix in spec.subnets) {
+            // Детерминированно, но равномерно по ВСЕМ подсетям: сначала выбираем октеты для каждой
+            // подсети, а затем обходим порты × подсети по кругу, чтобы даже при maxEndpoints=120
+            // были охвачены и 162.159.192/195, и 188.114.96-99, и 8.x.x.x (а не одна первая подсеть).
+            val subnetOctets = spec.subnets.map { prefix ->
                 val chosen = if (octets.isEmpty()) listOf(1) else
                     octets.shuffled(rnd).take(spec.samplesPerKey).sorted()
-                for (port in spec.ports) {
+                prefix to chosen
+            }
+            for (port in spec.ports) {
+                for ((prefix, chosen) in subnetOctets) {
                     for (o in chosen) {
                         out.add(Endpoint(prefix + o, port))
                         if (out.size >= spec.maxEndpoints) return out.toList()
