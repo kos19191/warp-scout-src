@@ -177,7 +177,9 @@ jobs:
   release-windows:
     name: "Windows → GitHub Release"
     needs: windows-package
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true'
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true') ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -195,7 +197,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(grep -oP 'val appVersion = "\K[^"]+' desktop/build.gradle.kts)
-          TAG="${INPUT_TAG:-desktop-preview}"
+          TAG="${INPUT_TAG:-desktop-windows-preview}"
           {
             echo "WarpScout Desktop $VERSION для Windows 10/11 (x64)."
             echo
@@ -205,15 +207,15 @@ jobs:
             echo
             echo "| Файл | Описание |"
             echo "|---|---|"
-            echo "| \`WarpScout-$VERSION-windows-x64.msi\` | Установщик Windows (ярлык в меню Пуск, встроенный JRE и Wintun) |"
+            echo "| \`WarpScout-$VERSION-windows-x64.msi\` | **Установщик Windows** (ярлык в меню Пуск, встроенные JRE и Wintun) |"
             echo "| \`WarpScout-$VERSION-windows-x64-portable.zip\` | Портативная версия — распакуй и запусти \`WarpScout.exe\` |"
             echo
             echo "**Что нужно:** только Windows 10/11 (x64). Java, AmneziaWG и сторонние драйверы устанавливать не нужно — всё уже внутри."
           } > notes.md
 
           if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release edit "$TAG" --title "WarpScout Desktop $VERSION" --notes-file notes.md
+            gh release edit "$TAG" --title "WarpScout Desktop $VERSION (Windows)" --notes-file notes.md --prerelease
             gh release upload "$TAG" out-win/* --clobber
           else
-            gh release create "$TAG" out-win/* --title "WarpScout Desktop $VERSION ($TAG)" --notes-file notes.md --target "$GITHUB_SHA"
+            gh release create "$TAG" out-win/* --title "WarpScout Desktop $VERSION (Windows)" --notes-file notes.md --target "$GITHUB_SHA" --prerelease
           fi
