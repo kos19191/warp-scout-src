@@ -26,10 +26,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 class NativeWintunTunnelManagerTest {
 
     private class FakeCommandRunner(private val elevated: Boolean = true) : CommandRunner {
-        override fun run(command: List<String>, timeoutMs: Long, workingDir: File?): CommandResult =
+        override fun run(command: List<String>, timeoutMs: Long): CommandResult =
             CommandResult(0, "", "")
 
-        override fun runElevated(executable: String, arguments: List<String>, timeoutMs: Long): CommandResult =
+        override fun runElevated(executable: String, args: List<String>, timeoutMs: Long): CommandResult =
             CommandResult(0, "", "")
 
         override fun isElevated(): Boolean = elevated
@@ -107,10 +107,9 @@ class NativeWintunTunnelManagerTest {
             rxQueue.offer(replyPkt)
         }
 
-        override fun receive(timeoutMs: Int): ByteArray {
-            if (closed.get()) throw SocketTimeoutException("closed")
-            return rxQueue.poll(timeoutMs.toLong().coerceAtLeast(10L), TimeUnit.MILLISECONDS)
-                ?: throw SocketTimeoutException("timeout")
+        override fun receive(): ByteArray? {
+            if (closed.get()) return null
+            return rxQueue.poll(100L, TimeUnit.MILLISECONDS)
         }
 
         override fun close() {

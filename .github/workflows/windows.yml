@@ -44,6 +44,7 @@ jobs:
       - name: "Самопроверка :core и тесты :desktop"
         shell: bash
         run: |
+          set +e
           set -o pipefail
           ./gradlew --no-daemon :cli:selftest :desktop:test --stacktrace 2>&1 | tee test.log
           rc=${PIPESTATUS[0]}

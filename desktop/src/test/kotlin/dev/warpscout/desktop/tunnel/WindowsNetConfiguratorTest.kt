@@ -39,12 +39,12 @@ class WindowsNetConfiguratorTest {
     fun `adds and cleans up bypass host routes for endpoints`() {
         val calls = mutableListOf<List<String>>()
         val fakeRunner = object : CommandRunner {
-            override fun run(command: List<String>, timeoutMs: Long, workingDir: java.io.File?): CommandResult {
+            override fun run(command: List<String>, timeoutMs: Long): CommandResult {
                 calls += command
                 return CommandResult(0, "", "")
             }
 
-            override fun runElevated(executable: String, arguments: List<String>, timeoutMs: Long): CommandResult =
+            override fun runElevated(executable: String, args: List<String>, timeoutMs: Long): CommandResult =
                 CommandResult(0, "", "")
 
             override fun isElevated(): Boolean = true
