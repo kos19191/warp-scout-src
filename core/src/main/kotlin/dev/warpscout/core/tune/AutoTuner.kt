@@ -458,31 +458,43 @@ class AutoTuner(
             }
 
             // Шаг 1: по одному лучшему представителю каждого вида маскировки (сначала с обфускацией, потом none),
-            // стараясь охватить разные /24-подсети (разные PoP Cloudflare).
+            // но СТРОГО из разных /24-подсетей (чтобы один московский PoP не съедал слоты до проверки зарубежных).
             val distinctKinds = ordered.map { it.junk.kind }.distinct()
                 .sortedBy { if (it == dev.warpscout.core.model.JunkKind.NONE) 1 else 0 }
+            val coveredKinds = HashSet<dev.warpscout.core.model.JunkKind>()
             for (kind in distinctKinds) {
                 val ofKind = ordered.filter { it.junk.kind == kind }
-                val added = ofKind.firstOrNull { tryAdd(it, requireNewSubnet = true, requireNewEndpoint = true) } != null ||
-                    ofKind.firstOrNull { tryAdd(it, requireNewSubnet = false, requireNewEndpoint = true) } != null ||
-                    ofKind.firstOrNull { tryAdd(it, requireNewSubnet = false, requireNewEndpoint = false) } != null
-                if (!added) continue
+                if (ofKind.firstOrNull { tryAdd(it, requireNewSubnet = true, requireNewEndpoint = true) } != null) {
+                    coveredKinds.add(kind)
+                }
             }
 
             // Шаг 2: добираем ещё не проверенные /24-подсети (приоритет замаскированным профилям).
             val obfuscatedFirst = ordered.sortedBy { if (it.junk.kind == dev.warpscout.core.model.JunkKind.NONE) 1 else 0 }
             for (c in obfuscatedFirst) {
                 if (out.size >= maxCount) break
-                tryAdd(c, requireNewSubnet = true, requireNewEndpoint = true)
+                if (tryAdd(c, requireNewSubnet = true, requireNewEndpoint = true)) {
+                    coveredKinds.add(c.junk.kind)
+                }
             }
 
-            // Шаг 3: добираем разные endpoint'ы с максимальным баллом.
+            // Шаг 3: добираем ещё не охваченные виды маскировки (если они нашлись только в уже взятых /24).
+            for (kind in distinctKinds) {
+                if (out.size >= maxCount) break
+                if (kind in coveredKinds) continue
+                val ofKind = ordered.filter { it.junk.kind == kind }
+                val added = ofKind.firstOrNull { tryAdd(it, requireNewSubnet = false, requireNewEndpoint = true) } != null ||
+                    ofKind.firstOrNull { tryAdd(it, requireNewSubnet = false, requireNewEndpoint = false) } != null
+                if (added) coveredKinds.add(kind)
+            }
+
+            // Шаг 4: добираем разные endpoint'ы с максимальным баллом.
             for (c in ordered) {
                 if (out.size >= maxCount) break
                 tryAdd(c, requireNewSubnet = false, requireNewEndpoint = true)
             }
 
-            // Шаг 4: если уникальных endpoint'ов меньше maxCount — добираем оставшихся по баллу.
+            // Шаг 5: если уникальных endpoint'ов меньше maxCount — добираем оставшихся по баллу.
             for (c in ordered) {
                 if (out.size >= maxCount) break
                 tryAdd(c, requireNewSubnet = false, requireNewEndpoint = false)
