@@ -2,6 +2,8 @@ package dev.warpscout.desktop.engine
 
 import dev.warpscout.core.config.ConfTarget
 import dev.warpscout.core.config.WgConf
+import dev.warpscout.core.dpi.DpiComparator
+import dev.warpscout.core.dpi.DpiComparison
 import dev.warpscout.core.junk.JunkLibrary
 import dev.warpscout.core.keys.AccountStore
 import dev.warpscout.core.keys.KeySource
@@ -20,6 +22,7 @@ import dev.warpscout.core.net.HttpClient
 import dev.warpscout.core.net.NetSettings
 import dev.warpscout.core.net.PoolMode
 import dev.warpscout.core.net.ResourceProber
+import dev.warpscout.core.net.Socks5Endpoint
 import dev.warpscout.core.net.TlsProber
 import dev.warpscout.core.net.WarpDefaults
 import dev.warpscout.core.net.WgProber
@@ -35,6 +38,8 @@ import dev.warpscout.desktop.storage.DesktopSettings
 import dev.warpscout.desktop.storage.DesktopStore
 import dev.warpscout.desktop.storage.ShortlistEntry
 import dev.warpscout.desktop.storage.TunnelBackendMode
+import dev.warpscout.desktop.tunnel.ByeDpiManager
+import dev.warpscout.desktop.tunnel.ByeDpiSnapshot
 import dev.warpscout.desktop.tunnel.CommandRunner
 import dev.warpscout.desktop.tunnel.EngineInfo
 import dev.warpscout.desktop.tunnel.EngineKind
@@ -123,6 +128,12 @@ data class DesktopUiState(
     val banner: String? = null,
     val bannerIsError: Boolean = false,
 
+    // Встроенный обход DPI (ByeDPI / ciadpi.exe) и сравнение «напрямую vs ByeDPI»
+    val byeDpi: ByeDpiSnapshot = ByeDpiSnapshot(),
+    val dpiBusy: Boolean = false,
+    val dpiStatus: String = "",
+    val dpiComparison: DpiComparison? = null,
+
     // Обновления из GitHub Releases
     val update: UpdateUiState = UpdateUiState(),
 
@@ -195,6 +206,13 @@ class DesktopController(
         autoElevateUac = { _state.value.settings.autoElevateUac }
     )
 
+    /** Встроенный обход DPI (ByeDPI / ciadpi.exe — локальный SOCKS5-прокси без драйвера ядра). */
+    val byeDpiManager = ByeDpiManager(
+        nativeDir = store.paths.nativeDir,
+        onState = { snap -> _state.update { it.copy(byeDpi = snap) } },
+        onLog = { msg -> appendLog(msg) }
+    )
+
     private val isBuiltinMode: Boolean
         get() = _state.value.settings.backendMode == TunnelBackendMode.BUILTIN_WINTUN
 
@@ -218,8 +236,16 @@ class DesktopController(
                 settings = loaded,
                 shortlist = shortlist,
                 activeConfText = activeConf,
-                cachedListStamps = stamps
+                cachedListStamps = stamps,
+                byeDpi = byeDpiManager.snapshot
             )
+        }
+
+        // Гарантированное восстановление системного прокси и остановка ciadpi.exe даже при принудительном завершении JVM.
+        runCatching {
+            Runtime.getRuntime().addShutdownHook(Thread({
+                runCatching { byeDpiManager.shutdown() }
+            }, "warpscout-byedpi-shutdown"))
         }
 
         appendLog("WarpScout Desktop v${BuildInfo.current.version} запущен (каталог данных: ${store.paths.root.absolutePath})")
@@ -657,18 +683,27 @@ class DesktopController(
     }
 
     /** Полный цикл подбора через `AutoTuner` из `:core`. */
-    fun runScan(autoConnectAfter: Boolean = false, silentBackground: Boolean = false) {
+    fun runScan(
+        autoConnectAfter: Boolean = false,
+        silentBackground: Boolean = false,
+        forceFullScan: Boolean = false
+    ) {
         if (_state.value.scanning) {
             if (!silentBackground) showBanner("Подбор уже идёт — дождитесь результата")
             return
         }
+        val wasRussianColo = _state.value.tunnel.exitInfo.isRussianColo
+        val topShortlistWeak = _state.value.shortlist.firstOrNull()?.let {
+            it.resourcesTotal >= 5 && it.resourcesOk * 100 < it.resourcesTotal * 75
+        } ?: false
+        val skipCache = forceFullScan || wasRussianColo || topShortlistWeak
         scanCancel.set(false)
         _state.update {
             it.copy(
                 scanning = true,
                 scanDone = 0,
                 scanTotal = 0,
-                scanStep = "Подготовка пула точек и ключей…"
+                scanStep = if (skipCache) "Полный подбор без кэша (ищу зарубежный узел)…" else "Подготовка пула точек и ключей…"
             )
         }
 
@@ -687,7 +722,15 @@ class DesktopController(
 
                 val settings = _state.value.settings
                 val engine = resolveFreshEngine()
-                val spec = buildTuningSpec(settings)
+                val spec = buildTuningSpec(settings, skipCache = skipCache)
+                if (skipCache && !silentBackground) {
+                    val reason = when {
+                        forceFullScan -> "запрошен полный переподбор"
+                        wasRussianColo -> "текущая точка выходила через российский узел (DME/LED)"
+                        else -> "прошлая точка открывала слишком мало сайтов"
+                    }
+                    appendLog("Пропускаю быстрый старт ($reason) — запускаю полный скан по всем семействам подсетей")
+                }
                 val keySource = KeySource(store = AccountStore.file(store.paths.accountCacheFile.absolutePath))
 
                 // Проверяем топ-3 изнутри туннеля (встроенного Wintun или внешнего AmneziaWG).
@@ -1048,9 +1091,142 @@ class DesktopController(
         "[${Formatters.timeOf(it.timestampMs)}] [${it.level.name}] ${it.message}"
     }
 
+    fun toggleByeDpi() {
+        if (byeDpiManager.snapshot.running) stopByeDpi() else startByeDpi()
+    }
+
+    fun startByeDpi(enableSystemProxyOverride: Boolean? = null) {
+        val s = _state.value.settings
+        val useSysProxy = enableSystemProxyOverride ?: s.byeDpiSystemProxy
+        if (enableSystemProxyOverride != null && enableSystemProxyOverride != s.byeDpiSystemProxy) {
+            updateSettings { it.copy(byeDpiSystemProxy = enableSystemProxyOverride) }
+        }
+        auxWorker.execute {
+            val ok = byeDpiManager.start(
+                presetId = s.byeDpiPresetId,
+                port = s.byeDpiPort,
+                customArgs = s.byeDpiCustomArgs,
+                enableSystemProxy = useSysProxy
+            )
+            if (ok) {
+                showBanner("ByeDPI запущен: SOCKS5 127.0.0.1:${s.byeDpiPort}")
+            } else {
+                showBanner(byeDpiManager.snapshot.lastError ?: "Не удалось запустить ByeDPI", isError = true)
+            }
+        }
+    }
+
+    fun stopByeDpi() {
+        auxWorker.execute {
+            byeDpiManager.stop()
+            showBanner("ByeDPI остановлен")
+        }
+    }
+
+    fun setByeDpiSystemProxy(enabled: Boolean) {
+        updateSettings { it.copy(byeDpiSystemProxy = enabled) }
+        if (byeDpiManager.snapshot.running) {
+            auxWorker.execute {
+                val ok = byeDpiManager.setSystemProxy(enabled)
+                showBanner(
+                    if (enabled && ok) "Системный прокси Windows включён (РФ и локальная сеть — напрямую)"
+                    else if (!enabled) "Системный прокси Windows выключен"
+                    else "Не удалось изменить системный прокси Windows",
+                    isError = enabled && !ok
+                )
+            }
+        }
+    }
+
+    /** Автоподбор лучшей стратегии ByeDPI под текущего провайдера через `:core` [DpiComparator]. */
+    fun runByeDpiAutoTune() {
+        if (_state.value.dpiBusy) return
+        val wasRunning = byeDpiManager.snapshot.running
+        _state.update { it.copy(dpiBusy = true, dpiStatus = "Подбираю стратегию ByeDPI…") }
+        auxWorker.execute {
+            try {
+                val checks = Presets.RESOURCE_CHECKS.filterNot { it.baselineExpected }
+                val res = byeDpiManager.autoTuneStrategy(checks) { step ->
+                    _state.update { it.copy(dpiStatus = step) }
+                }
+                if (res == null) {
+                    val err = "Не удалось подобрать стратегию: ciadpi.exe не найден"
+                    appendLog(err, LogLevel.WARN)
+                    showBanner(err, isError = true)
+                    _state.update { it.copy(dpiBusy = false, dpiStatus = err) }
+                    return@execute
+                }
+                updateSettings { it.copy(byeDpiPresetId = res.bestPresetId) }
+                appendLog(res.summary, LogLevel.OK)
+                _state.update {
+                    it.copy(
+                        dpiBusy = false,
+                        dpiStatus = res.summary,
+                        dpiComparison = res.comparison
+                    )
+                }
+                showBanner(res.summary)
+                if (wasRunning) {
+                    val s = _state.value.settings
+                    byeDpiManager.start(s.byeDpiPresetId, s.byeDpiPort, s.byeDpiCustomArgs, s.byeDpiSystemProxy)
+                }
+            } catch (e: Exception) {
+                val err = "Ошибка подбора ByeDPI: ${e.message}"
+                appendLog(err, LogLevel.ERROR)
+                _state.update { it.copy(dpiBusy = false, dpiStatus = err) }
+            }
+        }
+    }
+
+    /** Диагностика `:core` [DpiComparator]: какие сайты чинит ByeDPI, а каким нужен WARP. */
+    fun runDpiCompare() {
+        if (_state.value.dpiBusy) return
+        _state.update { it.copy(dpiBusy = true, dpiStatus = "Сравниваю напрямую vs через ByeDPI…") }
+        auxWorker.execute {
+            var startedTemp = false
+            try {
+                val s = _state.value.settings
+                if (!byeDpiManager.snapshot.running) {
+                    startedTemp = byeDpiManager.start(
+                        presetId = s.byeDpiPresetId,
+                        port = s.byeDpiPort,
+                        customArgs = s.byeDpiCustomArgs,
+                        enableSystemProxy = false
+                    )
+                    if (!startedTemp) {
+                        val err = byeDpiManager.snapshot.lastError ?: "ByeDPI не запущен"
+                        _state.update { it.copy(dpiBusy = false, dpiStatus = err) }
+                        showBanner(err, isError = true)
+                        return@execute
+                    }
+                }
+                val port = byeDpiManager.snapshot.port
+                val checks = Presets.RESOURCE_CHECKS.filterNot { it.baselineExpected }
+                val cmp = DpiComparator(timeoutMs = 5500, connectTimeoutMs = 2500)
+                    .compare(checks, Socks5Endpoint("127.0.0.1", port))
+                appendLog("Сравнение DPI: ${cmp.headline()}", LogLevel.OK)
+                _state.update {
+                    it.copy(
+                        dpiBusy = false,
+                        dpiStatus = cmp.headline(),
+                        dpiComparison = cmp
+                    )
+                }
+                showBanner(cmp.headline())
+            } catch (e: Exception) {
+                val err = "Ошибка диагностики DPI: ${e.message}"
+                appendLog(err, LogLevel.ERROR)
+                _state.update { it.copy(dpiBusy = false, dpiStatus = err) }
+            } finally {
+                if (startedTemp) byeDpiManager.stop("Временный ByeDPI остановлен после диагностики")
+            }
+        }
+    }
+
     fun shutdown(disconnectTunnel: Boolean = _state.value.settings.disconnectOnExit) {
         scheduledTune?.cancel(false)
         scanCancel.set(true)
+        byeDpiManager.shutdown()
         if (nativeTunnel.snapshot.isUp) {
             nativeTunnel.disconnect("Туннель остановлен при закрытии приложения")
         }
@@ -1088,7 +1264,7 @@ class DesktopController(
         enableIpv6Address = s.enableIpv6
     )
 
-    private fun buildTuningSpec(s: DesktopSettings): TuningSpec {
+    private fun buildTuningSpec(s: DesktopSettings, skipCache: Boolean = false): TuningSpec {
         val ports = parsePorts(s.customPortsText)
         val endpointSpec = when (s.poolMode) {
             DesktopPoolMode.DEFAULT -> EndpointSpec(
@@ -1135,7 +1311,7 @@ class DesktopController(
             if (s.includeSipJunk) add(JunkLibrary.sip())
         }.ifEmpty { JunkLibrary.defaultPool(sniCount = s.sniCount) }
 
-        val cachedStart = s.lastTuneEndpoint.takeIf { it.isNotBlank() }?.let { epStr ->
+        val cachedStart = if (skipCache) null else s.lastTuneEndpoint.takeIf { it.isNotBlank() }?.let { epStr ->
             runCatching { CachedStart(WgConf.parseEndpoint(epStr), s.lastTuneJunk) }.getOrNull()
         }
 

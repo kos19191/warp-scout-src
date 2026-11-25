@@ -1,5 +1,6 @@
 package dev.warpscout.desktop.ui
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -12,13 +13,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import dev.warpscout.core.dpi.DpiOutcome
 import dev.warpscout.core.net.DnsVerdict
 import dev.warpscout.desktop.engine.DesktopController
 import dev.warpscout.desktop.engine.DesktopUiState
 import dev.warpscout.desktop.engine.Formatters
 import dev.warpscout.desktop.storage.DesktopPoolMode
+import dev.warpscout.desktop.tunnel.ByeDpiPresets
 
 /**
  * Вкладка «Подбор»: настройка пула точек и профилей шума AWG, запуск автоподбора,
@@ -203,10 +208,10 @@ fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
                         Text("Подобрать и подключить", style = MaterialTheme.typography.labelMedium)
                     }
                     OutlinedButton(
-                        onClick = { controller.runScan(autoConnectAfter = false) },
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp)
+                        onClick = { controller.runScan(autoConnectAfter = true, forceFullScan = true) },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)
                     ) {
-                        Text("Только скан", style = MaterialTheme.typography.labelMedium)
+                        Text("Полный скан", style = MaterialTheme.typography.labelMedium)
                     }
                 }
             }
@@ -356,6 +361,175 @@ fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+        }
+
+        // --- 3. Встроенный обход DPI (ByeDPI / ciadpi.exe) + сравнение напрямую vs ByeDPI ---
+        val dpi = state.byeDpi
+        val clipboard = LocalClipboardManager.current
+        WarpCard {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                SectionHeader(
+                    title = "Обход DPI (ByeDPI)",
+                    subtitle = if (dpi.running)
+                        "SOCKS5 ${dpi.socksAddress} · ${dpi.presetTitle}"
+                    else if (dpi.available)
+                        "Встроенный ciadpi.exe (без драйверов) — помощь, если WARP уходит в DME"
+                    else
+                        "ciadpi.exe не найден в каталоге bin/"
+                )
+            }
+
+            // Выбор стратегии
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                ByeDpiPresets.BUILTIN.forEach { preset ->
+                    FilterChip(
+                        selected = s.byeDpiPresetId == preset.id,
+                        onClick = {
+                            controller.updateSettings { it.copy(byeDpiPresetId = preset.id) }
+                            if (dpi.running) controller.startByeDpi()
+                        },
+                        label = { Text(preset.title, style = MaterialTheme.typography.labelSmall) }
+                    )
+                }
+            }
+
+            Text(
+                ByeDpiPresets.byId(s.byeDpiPresetId).subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            if (s.byeDpiPresetId == ByeDpiPresets.CUSTOM_ID) {
+                OutlinedTextField(
+                    value = s.byeDpiCustomArgs,
+                    onValueChange = { v -> controller.updateSettings { it.copy(byeDpiCustomArgs = v) } },
+                    label = { Text("Флаги ciadpi.exe") },
+                    placeholder = { Text("--disorder 1 --tlsrec 1+s --udp-fake 1") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    textStyle = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Системный прокси Windows", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                    Text("Браузеры через ByeDPI, сайты .ru и LAN — напрямую (при выходе сбрасывается)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(
+                    checked = s.byeDpiSystemProxy,
+                    onCheckedChange = { v -> controller.setByeDpiSystemProxy(v) }
+                )
+            }
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { controller.toggleByeDpi() },
+                    enabled = dpi.available || dpi.running,
+                    modifier = Modifier.weight(1f),
+                    colors = if (dpi.running) {
+                        ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    } else {
+                        ButtonDefaults.buttonColors(containerColor = warp.accentOrange, contentColor = Color.White)
+                    }
+                ) {
+                    Icon(
+                        imageVector = if (dpi.running) Icons.Rounded.Stop else Icons.Rounded.Shield,
+                        contentDescription = null,
+                        modifier = Modifier.size(17.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (dpi.running) "Остановить ByeDPI" else "Запустить ByeDPI", style = MaterialTheme.typography.labelMedium)
+                }
+                OutlinedButton(
+                    onClick = {
+                        clipboard.setText(AnnotatedString("127.0.0.1:${s.byeDpiPort}"))
+                        controller.showBanner("SOCKS5 127.0.0.1:${s.byeDpiPort} скопирован (для Telegram / браузера)")
+                    },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)
+                ) {
+                    Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(":${s.byeDpiPort}", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton(
+                    onClick = { controller.runByeDpiAutoTune() },
+                    enabled = !state.dpiBusy && dpi.available,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    if (state.dpiBusy) {
+                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text("Подобрать стратегию", style = MaterialTheme.typography.labelSmall)
+                }
+                OutlinedButton(
+                    onClick = { controller.runDpiCompare() },
+                    enabled = !state.dpiBusy && dpi.available,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Напрямую vs ByeDPI", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
+            if (state.dpiStatus.isNotBlank()) {
+                Text(
+                    state.dpiStatus,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = warp.accentOrange
+                )
+            }
+
+            state.dpiComparison?.let { cmp ->
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = warp.surfaceHigh.copy(alpha = 0.7f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            cmp.headline(),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        cmp.rows.forEach { row ->
+                            val (tag, color) = when (row.outcome) {
+                                DpiOutcome.OPEN_BOTH -> "OK" to warp.ok
+                                DpiOutcome.OPEN_ONLY_VIA_PROXY -> "DPI ✓" to warp.ok
+                                DpiOutcome.BLOCKED_BOTH -> "нужен WARP" to warp.error
+                                DpiOutcome.OPEN_ONLY_DIRECT -> "прокси мешает" to warp.warn
+                                DpiOutcome.PROXY_UNREACHABLE -> "нет прокси" to warp.error
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(row.name, style = MaterialTheme.typography.labelSmall)
+                                Text(tag, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = color)
+                            }
+                        }
+                    }
+                }
             }
         }
     }

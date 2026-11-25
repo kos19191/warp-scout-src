@@ -95,6 +95,12 @@ data class DesktopSettings(
     val secondExitDomains: String = "chatgpt.com, openai.com, api.openai.com, auth.openai.com",
     val secondExitCidrs: String = "",
 
+    // Встроенный обход DPI (ByeDPI / ciadpi.exe — локальный SOCKS5-прокси без драйвера ядра)
+    val byeDpiPresetId: String = "auto-universal",
+    val byeDpiPort: Int = 1080,
+    val byeDpiCustomArgs: String = "",
+    val byeDpiSystemProxy: Boolean = false,
+
     // Экспорт
     val exportTarget: ConfTarget = ConfTarget.AMNEZIA,
 

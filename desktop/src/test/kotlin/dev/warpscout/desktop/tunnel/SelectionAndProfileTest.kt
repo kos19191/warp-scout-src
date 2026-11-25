@@ -145,4 +145,30 @@ class SelectionAndProfileTest {
         val refineSubnets = refine.map { AutoTuner.subnet24Of(it.endpoint.host) }.toSet()
         assertEquals(10, refineSubnets.size, "Phase-2 refine candidates must span 10 distinct /24 subnets: $refineSubnets")
     }
+
+    @Test
+    fun `pickRefineCandidates and selectForVerification span all Cloudflare prefix families despite low-RTT DME`() {
+        val ranked = listOf(
+            EndpointStats(Endpoint("8.34.70.2", 859), emptyList(), Verdict.HANDSHAKE_OK, 3, 3),
+            EndpointStats(Endpoint("8.35.211.6", 854), emptyList(), Verdict.HANDSHAKE_OK, 3, 3),
+            EndpointStats(Endpoint("8.39.204.9", 864), emptyList(), Verdict.HANDSHAKE_OK, 3, 3),
+            EndpointStats(Endpoint("8.47.69.7", 854), emptyList(), Verdict.HANDSHAKE_OK, 3, 3),
+            EndpointStats(Endpoint("162.159.195.1", 2408), emptyList(), Verdict.HANDSHAKE_OK, 3, 3),
+            EndpointStats(Endpoint("188.114.96.1", 2408), emptyList(), Verdict.HANDSHAKE_OK, 3, 3)
+        )
+        val refined = AutoTuner.pickRefineCandidates(ranked, limit = 5)
+        val families = refined.take(3).map { AutoTuner.prefixFamilyOf(it.endpoint.host) }.toSet()
+        assertEquals(setOf("8", "162", "188"), families, "First 3 refine slots must cover 8.*, 162.*, and 188.*")
+
+        val ordered = listOf(
+            cand("8.34.70.2", 859, JunkLibrary.quic("akbars.ru"), score = 2000),
+            cand("8.35.211.6", 854, JunkLibrary.sip(), score = 1990),
+            cand("8.39.204.9", 864, JunkLibrary.tlsFixed(), score = 1980),
+            cand("162.159.195.1", 2408, JunkLibrary.tlsFixed(), score = 1800),
+            cand("188.114.96.1", 2408, JunkLibrary.sip(), score = 1790)
+        )
+        val verify = AutoTuner.selectForVerification(ordered, maxCount = 5)
+        val verifyFamilies = verify.take(3).map { AutoTuner.prefixFamilyOf(it.config.endpoint.host) }.toSet()
+        assertEquals(setOf("8", "162", "188"), verifyFamilies, "First 3 verification slots must cover 8.*, 162.*, and 188.*")
+    }
 }

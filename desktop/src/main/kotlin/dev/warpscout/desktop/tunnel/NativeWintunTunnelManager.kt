@@ -299,9 +299,13 @@ class NativeWintunTunnelManager(
                     val isRuColo = probeColo in TraceAndSpeed.RU_COLOS
                     val results = if (isRuColo) {
                         // Выход через российский дата-центр Cloudflare (DME/LED/OVB) часто режется ТСПУ:
-                        // снимаем бонус с Cloudflare trace, чтобы зарубежные узлы (ARN/HEL/FRA) всегда побеждали.
+                        // снимаем «бесплатные» очки контроля/Cloudflare/Google-204, чтобы узел РФ
+                        // никогда не проходил порог 75–80% и не мешал поиску зарубежного узла (FRA/ARN/HEL).
                         rawResults.map { r ->
-                            if (r.check.url.contains("cloudflare.com/cdn-cgi/trace")) {
+                            if (r.check.baselineExpected ||
+                                r.check.url.contains("cloudflare.com/cdn-cgi/trace") ||
+                                r.check.url.contains("google.com/generate_204")
+                            ) {
                                 r.copy(ok = false, errorClass = "ru_colo_$probeColo")
                             } else r
                         }

@@ -46,8 +46,8 @@ object Presets {
 
     /** Стандартный набор проверок доступности («то, ради чего всё это»). */
     val RESOURCE_CHECKS: List<ResourceCheck> = listOf(
-        ResourceCheck("WARP: контроль (в РФ работает без VPN)", "https://ru.wikipedia.org/wiki/Zapad",
-            baselineExpected = true),
+        ResourceCheck("WARP: контроль (в РФ работает без VPN)", "https://ya.ru/generate_204",
+            200..399, baselineExpected = true),
         ResourceCheck("Google (204)", "https://www.google.com/generate_204", 200..399),
         ResourceCheck("YouTube", "https://www.youtube.com/", 200..399),
         ResourceCheck("ChatGPT", "https://chatgpt.com/cdn-cgi/trace", 200..399),
@@ -55,7 +55,7 @@ object Presets {
         ResourceCheck("Telegram web", "https://web.telegram.org/a/", 200..399),
         ResourceCheck("Telegram DC2", "https://venus.web.telegram.org/apiw1", 200..499),
         ResourceCheck("Discord", "https://discord.com/api/guilds", 200..499),
-        ResourceCheck("WhatsApp web", "https://web.whatsapp.com/", 200..399),
+        ResourceCheck("WhatsApp", "https://www.whatsapp.com/", 200..399),
         ResourceCheck("X", "https://x.com/", 200..399),
         ResourceCheck("Cloudflare trace", "https://www.cloudflare.com/cdn-cgi/trace", 200..299)
     )

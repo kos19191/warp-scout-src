@@ -521,6 +521,56 @@ fun HomeScreen(
                     }
                 }
 
+                if (state.tunnel.exitInfo.isRussianColo) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = warp.warn.copy(alpha = 0.14f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(Icons.Rounded.WarningAmber, contentDescription = null, tint = warp.warn, modifier = Modifier.size(16.dp))
+                                Text(
+                                    "Выход через узел РФ (${state.tunnel.exitInfo.colo}) — YouTube/Telegram могут резаться",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = warp.warn
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                FilledTonalButton(
+                                    onClick = { controller.runScan(autoConnectAfter = true, forceFullScan = true) },
+                                    enabled = !state.scanning,
+                                    modifier = Modifier.weight(1f),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                                ) {
+                                    Text("Искать Европу", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        if (!state.byeDpi.running) controller.startByeDpi(enableSystemProxyOverride = true)
+                                        onNavigateToScan()
+                                    },
+                                    enabled = state.byeDpi.available,
+                                    modifier = Modifier.weight(1f),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                                ) {
+                                    Text("Обход DPI", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -547,6 +597,47 @@ fun HomeScreen(
                         Icon(Icons.Rounded.FactCheck, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(5.dp))
                         Text("Проверить сайты", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    }
+                }
+            }
+        }
+
+        // --- 4.5. Активный ByeDPI (если включён) ---
+        if (state.byeDpi.running) {
+            WarpCard {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Rounded.Shield, contentDescription = null, tint = warp.ok, modifier = Modifier.size(18.dp))
+                        Column {
+                            Text(
+                                "ByeDPI активен · ${state.byeDpi.socksAddress}",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = warp.ok
+                            )
+                            Text(
+                                buildString {
+                                    append(state.byeDpi.presetTitle)
+                                    if (state.byeDpi.systemProxyEnabled) append(" · системный прокси ВКЛ")
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    TextButton(
+                        onClick = { controller.stopByeDpi() },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("Стоп", style = MaterialTheme.typography.labelMedium)
                     }
                 }
             }

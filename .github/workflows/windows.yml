@@ -100,7 +100,27 @@ jobs:
           Copy-Item $dll (Join-Path $resDir "wintun.dll") -Force
           Write-Host "Вшит подписанный wintun.dll → $resDir/wintun.dll"
 
-      - name: "Сборка портативного приложения (WarpScout.exe + встроенный JRE + Wintun)"
+      - name: "Загрузка официального ByeDPI v0.17.3 (ciadpi.exe x86_64)"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $byeZip = "$env:TEMP\byedpi-17.3-x86_64-w64.zip"
+          $byeDir = "$env:TEMP\byedpi-extract"
+          Invoke-WebRequest -Uri "https://github.com/hufrea/byedpi/releases/download/v0.17.3/byedpi-17.3-x86_64-w64.zip" -OutFile $byeZip
+          $zipHash = (Get-FileHash $byeZip -Algorithm SHA256).Hash.ToLower()
+          Write-Host "byedpi-17.3-x86_64-w64.zip SHA-256: $zipHash"
+          Expand-Archive -Path $byeZip -DestinationPath $byeDir -Force
+          $exe = Get-ChildItem -Path $byeDir -Recurse -Filter "ciadpi*.exe" | Select-Object -First 1
+          if (-not $exe) {
+            Write-Host "::error title=byedpi::Не найден ciadpi.exe в архиве byedpi-17.3-x86_64-w64.zip"
+            exit 1
+          }
+          $resDir = "desktop/src/main/resources/native/win32-x86-64"
+          New-Item -ItemType Directory -Force -Path $resDir | Out-Null
+          Copy-Item $exe.FullName (Join-Path $resDir "ciadpi.exe") -Force
+          Write-Host "Вшит ByeDPI ($($exe.Name), $($exe.Length) байт) → $resDir/ciadpi.exe"
+
+      - name: "Сборка портативного приложения (WarpScout.exe + встроенный JRE + Wintun + ByeDPI)"
         shell: pwsh
         run: |
           ./gradlew --no-daemon :desktop:createDistributable --stacktrace 2>&1 | Tee-Object -FilePath build-dist.log
@@ -128,6 +148,7 @@ jobs:
 
           New-Item -ItemType Directory -Force -Path "$appDir/bin" | Out-Null
           Copy-Item "desktop/src/main/resources/native/win32-x86-64/wintun.dll" "$appDir/bin/wintun.dll" -Force
+          Copy-Item "desktop/src/main/resources/native/win32-x86-64/ciadpi.exe" "$appDir/bin/ciadpi.exe" -Force
 
       - name: "Сборка MSI-установщика Windows (из патченного WarpScout.exe с UAC)"
         shell: pwsh
