@@ -125,12 +125,24 @@ object WgConf {
 
         fun intKey(k: String, def: Int) = iface.get(k)?.trim()?.toIntOrNull() ?: def
         val junkKeys = JUNK_KEYS.mapNotNull { k -> iface.get(k)?.let { k to parseJunk(it) } }
+        val commentProfile = text.lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("# профиль шума:", ignoreCase = true) }
+            ?.substringAfter(':')
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+        val i1Chunks = junkKeys.firstOrNull { it.first == "I1" }?.second ?: emptyList()
+        val i2Chunks = junkKeys.firstOrNull { it.first == "I2" }?.second ?: emptyList()
+        val jcVal = intKey("Jc", 4)
+        val inferredName = iface.get("AWGProfile")
+            ?: commentProfile
+            ?: if (i1Chunks.isEmpty() && i2Chunks.isEmpty() && jcVal == 0) "none" else "imported"
         val profile = JunkProfile(
-            name = iface.get("AWGProfile") ?: "imported",
-            i1 = junkKeys.firstOrNull { it.first == "I1" }?.second ?: emptyList(),
-            i2 = junkKeys.firstOrNull { it.first == "I2" }?.second ?: emptyList(),
+            name = inferredName,
+            i1 = i1Chunks,
+            i2 = i2Chunks,
             awg = AwgParams(
-                jc = intKey("Jc", 4), jmin = intKey("Jmin", 40), jmax = intKey("Jmax", 70),
+                jc = jcVal, jmin = intKey("Jmin", 40), jmax = intKey("Jmax", 70),
                 h1 = intKey("H1", 1), h2 = intKey("H2", 2), h3 = intKey("H3", 3), h4 = intKey("H4", 4),
                 s1 = intKey("S1", 0), s2 = intKey("S2", 0), s3 = intKey("S3", 0), s4 = intKey("S4", 0),
                 extra = iface.entries.filter { (k, _) ->
@@ -155,7 +167,8 @@ object WgConf {
             dns = iface.get("DNS")?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList(),
             mtu = intKey("MTU", 1280),
             persistentKeepalive = peer.get("PersistentKeepalive")?.trim()?.toIntOrNull(),
-            enableIpv6Address = addr.size > 1
+            enableIpv6Address = addr.size > 1,
+            comments = if (inferredName != "imported") listOf("профиль шума: $inferredName") else emptyList()
         )
     }
 

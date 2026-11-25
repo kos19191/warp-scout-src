@@ -279,19 +279,26 @@ class AutoTuner(
 
     var finalList = ordered
     if (spec.verifyThroughTunnel && tunnel != null && ordered.isNotEmpty() && spec.resources.isNotEmpty()) {
-        progress.log("Проверяю топ-${minOf(3, ordered.size)} кандидатов внутри туннеля…")
+        val toVerify = selectForVerification(ordered, maxCount = 6)
+        progress.log("Проверяю до ${toVerify.size} разнообразных кандидатов внутри туннеля…")
         val verified = ArrayList<Candidate>()
+        val verifiedKeys = HashSet<String>()
         val tv: TunnelVerifier = tunnel
-        for (cand in ordered.take(minOf(3, ordered.size))) {
+        var workingCount = 0
+        for (cand in toVerify) {
             if (progress.isCancelled()) break
+            // Если уже нашли 3 рабочих или 2 рабочих среди первых 3 проверенных — дальше не тратим время.
+            if (workingCount >= 3 || (verified.size >= 3 && workingCount >= 2)) break
             val results = runCatching { tv.verify(cand.config, spec.resources, spec.tunnelSettleMs) }
                 .getOrElse {
                     notes += "Туннель не поднялся (${it.javaClass.simpleName}) — пропускаю проверку изнутри."
                     emptyList()
                 }
             val ok = results.count { it.ok }
+            if (ok > 0) workingCount++
             progress.log("  ${cand.config.endpoint.render()} · ${cand.junk.name} → ${ok}/${spec.resources.size} ресурсов")
             val parts = Scoring.evaluate(cand.stats, cand.stats.replies > 0, ok, spec.resources.size, weights)
+            verifiedKeys.add(candidateKey(cand))
             verified.add(
                 cand.copy(
                     parts = parts,
@@ -301,11 +308,18 @@ class AutoTuner(
                 )
             )
         }
-        // Проверенные изнутри важнее непроверенных: «открылось 7 из 9 сайтов» — это факт, а
-        // сетевой балл — только догадка. Раньше списки перемешивались по баллу, и победить
-        // мог кандидат, который отвечал на handshake, но не пускал трафик.
-        finalList = verified.sortedByDescending { it.score } +
-            ordered.drop(verified.size).sortedByDescending { it.score }
+        // Трёхуровневый порядок: сначала доказанно рабочие (ok > 0), затем непроверенные,
+        // и в самом конце — проверенные с 0/N (доказанно зарезанные DPI после handshake).
+        val workingVerified = verified
+            .filter { it.resourcesOk > 0 }
+            .sortedWith(compareByDescending<Candidate> { it.resourcesOk }.thenByDescending { it.score })
+        val failedVerified = verified
+            .filter { it.resourcesOk <= 0 }
+            .sortedByDescending { it.score }
+        val unverified = ordered
+            .filterNot { candidateKey(it) in verifiedKeys }
+            .sortedByDescending { it.score }
+        finalList = workingVerified + unverified + failedVerified
     } else if (tunnel == null && spec.verifyThroughTunnel) {
         notes += "Сборка без встроенного туннеля: проверка «изнутри» пропущена, отранжировано по сетевым пробам."
     }
@@ -373,15 +387,16 @@ class AutoTuner(
             endpointsTested = endpointsTested,
             notes = notes
         )
-        // Победитель: сначала «сколько реально открылось», потом балл. Если изнутри ничего не
-        // проверяли — обычный максимум балла.
-        val verifiedAny = candidates.filter { it.resourcesTotal > 0 }
-        val best = if (verifiedAny.any { it.resourcesOk > 0 }) {
-            verifiedAny.sortedWith(
+        // Победитель: сначала доказанно рабочие изнутри (ok > 0), затем непроверенные живые,
+        // и только в крайнем случае (если все проверены и дали 0/N) — максимум балла.
+        val verifiedWorking = candidates.filter { it.resourcesTotal > 0 && it.resourcesOk > 0 }
+        val unverified = candidates.filter { it.resourcesTotal == 0 }
+        val best = when {
+            verifiedWorking.isNotEmpty() -> verifiedWorking.sortedWith(
                 compareByDescending<Candidate> { it.resourcesOk }.thenByDescending { it.score }
             ).firstOrNull()
-        } else {
-            candidates.maxByOrNull { it.score }
+            unverified.isNotEmpty() -> unverified.maxByOrNull { it.score }
+            else -> candidates.maxByOrNull { it.score }
         }
         val text = best?.let { WgConf.render(it.config) }
         progress.log(
@@ -400,6 +415,60 @@ class AutoTuner(
             )
         }
         return TuningResult(report, best?.config, text, account.source)
+    }
+
+    companion object {
+        internal fun candidateKey(c: Candidate): String =
+            c.config.endpoint.render() + "|" + c.junk.name
+
+        /**
+         * Отбирает разнообразную выборку для проверки изнутри туннеля:
+         *  1) по одному лучшему кандидату каждого вида маскировки (сначала замаскированные профили
+         *     SIP/QUIC/TLS/HTTP, затем `none`), предпочитая разные `IP:порт` — так «ловушка
+         *     рукопожатия» для чистого WireGuard (`none`) не съедает все слоты проверки;
+         *  2) оставшиеся слоты добираем лучшими кандидатами с ещё не проверенными `IP:порт`;
+         *  3) при малом числе точек (например, быстрый старт из 1 точки) добираем по баллу.
+         */
+        fun selectForVerification(ordered: List<Candidate>, maxCount: Int = 6): List<Candidate> {
+            if (maxCount <= 0 || ordered.isEmpty()) return emptyList()
+            val out = ArrayList<Candidate>(minOf(maxCount, ordered.size))
+            val pickedKeys = HashSet<String>()
+            val pickedEndpoints = HashSet<String>()
+
+            fun tryAdd(c: Candidate, requireNewEndpoint: Boolean): Boolean {
+                if (out.size >= maxCount) return false
+                val ep = c.config.endpoint.render()
+                if (requireNewEndpoint && ep in pickedEndpoints) return false
+                if (!pickedKeys.add(candidateKey(c))) return false
+                pickedEndpoints.add(ep)
+                out.add(c)
+                return true
+            }
+
+            // Шаг 1: по одному лучшему представителю каждого вида маскировки (сначала с обфускацией, потом none).
+            val distinctKinds = ordered.map { it.junk.kind }.distinct()
+                .sortedBy { if (it == dev.warpscout.core.model.JunkKind.NONE) 1 else 0 }
+            for (kind in distinctKinds) {
+                val ofKind = ordered.filter { it.junk.kind == kind }
+                val addedNewEp = ofKind.firstOrNull { tryAdd(it, requireNewEndpoint = true) } != null
+                if (!addedNewEp) {
+                    ofKind.firstOrNull { tryAdd(it, requireNewEndpoint = false) }
+                }
+            }
+
+            // Шаг 2: добираем разные endpoint'ы с максимальным баллом.
+            for (c in ordered) {
+                if (out.size >= maxCount) break
+                tryAdd(c, requireNewEndpoint = true)
+            }
+
+            // Шаг 3: если уникальных endpoint'ов меньше maxCount — добираем оставшихся по баллу.
+            for (c in ordered) {
+                if (out.size >= maxCount) break
+                tryAdd(c, requireNewEndpoint = false)
+            }
+            return out
+        }
     }
 }
 

@@ -138,6 +138,7 @@ class DesktopController(
     }
 
     private val scanCancel = AtomicBoolean(false)
+    private val connectInFlight = AtomicBoolean(false)
     private var scheduledTune: ScheduledFuture<*>? = null
 
     val listStore = FileListStore(store.paths.listsDir)
@@ -308,15 +309,24 @@ class DesktopController(
         }
     }
 
-    fun connectActive() {
+    fun connectActive(forceReconnect: Boolean = false) {
+        if (!forceReconnect && !connectInFlight.compareAndSet(false, true)) {
+            appendLog("Подключение уже выполняется — повторный запуск пропущен")
+            return
+        }
+        if (forceReconnect) {
+            connectInFlight.set(true)
+        }
         val s = _state.value
         val confText = s.activeConfText ?: s.shortlist.firstOrNull()?.confText
         if (confText.isNullOrBlank()) {
+            connectInFlight.set(false)
             runScan(autoConnectAfter = true)
             return
         }
         val parsed = WgConf.toWarpConfig("WarpScout-Active", confText)
         if (parsed == null) {
+            connectInFlight.set(false)
             showBanner("Сохранённый конфиг повреждён — запускаю новый подбор", isError = true)
             runScan(autoConnectAfter = true)
             return
@@ -329,31 +339,35 @@ class DesktopController(
 
         val secondExit = buildSecondExitSpec(s.settings)
         worker.execute {
-            if (s.settings.backendMode == TunnelBackendMode.BUILTIN_WINTUN) {
-                val elevated = runCatching { runner.isElevated() }.getOrDefault(false)
-                _state.update { it.copy(isElevated = elevated) }
-                if (!elevated && s.settings.autoElevateUac && WindowsAutostart.isWindows()) {
-                    appendLog("Запрашиваю права администратора (UAC) для запуска встроенного туннеля…")
-                    if (onRelaunchElevated(listOf("--autoconnect"))) {
-                        return@execute
+            try {
+                if (s.settings.backendMode == TunnelBackendMode.BUILTIN_WINTUN) {
+                    val elevated = runCatching { runner.isElevated() }.getOrDefault(false)
+                    _state.update { it.copy(isElevated = elevated) }
+                    if (!elevated && s.settings.autoElevateUac && WindowsAutostart.isWindows()) {
+                        appendLog("Запрашиваю права администратора (UAC) для запуска встроенного туннеля…")
+                        if (onRelaunchElevated(listOf("--autoconnect"))) {
+                            return@execute
+                        }
+                    }
+                    val ok = nativeTunnel.connect(appliedPrimary, fallbacks, secondExit)
+                    if (ok) {
+                        val compactConf = WgConf.render(parsed)
+                        store.saveActiveConfigText(compactConf)
+                        _state.update { it.copy(activeConfText = compactConf) }
+                        onTrayNotify("WarpScout подключён", "Точка: ${nativeTunnel.snapshot.activeEndpoint}")
+                    }
+                } else {
+                    val engine = resolveFreshEngine()
+                    val ok = externalAwgTunnel.connect(engine, appliedPrimary, fallbacks, secondExit)
+                    if (ok) {
+                        val compactConf = WgConf.render(parsed)
+                        store.saveActiveConfigText(compactConf)
+                        _state.update { it.copy(activeConfText = compactConf) }
+                        onTrayNotify("WarpScout подключён", "Точка: ${externalAwgTunnel.snapshot.activeEndpoint}")
                     }
                 }
-                val ok = nativeTunnel.connect(appliedPrimary, fallbacks, secondExit)
-                if (ok) {
-                    val compactConf = WgConf.render(parsed)
-                    store.saveActiveConfigText(compactConf)
-                    _state.update { it.copy(activeConfText = compactConf) }
-                    onTrayNotify("WarpScout подключён", "Точка: ${nativeTunnel.snapshot.activeEndpoint}")
-                }
-            } else {
-                val engine = resolveFreshEngine()
-                val ok = externalAwgTunnel.connect(engine, appliedPrimary, fallbacks, secondExit)
-                if (ok) {
-                    val compactConf = WgConf.render(parsed)
-                    store.saveActiveConfigText(compactConf)
-                    _state.update { it.copy(activeConfText = compactConf) }
-                    onTrayNotify("WarpScout подключён", "Точка: ${externalAwgTunnel.snapshot.activeEndpoint}")
-                }
+            } finally {
+                connectInFlight.set(false)
             }
         }
     }
@@ -388,7 +402,7 @@ class DesktopController(
         store.saveActiveConfigText(entry.confText)
         _state.update { it.copy(activeConfText = entry.confText) }
         appendLog("Выбрана точка #${index + 1}: ${entry.endpoint} (${entry.junkName})")
-        connectActive()
+        connectActive(forceReconnect = true)
     }
 
     fun clearShortlist() {
@@ -719,7 +733,7 @@ class DesktopController(
         if (currentTunnelUp) {
             appendLog("Настройки изменены — переподключаю туннель…")
             showBanner("Настройки сохранены — переподключаю туннель")
-            connectActive()
+            connectActive(forceReconnect = true)
         } else {
             showBanner("Настройки сохранены — применятся при следующем подключении")
         }

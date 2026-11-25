@@ -31,5 +31,26 @@ class WindowsIpHelperTest {
         assertNotNull(gw, "GetBestRoute2 should return active Windows default route")
         assertTrue(gw!!.interfaceLuid != 0L || gw.interfaceIndex > 0)
         assertNotNull(CidrMath.parseIpv4(gw.nextHop), "NextHop must be valid IPv4: ${gw.nextHop}")
+        if (gw.interfaceLuid != 0L) {
+            val idx = WindowsIpHelper.luidToIndex(gw.interfaceLuid)
+            assertEquals(gw.interfaceIndex, idx, "ConvertInterfaceLuidToIndex must match GetBestRoute2 interfaceIndex")
+        }
+    }
+
+    @Test
+    fun `MIB_UNICASTIPADDRESS_ROW byte offsets match real Windows iphlpapi InitializeUnicastIpAddressEntry`() {
+        assumeTrue(WindowsAutostart.isWindows(), "Windows-only Win32 MIB_UNICASTIPADDRESS_ROW verification")
+        val api = WindowsIpHelper.loadApi()
+        val buf = Memory(WindowsIpHelper.UNICAST_ROW_SIZE.toLong())
+        buf.clear()
+
+        api.InitializeUnicastIpAddressEntry(buf)
+
+        // Windows SDK: InitializeUnicastIpAddressEntry ставит Valid/PreferredLifetime = 0xFFFFFFFF (-1),
+        // OnLinkPrefixLength = 0xFF (-1), DadState = IpDadStatePreferred (4).
+        assertEquals(-1, buf.getInt(WindowsIpHelper.OFF_UNI_VALID_LIFETIME), "ValidLifetime offset mismatch")
+        assertEquals(-1, buf.getInt(WindowsIpHelper.OFF_UNI_PREFERRED_LIFETIME), "PreferredLifetime offset mismatch")
+        assertEquals((-1).toByte(), buf.getByte(WindowsIpHelper.OFF_UNI_PREFIX_LEN), "OnLinkPrefixLength offset mismatch")
+        assertEquals(4, buf.getInt(WindowsIpHelper.OFF_UNI_DAD_STATE), "DadState offset mismatch")
     }
 }

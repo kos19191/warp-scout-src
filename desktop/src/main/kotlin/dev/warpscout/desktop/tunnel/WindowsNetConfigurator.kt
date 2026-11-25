@@ -91,12 +91,69 @@ class WindowsNetConfigurator(
         ipv4: String,
         ipv6: String?,
         mtu: Int,
-        dnsServers: List<String>
+        dnsServers: List<String>,
+        adapterLuid: Long? = null
     ): CommandResult {
-        val safeName = psEscape(adapterName)
         val cleanV4 = ipv4.substringBefore('/').trim()
         val cleanV6 = ipv6?.substringBefore('/')?.trim()?.takeIf { it.isNotBlank() }
         val dnsFiltered = dnsServers.map { it.trim() }.filter { it.isNotEmpty() }
+
+        // Быстрый нативный путь (~120 мс вместо 5–6 с запуска PowerShell):
+        // IPv4/IPv6 через iphlpapi.dll CreateUnicastIpAddressEntry, MTU/метрика/DNS через netsh.exe.
+        if (adapterLuid != null && adapterLuid != 0L && WindowsAutostart.isWindows()) {
+            val fastOk = runCatching {
+                val ipOk = WindowsIpHelper.addUnicastIpv4(adapterLuid, cleanV4, 32)
+                if (!ipOk) return@runCatching null
+                if (cleanV6 != null) {
+                    runCatching { WindowsIpHelper.addUnicastIpv6(adapterLuid, cleanV6, 128) }
+                }
+                val ifIndex = WindowsIpHelper.luidToIndex(adapterLuid) ?: return@runCatching null
+                val idxStr = ifIndex.toString()
+
+                runner.run(
+                    listOf("netsh.exe", "interface", "ipv4", "set", "subinterface", idxStr, "mtu=$mtu", "store=active"),
+                    timeoutMs = 4000L
+                )
+                runner.run(
+                    listOf("netsh.exe", "interface", "ipv4", "set", "interface", idxStr, "metric=5"),
+                    timeoutMs = 4000L
+                )
+                val dnsV4 = dnsFiltered.filter { ':' !in it }
+                if (dnsV4.isNotEmpty()) {
+                    runner.run(
+                        listOf("netsh.exe", "interface", "ipv4", "set", "dnsservers", "name=$idxStr", "source=static", "address=${dnsV4[0]}", "register=none", "validate=no"),
+                        timeoutMs = 4000L
+                    )
+                    dnsV4.drop(1).forEachIndexed { i, dns ->
+                        runner.run(
+                            listOf("netsh.exe", "interface", "ipv4", "add", "dnsservers", "name=$idxStr", "address=$dns", "index=${i + 2}", "validate=no"),
+                            timeoutMs = 4000L
+                        )
+                    }
+                }
+                if (cleanV6 != null) {
+                    runner.run(
+                        listOf("netsh.exe", "interface", "ipv6", "set", "subinterface", idxStr, "mtu=$mtu", "store=active"),
+                        timeoutMs = 4000L
+                    )
+                    runner.run(
+                        listOf("netsh.exe", "interface", "ipv6", "set", "interface", idxStr, "metric=5"),
+                        timeoutMs = 4000L
+                    )
+                    val dnsV6 = dnsFiltered.filter { ':' in it }
+                    if (dnsV6.isNotEmpty()) {
+                        runner.run(
+                            listOf("netsh.exe", "interface", "ipv6", "set", "dnsservers", "name=$idxStr", "source=static", "address=${dnsV6[0]}", "register=none", "validate=no"),
+                            timeoutMs = 4000L
+                        )
+                    }
+                }
+                CommandResult(0, "ifIndex=$ifIndex (native)", "")
+            }.getOrNull()
+            if (fastOk != null) return fastOk
+        }
+
+        val safeName = psEscape(adapterName)
         val dnsArrayPs = dnsFiltered.joinToString(", ") { "'${psEscape(it)}'" }
 
         val script = buildString {
@@ -126,6 +183,9 @@ class WindowsNetConfigurator(
 
     /** Проверяет, есть ли у физического подключения пользователя глобальный IPv6-маршрут по умолчанию. */
     fun hasPhysicalIpv6DefaultRoute(): Boolean {
+        if (WindowsAutostart.isWindows()) {
+            return runCatching { WindowsIpHelper.hasBestIpv6Route() }.getOrDefault(false)
+        }
         val ps = """
             ${'$'}r = Get-NetRoute -DestinationPrefix '::/0' -AddressFamily IPv6 -ErrorAction SilentlyContinue |
                 Where-Object { ${'$'}_.NextHop -and ${'$'}_.NextHop -ne '::' } |

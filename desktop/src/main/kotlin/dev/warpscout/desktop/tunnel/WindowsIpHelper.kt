@@ -4,6 +4,8 @@ import com.sun.jna.Library
 import com.sun.jna.Memory
 import com.sun.jna.Native
 import com.sun.jna.Pointer
+import com.sun.jna.ptr.IntByReference
+import com.sun.jna.ptr.LongByReference
 import java.net.Inet6Address
 import java.net.InetAddress
 
@@ -13,6 +15,9 @@ import java.net.InetAddress
  * Даёт:
  *  • мгновенное определение физического шлюза (`GetBestRoute2`, ~0.2 мс, без PowerShell/WMI,
  *    работает на Ethernet, Wi-Fi, PPPoE и мобильных модемах);
+ *  • мгновенное назначение IPv4/IPv6 на Wintun-адаптер (`InitializeUnicastIpAddressEntry` +
+ *    `CreateUnicastIpAddressEntry`) и получение `ifIndex` (`ConvertInterfaceLuidToIndex`)
+ *    без 5-секундного запуска PowerShell;
  *  • быструю установку маршрутов на адаптер Wintun (`CreateIpForwardEntry2`) с привязкой к
  *    `InterfaceLuid` — при закрытии адаптера Windows автоматически удаляет все маршруты;
  *  • добавление и удаление `/32` bypass-маршрутов до IP точек WARP (`CreateIpForwardEntry2` /
@@ -22,6 +27,9 @@ interface IpHlpApi : Library {
     fun InitializeIpForwardEntry(row: Pointer)
     fun CreateIpForwardEntry2(row: Pointer): Int
     fun DeleteIpForwardEntry2(row: Pointer): Int
+    fun InitializeUnicastIpAddressEntry(row: Pointer)
+    fun CreateUnicastIpAddressEntry(row: Pointer): Int
+    fun ConvertInterfaceLuidToIndex(interfaceLuid: LongByReference, interfaceIndex: IntByReference): Int
     fun GetBestRoute2(
         interfaceLuid: Pointer?,
         interfaceIndex: Int,
@@ -77,6 +85,26 @@ object WindowsIpHelper {
     internal const val OFF_PREFERRED_LIFETIME = 80L
     internal const val OFF_METRIC = 84L
 
+    /**
+     * Размер и смещения полей структуры `MIB_UNICASTIPADDRESS_ROW` (Windows SDK `netioapi.h`, x64):
+     *  • 0..27  : Address (SOCKADDR_INET: family@0, sin_addr@4 / sin6_addr@8)
+     *  • 32..39 : InterfaceLuid (NET_LUID / ULONG64)
+     *  • 40..43 : InterfaceIndex (ULONG)
+     *  • 52..55 : ValidLifetime (ULONG)
+     *  • 56..59 : PreferredLifetime (ULONG)
+     *  • 60     : OnLinkPrefixLength (UINT8)
+     *  • 64..67 : DadState (NL_DAD_STATE; InitializeUnicastIpAddressEntry ставит IpDadStatePreferred=4)
+     */
+    internal const val UNICAST_ROW_SIZE = 80
+    internal const val OFF_UNI_FAMILY = 0L
+    internal const val OFF_UNI_V4 = 4L
+    internal const val OFF_UNI_V6 = 8L
+    internal const val OFF_UNI_LUID = 32L
+    internal const val OFF_UNI_VALID_LIFETIME = 52L
+    internal const val OFF_UNI_PREFERRED_LIFETIME = 56L
+    internal const val OFF_UNI_PREFIX_LEN = 60L
+    internal const val OFF_UNI_DAD_STATE = 64L
+
     private const val AF_INET: Short = 2
     private const val AF_INET6: Short = 23
     private const val NO_ERROR = 0
@@ -92,6 +120,45 @@ object WindowsIpHelper {
         val api = Native.load("iphlpapi", IpHlpApi::class.java)
         cachedApi = api
         return api
+    }
+
+    /** Преобразует `NET_LUID` адаптера Wintun в системный `ifIndex` за ~0.1 мс (без PowerShell). */
+    fun luidToIndex(adapterLuid: Long): Int? {
+        if (adapterLuid == 0L) return null
+        val api = loadApi()
+        val luidRef = LongByReference(adapterLuid)
+        val idxRef = IntByReference()
+        val rc = api.ConvertInterfaceLuidToIndex(luidRef, idxRef)
+        return if (rc == NO_ERROR && idxRef.value > 0) idxRef.value else null
+    }
+
+    /** Назначает IPv4-адрес на адаптер Wintun напрямую через `CreateUnicastIpAddressEntry` (~1 мс). */
+    fun addUnicastIpv4(adapterLuid: Long, ipv4: String, prefixLength: Int = 32): Boolean {
+        val ipLong = CidrMath.parseIpv4(ipv4.substringBefore('/').trim()) ?: return false
+        val api = loadApi()
+        val buf = Memory(UNICAST_ROW_SIZE.toLong()).apply { clear() }
+        api.InitializeUnicastIpAddressEntry(buf)
+        buf.setShort(OFF_UNI_FAMILY, AF_INET)
+        buf.write(OFF_UNI_V4, ipv4Bytes(ipLong), 0, 4)
+        buf.setLong(OFF_UNI_LUID, adapterLuid)
+        buf.setByte(OFF_UNI_PREFIX_LEN, prefixLength.toByte())
+        val rc = api.CreateUnicastIpAddressEntry(buf)
+        return rc == NO_ERROR || rc == ERROR_OBJECT_ALREADY_EXISTS
+    }
+
+    /** Назначает IPv6-адрес на адаптер Wintun напрямую через `CreateUnicastIpAddressEntry` (~1 мс). */
+    fun addUnicastIpv6(adapterLuid: Long, ipv6: String, prefixLength: Int = 128): Boolean {
+        val clean = ipv6.substringBefore('/').trim()
+        val addr = runCatching { InetAddress.getByName(clean) as? Inet6Address }.getOrNull() ?: return false
+        val api = loadApi()
+        val buf = Memory(UNICAST_ROW_SIZE.toLong()).apply { clear() }
+        api.InitializeUnicastIpAddressEntry(buf)
+        buf.setShort(OFF_UNI_FAMILY, AF_INET6)
+        buf.write(OFF_UNI_V6, addr.address, 0, 16)
+        buf.setLong(OFF_UNI_LUID, adapterLuid)
+        buf.setByte(OFF_UNI_PREFIX_LEN, prefixLength.toByte())
+        val rc = api.CreateUnicastIpAddressEntry(buf)
+        return rc == NO_ERROR || rc == ERROR_OBJECT_ALREADY_EXISTS
     }
 
     /**
@@ -117,6 +184,19 @@ object WindowsIpHelper {
         val nextHop = "${nhBytes[0].toInt() and 0xFF}.${nhBytes[1].toInt() and 0xFF}.${nhBytes[2].toInt() and 0xFF}.${nhBytes[3].toInt() and 0xFF}"
         if (luid == 0L && ifIndex <= 0) return null
         return PhysicalGateway(nextHop = nextHop, interfaceIndex = ifIndex, interfaceLuid = luid)
+    }
+
+    /** Мгновенно проверяет, есть ли у системы рабочий глобальный IPv6-маршрут (`GetBestRoute2`, ~0.2 мс). */
+    fun hasBestIpv6Route(targetIp6: String = "2606:4700:4700::1111"): Boolean {
+        val addr = runCatching { InetAddress.getByName(targetIp6) as? Inet6Address }.getOrNull() ?: return false
+        val api = loadApi()
+        val destSock = Memory(SOCKADDR_INET_SIZE.toLong()).apply { clear() }
+        destSock.setShort(0L, AF_INET6)
+        destSock.write(8L, addr.address, 0, 16)
+
+        val bestRoute = Memory(ROW_SIZE.toLong()).apply { clear() }
+        val bestSrc = Memory(SOCKADDR_INET_SIZE.toLong()).apply { clear() }
+        return api.GetBestRoute2(null, 0, null, destSock, 0, bestRoute, bestSrc) == NO_ERROR
     }
 
     /** Добавляет `/32` bypass-маршрут к конкретному IPv4 через физический интерфейс (включая PPPoE). */

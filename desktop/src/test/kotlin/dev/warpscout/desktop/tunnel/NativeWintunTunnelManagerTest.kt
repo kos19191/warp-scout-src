@@ -211,4 +211,29 @@ class NativeWintunTunnelManagerTest {
             manager.shutdown()
         }
     }
+
+    @Test
+    fun `failover queue prioritizes obfuscated junk profile over duplicate none`() {
+        val serverPub = Crypto.publicOf(ByteArray(32) { (it + 5).toByte() })
+        val primaryNone = testConfig(Endpoint("162.159.192.10", 8886), serverPub)
+        val fallbackNone = testConfig(Endpoint("162.159.195.6", 500), serverPub)
+        val fallbackSip = testConfig(Endpoint("162.159.192.10", 880), serverPub).copy(
+            junk = dev.warpscout.core.junk.JunkLibrary.sip()
+        )
+        val manager = NativeWintunTunnelManager(
+            nativeDir = File(System.getProperty("java.io.tmpdir")),
+            runner = FakeCommandRunner(elevated = true),
+            requireElevationCheck = false,
+            skipNetConfig = true
+        )
+        try {
+            val q = manager.buildQueue(primaryNone, listOf(fallbackNone, fallbackSip))
+            assertEquals("162.159.192.10:8886", q[0].endpoint.render())
+            assertEquals("sip-invite", q[1].junk.name, "Second failover slot must switch away from none")
+            assertEquals("162.159.192.10:880", q[1].endpoint.render())
+            assertTrue(q.drop(1).any { it.junk.name != "none" }, "Emergency fallbacks must include obfuscation")
+        } finally {
+            manager.shutdown()
+        }
+    }
 }

@@ -60,16 +60,21 @@ object TraceAndSpeed {
     }
 
     /** Определяет регион выхода WARP, признак `warp=on` и внешний IP. */
-    fun probeExitInfo(http: HttpClient = HttpClient(timeoutMs = 5000)): ExitInfo {
+    fun probeExitInfo(http: HttpClient = HttpClient(timeoutMs = 4500)): ExitInfo {
         val traceMap = runCatching {
             val r = http.get("https://www.cloudflare.com/cdn-cgi/trace")
             if (r.status in 200..299) parseCloudflareTrace(r.body) else emptyMap()
         }.getOrDefault(emptyMap())
 
-        val ipInfo = runCatching {
-            val r = http.get("https://ipinfo.io/json")
-            if (r.status in 200..299) parseIpInfo(r.body) else Triple("", "", "")
-        }.getOrDefault(Triple("", "", ""))
+        // Если даже cloudflare/trace не ответил — не тратим ещё 5–10 секунд на ipinfo.io.
+        val ipInfo = if (traceMap.isNotEmpty()) {
+            runCatching {
+                val r = http.get("https://ipinfo.io/json")
+                if (r.status in 200..299) parseIpInfo(r.body) else Triple("", "", "")
+            }.getOrDefault(Triple("", "", ""))
+        } else {
+            Triple("", "", "")
+        }
 
         val warp = traceMap["warp"].orEmpty().equals("on", ignoreCase = true) ||
             traceMap["warp"].orEmpty().equals("plus", ignoreCase = true)

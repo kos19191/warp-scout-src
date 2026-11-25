@@ -1,6 +1,7 @@
 package dev.warpscout.desktop.tunnel
 
 import dev.warpscout.core.config.WgConf
+import dev.warpscout.core.junk.JunkLibrary
 import dev.warpscout.core.model.Endpoint
 import dev.warpscout.core.model.ResourceCheck
 import dev.warpscout.core.model.ResourceResult
@@ -229,7 +230,8 @@ class NativeWintunTunnelManager(
                             ipv4 = config.account.ipv4,
                             ipv6 = if (config.enableIpv6Address) config.account.ipv6 else null,
                             mtu = config.mtu,
-                            dnsServers = config.dns
+                            dnsServers = config.dns,
+                            adapterLuid = tun.adapterLuid
                         )
                         if (!cfgRes.ok) {
                             onLog("проверка изнутри: ошибка настройки адаптера (${cfgRes.combined.take(120)})")
@@ -256,7 +258,7 @@ class NativeWintunTunnelManager(
                         return emptyList()
                     }
                     if (!skipNetConfig) {
-                        // Для короткой 5-секундной проверки кандидатов достаточно 2 маршрутов (0.0.0.0/1 + 128.0.0.0/1)
+                        // Для короткой проверки кандидатов достаточно 2 маршрутов (0.0.0.0/1 + 128.0.0.0/1)
                         // с обязательным вырезанием IP самой точки, чтобы исключить петлю маршрутизации.
                         netConfig.applyRoutes(
                             adapterName = PROBE_ADAPTER_NAME,
@@ -267,9 +269,21 @@ class NativeWintunTunnelManager(
                         )
                     }
                     if (settleMs > 0) {
-                        runCatching { Thread.sleep(minOf(settleMs.toLong(), 2000L)) }
+                        runCatching { Thread.sleep(minOf(settleMs.toLong(), 1500L)) }
                     }
-                    val prober = ResourceProber(HttpClient(timeoutMs = 6000))
+                    // Быстрый тест «идут ли вообще данные сквозь туннель» (~4 с вместо 30–40 с таймаутов
+                    // по всем 10 сайтам, если DPI пропускает handshake, но глушит транспорт).
+                    if (!skipNetConfig) {
+                        val quickTrace = runCatching {
+                            HttpClient(timeoutMs = 3500).get("https://1.1.1.1/cdn-cgi/trace")
+                        }.getOrNull()
+                        val hasData = (quickTrace != null && quickTrace.status in 200..299) || plane.bytesDown > 128L
+                        if (!hasData) {
+                            onLog("проверка изнутри: ${config.endpoint.render()} · ${config.junk.name} — handshake прошёл, но трафик не идёт (0 Б)")
+                            return checks.map { ResourceResult(check = it, ok = false, errorClass = "no_tunnel_traffic") }
+                        }
+                    }
+                    val prober = ResourceProber(HttpClient(timeoutMs = 5500))
                     return prober.checkAll(checks)
                 } catch (e: Exception) {
                     onLog("проверка изнутри (${config.endpoint.render()}): ${e.message}")
@@ -372,7 +386,8 @@ class NativeWintunTunnelManager(
                     ipv4 = cfg.account.ipv4,
                     ipv6 = if (cfg.enableIpv6Address) cfg.account.ipv6 else null,
                     mtu = cfg.mtu,
-                    dnsServers = cfg.dns
+                    dnsServers = cfg.dns,
+                    adapterLuid = tun.adapterLuid
                 )
                 if (!cfgRes.ok) {
                     val err = cfgRes.combined.ifBlank { "код ${cfgRes.exitCode}" }
@@ -538,9 +553,11 @@ class NativeWintunTunnelManager(
             }
 
             // Асинхронно определяем регион выхода и warp=on.
+            // Если handshake прошёл, но трафик полностью заблокирован DPI (warp=off и 0 входящих байт),
+            // сразу переключаемся на следующую точку (~5 с вместо 45 с ожидания StallDetector).
             scheduler.execute {
                 val info = runCatching { exitProber() }.getOrDefault(ExitInfo())
-                if (snapshot.isUp && snapshot.activeEndpoint == cfg.endpoint.render()) {
+                if (snapshot.isUp && snapshot.activeEndpoint == cfg.endpoint.render() && !cancelRequested.get()) {
                     onLog("Регион выхода: ${info.regionLabel()} · warp=${if (info.warpOn) "on" else "off"}${if (info.ip.isNotBlank()) " · IP ${info.ip}" else ""}")
                     update { cur ->
                         cur.copy(
@@ -550,6 +567,11 @@ class NativeWintunTunnelManager(
                                 if (info.warpOn) append(" · warp=on")
                             }
                         )
+                    }
+                    val noTraffic = !info.warpOn && info.ip.isBlank() && plane1.bytesDown < 128L
+                    if (noTraffic && !skipNetConfig && activeQueue.size > 1) {
+                        onLog("Точка ${cfg.endpoint.render()} (${cfg.junk.name}) не пропускает трафик (warp=off, получено ${plane1.bytesDown} Б) — переключаю на следующую")
+                        triggerAutoFailover()
                     }
                 }
             }
@@ -667,7 +689,7 @@ class NativeWintunTunnelManager(
         }
     }
 
-    private fun buildQueue(primary: WarpConfig, fallbacks: List<WarpConfig>): List<WarpConfig> {
+    internal fun buildQueue(primary: WarpConfig, fallbacks: List<WarpConfig>): List<WarpConfig> {
         val seen = LinkedHashSet<String>()
         val out = ArrayList<WarpConfig>(MAX_FAILOVER_QUEUE)
         fun addIfNew(cfg: WarpConfig) {
@@ -676,9 +698,24 @@ class NativeWintunTunnelManager(
             if (seen.add(key)) out.add(cfg)
         }
         addIfNew(primary)
-        fallbacks.forEach { addIfNew(it) }
-        for (ep in WindowsTunnelManager.FALLBACK_ENDPOINTS) {
-            addIfNew(primary.copy(name = "WARP-Fallback ${ep.render()}", endpoint = ep))
+
+        // Сначала добавляем запасные точки с ДРУГИМ профилем шума: если DPI зарезал `none`,
+        // автопереключение сразу перейдёт на `sip-invite`/`quic:*`/`tls-fixed`, а не на второй `none`.
+        val diffJunk = fallbacks.filter { it.junk.name != primary.junk.name }
+        val sameJunk = fallbacks.filter { it.junk.name == primary.junk.name }
+        diffJunk.forEach { addIfNew(it) }
+        sameJunk.forEach { addIfNew(it) }
+
+        // Аварийные запасные точки: если основной профиль был без маскировки (`none`),
+        // чередуем маскировку (sip-invite / tls-fixed), чтобы failover мог обойти DPI.
+        val emergencyJunks = if (primary.junk.name == "none") {
+            listOf(JunkLibrary.sip(), JunkLibrary.tlsFixed(), JunkLibrary.quic("deepseek.com", level = 3, seed = 7L))
+        } else {
+            listOf(primary.junk, JunkLibrary.sip(), JunkLibrary.tlsFixed())
+        }
+        WindowsTunnelManager.FALLBACK_ENDPOINTS.forEachIndexed { idx, ep ->
+            val j = emergencyJunks[idx % emergencyJunks.size]
+            addIfNew(primary.copy(name = "WARP-Fallback ${ep.render()}", endpoint = ep, junk = j))
         }
         return out
     }

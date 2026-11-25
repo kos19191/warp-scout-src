@@ -33,6 +33,13 @@ import javax.imageio.ImageIO
  * • Подключает системный трей и корректно останавливает туннель при выходе.
  */
 fun main(args: Array<String>) {
+    // Отключаем кэширование DNS в JVM (по умолчанию 30 с), чтобы проверки сайтов и выходного IP
+    // сразу после поднятия/переключения туннеля не получали устаревший/подменённый DNS провайдера.
+    runCatching {
+        java.security.Security.setProperty("networkaddress.cache.ttl", "0")
+        java.security.Security.setProperty("networkaddress.cache.negative.ttl", "0")
+    }
+
     val startMinimized = args.any { it.equals("--minimized", ignoreCase = true) }
     val autoConnect = args.any { it.equals("--autoconnect", ignoreCase = true) }
     val noAutoElevate = args.any { it.equals("--no-elevate", ignoreCase = true) }

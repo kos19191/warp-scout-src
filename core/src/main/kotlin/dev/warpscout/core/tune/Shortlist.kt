@@ -25,8 +25,15 @@ object Shortlist {
     fun pick(candidates: List<Candidate>, limit: Int = LIMIT): List<Candidate> {
         if (limit <= 0 || candidates.isEmpty()) return emptyList()
         // Мёртвых не предлагаем: «переключиться» должно вести на что-то, что хотя бы ответило.
+        // Кандидатов, проверенных изнутри туннеля с результатом 0/N (доказанно не пропускают трафик,
+        // например чистый WireGuard под DPI), исключаем, пока есть рабочие или непроверенные варианты.
         val alive = candidates.filter { it.stats.replies > 0 || it.resourcesOk > 0 }
-        val pool = (if (alive.isNotEmpty()) alive else candidates).sortedWith(rank())
+        val notBroken = alive.filterNot { isProvenBroken(it) }
+        val pool = (when {
+            notBroken.isNotEmpty() -> notBroken
+            alive.isNotEmpty() -> alive
+            else -> candidates
+        }).sortedWith(rank())
 
         val result = ArrayList<Candidate>(limit)
         val endpoints = HashSet<String>()
@@ -45,12 +52,25 @@ object Shortlist {
     }
 
     /**
-     * Тот же порядок, что у победителя подбора: проверенное изнутри важнее непроверенного, дальше
-     * число открытых сайтов, дальше балл. Без этого на первое место мог попасть кандидат, который
-     * отвечает на handshake, но не пускает трафик.
+     * Трёхуровневый приоритет:
+     *  • 2 — проверен изнутри туннеля и реально открыл ресурсы (`ok > 0`);
+     *  • 1 — не проверялся изнутри (`total == 0`), но ответил на handshake;
+     *  • 0 — проверен изнутри и доказанно не пропустил ни одного ресурса (`0/N`).
+     *
+     * Раньше проверялось только `resourcesTotal > 0`, из-за чего доказанно мёртвые `0/10`
+     * обгоняли рабочие непроверенные варианты и попадали на 1–2 места.
      */
+    private fun verifyTier(c: Candidate): Int = when {
+        c.resourcesTotal > 0 && c.resourcesOk > 0 -> 2
+        c.resourcesTotal == 0 -> 1
+        else -> 0
+    }
+
+    private fun isProvenBroken(c: Candidate): Boolean =
+        c.resourcesTotal > 0 && c.resourcesOk <= 0
+
     private fun rank(): Comparator<Candidate> =
-        compareByDescending<Candidate> { it.resourcesTotal > 0 }
+        compareByDescending<Candidate> { verifyTier(it) }
             .thenByDescending { it.resourcesOk }
             .thenByDescending { it.score }
 
