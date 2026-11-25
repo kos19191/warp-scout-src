@@ -256,10 +256,12 @@ class NativeWintunTunnelManager(
                         return emptyList()
                     }
                     if (!skipNetConfig) {
+                        // Для короткой 5-секундной проверки кандидатов достаточно 2 маршрутов (0.0.0.0/1 + 128.0.0.0/1).
                         netConfig.applyRoutes(
                             adapterName = PROBE_ADAPTER_NAME,
-                            allowedIpsCsv = config.allowedIps,
-                            enableIpv6 = config.enableIpv6Address
+                            allowedIpsCsv = "0.0.0.0/0",
+                            enableIpv6 = false,
+                            adapterLuid = tun.adapterLuid
                         )
                     }
                     if (settleMs > 0) {
@@ -499,7 +501,8 @@ class NativeWintunTunnelManager(
                     adapterName = ADAPTER_NAME,
                     allowedIpsCsv = cfg.allowedIps,
                     extraCidrs = if (secondUp) exitRouter.cidrs else emptyList(),
-                    enableIpv6 = cfg.enableIpv6Address
+                    enableIpv6 = cfg.enableIpv6Address,
+                    adapterLuid = tun.adapterLuid
                 )
                 if (!routeRes.ok) {
                     onLog("Предупреждение при установке маршрутов: ${routeRes.combined.take(160)}")

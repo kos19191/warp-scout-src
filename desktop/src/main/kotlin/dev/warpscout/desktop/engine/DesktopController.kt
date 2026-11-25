@@ -337,16 +337,18 @@ class DesktopController(
                 }
                 val ok = nativeTunnel.connect(appliedPrimary, fallbacks, secondExit)
                 if (ok) {
-                    store.saveActiveConfigText(WgConf.render(appliedPrimary))
-                    _state.update { it.copy(activeConfText = WgConf.render(appliedPrimary)) }
+                    val compactConf = WgConf.render(parsed)
+                    store.saveActiveConfigText(compactConf)
+                    _state.update { it.copy(activeConfText = compactConf) }
                     onTrayNotify("WarpScout подключён", "Точка: ${nativeTunnel.snapshot.activeEndpoint}")
                 }
             } else {
                 val engine = resolveFreshEngine()
                 val ok = externalAwgTunnel.connect(engine, appliedPrimary, fallbacks, secondExit)
                 if (ok) {
-                    store.saveActiveConfigText(WgConf.render(appliedPrimary))
-                    _state.update { it.copy(activeConfText = WgConf.render(appliedPrimary)) }
+                    val compactConf = WgConf.render(parsed)
+                    store.saveActiveConfigText(compactConf)
+                    _state.update { it.copy(activeConfText = compactConf) }
                     onTrayNotify("WarpScout подключён", "Точка: ${externalAwgTunnel.snapshot.activeEndpoint}")
                 }
             }
@@ -878,6 +880,14 @@ class DesktopController(
             runCatching { CachedStart(WgConf.parseEndpoint(epStr), s.lastTuneJunk) }.getOrNull()
         }
 
+        // В shortlist/отчётах храним компактный AllowedIPs, а при подключении и экспорте всегда
+        // применяется актуальный режим маршрутизации пользователя (включая пресет обхода РФ).
+        val compactAllowed = if (s.routeMode == dev.warpscout.desktop.storage.RouteMode.PRESET) {
+            if (s.enableIpv6) "0.0.0.0/0, ::/0" else "0.0.0.0/0"
+        } else {
+            s.effectiveAllowedIps()
+        }
+
         return TuningSpec(
             endpointSpec = endpointSpec,
             junkProfiles = profiles,
@@ -885,7 +895,7 @@ class DesktopController(
             resources = if (s.checkResources) Presets.RESOURCE_CHECKS else emptyList(),
             dns = s.effectiveDns(),
             mtu = s.mtu,
-            allowedIps = s.effectiveAllowedIps(),
+            allowedIps = compactAllowed,
             keepalive = s.keepalive.takeIf { it > 0 },
             enableIpv6Address = s.enableIpv6,
             checkBaselineResources = s.checkResources,

@@ -58,6 +58,14 @@ fun RoutesScreen(state: DesktopUiState, controller: DesktopController) {
                 }
             }
 
+            if (s.routeMode == RouteMode.PRESET) {
+                Text(
+                    "Встроена база RIPE RU (8 690 IPv4 + 2 164 IPv6 подсетей): Яндекс, VK, банки (Сбер, Т-Банк, Альфа, ВТБ), Госуслуги, Ozon, Wildberries, Авито и локальная сеть идут напрямую. Всё зарубежное — через туннель.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
             if (s.routeMode == RouteMode.LISTS) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
                 Text("Туннелируем (allow-domains):", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)

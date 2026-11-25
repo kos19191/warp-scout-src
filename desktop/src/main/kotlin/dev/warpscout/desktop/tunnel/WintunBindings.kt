@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 interface TunDevice : AutoCloseable {
     val adapterName: String
+    val adapterLuid: Long? get() = null
     val input: InputStream
     val output: OutputStream
 }
@@ -189,6 +190,9 @@ class WintunDevice private constructor(
             this@WintunDevice.close()
         }
     }
+
+    override val adapterLuid: Long
+        get() = adapterLuid()
 
     fun adapterLuid(): Long {
         val ref = LongByReference()

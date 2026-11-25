@@ -28,8 +28,8 @@ enum class DesktopPoolMode(val title: String) {
 }
 
 enum class RouteMode(val title: String, val subtitle: String) {
+    PRESET("Пресет обхода РФ (по умолчанию)", "Зарубежные сайты через туннель, российские и локальная сеть — напрямую"),
     ALL("Весь трафик", "0.0.0.0/0, ::/0 — всё идёт через туннель"),
-    PRESET("Пресет обхода РФ", "Зарубежные сети в туннель, российские — напрямую"),
     LISTS("Списки allow-domains", "CIDR из выбранных категорий (YouTube, Discord, Telegram, AI…)"),
     MANUAL("Вручную (CIDR)", "Точный список подсетей AllowedIPs ниже")
 }
@@ -80,8 +80,8 @@ data class DesktopSettings(
     val keepalive: Int = 25,
     val enableIpv6: Boolean = true,
 
-    // Маршруты (split-tunnel)
-    val routeMode: RouteMode = RouteMode.ALL,
+    // Маршруты (split-tunnel): по умолчанию — пресет обхода РФ (зарубежные в туннель, РФ напрямую)
+    val routeMode: RouteMode = RouteMode.PRESET,
     val selectedBlockListIds: List<String> = AllowLists.DEFAULT_BLOCK_IDS,
     val selectedDirectListIds: List<String> = listOf("hosters-blocked", "russia-outside"),
     val builtAllowedIps: String = "",
@@ -113,7 +113,7 @@ data class DesktopSettings(
 
     fun effectiveAllowedIps(): String = when (routeMode) {
         RouteMode.ALL -> if (enableIpv6) "0.0.0.0/0, ::/0" else "0.0.0.0/0"
-        RouteMode.PRESET -> dev.warpscout.core.presets.RoutePresets.BYPASS_WHITELIST_CSV
+        RouteMode.PRESET -> dev.warpscout.desktop.tunnel.RuBypassRoutes.allowedIpsCsv(includeIpv6 = enableIpv6)
         RouteMode.LISTS -> builtAllowedIps.takeIf { it.isNotBlank() }
             ?: if (enableIpv6) "0.0.0.0/0, ::/0" else "0.0.0.0/0"
         RouteMode.MANUAL -> manualAllowedIps.takeIf { it.isNotBlank() }

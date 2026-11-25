@@ -105,23 +105,62 @@ class WindowsNetConfigurator(
         return runPs(script, timeoutMs = 15_000L)
     }
 
+    /** Проверяет, есть ли у физического подключения пользователя глобальный IPv6-маршрут по умолчанию. */
+    fun hasPhysicalIpv6DefaultRoute(): Boolean {
+        val ps = """
+            ${'$'}r = Get-NetRoute -DestinationPrefix '::/0' -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+                Where-Object { ${'$'}_.NextHop -and ${'$'}_.NextHop -ne '::' } |
+                Select-Object -First 1
+            if (${'$'}r) { Write-Output 'yes' }
+        """.trimIndent()
+        val res = runPs(ps, timeoutMs = 5000L)
+        return res.ok && res.stdout.trim().equals("yes", ignoreCase = true)
+    }
+
     /**
-     * Устанавливает маршруты туннеля на адаптер Wintun одним пакетным скриптом.
+     * Устанавливает маршруты туннеля на адаптер Wintun.
+     *
      * `0.0.0.0/0` автоматически разворачивается в `0.0.0.0/1` + `128.0.0.0/1`.
+     * Если передан [adapterLuid] на Windows — маршруты ставятся напрямую через `iphlpapi.dll`
+     * (`CreateIpForwardEntry2`), что в ~100× быстрее PowerShell `New-NetRoute` и критично
+     * для пресета обхода РФ (~21 000 зарубежных подсетей).
      */
     fun applyRoutes(
         adapterName: String,
         allowedIpsCsv: String,
         extraCidrs: List<String> = emptyList(),
-        enableIpv6: Boolean = true
+        enableIpv6: Boolean = true,
+        adapterLuid: Long? = null
     ): CommandResult {
-        val prefixes = expandSafeRoutes(allowedIpsCsv, extraCidrs, enableIpv6)
-        if (prefixes.isEmpty()) return CommandResult(0, "нет маршрутов", "")
+        val allPrefixes = expandSafeRoutes(allowedIpsCsv, extraCidrs, enableIpv6)
+        if (allPrefixes.isEmpty()) return CommandResult(0, "нет маршрутов", "")
+
+        val v4List = allPrefixes.filter { ':' !in it }
+        var v6List = allPrefixes.filter { ':' in it }
+
+        // Для большого split-списка IPv6 (пресет обхода РФ) не захламляем таблицу маршрутов на IPv4-only провайдерах.
+        if (v6List.size > 100 && !hasPhysicalIpv6DefaultRoute()) {
+            onLog("Физический IPv6 у провайдера отсутствует — пропускаю ${v6List.size} IPv6-маршрутов")
+            v6List = emptyList()
+        }
+        val prefixes = v4List + v6List
+
+        // Быстрый путь: прямой Win32 IP Helper API (`CreateIpForwardEntry2`) по LUID адаптера Wintun.
+        if (adapterLuid != null && WindowsAutostart.isWindows()) {
+            val nativeRes = runCatching {
+                WindowsIpHelper.addOnLinkRoutes(adapterLuid, prefixes, metric = 5)
+            }.getOrNull()
+            if (nativeRes != null && nativeRes.ok) {
+                flushDns()
+                val msg = "routes_native=${nativeRes.added + nativeRes.existed}/${nativeRes.total} за ${nativeRes.elapsedMs} мс" +
+                    if (nativeRes.failed > 0) " (ошибок: ${nativeRes.failed})" else ""
+                onLog("Маршруты применены: $msg")
+                return CommandResult(0, msg, "")
+            }
+            onLog("Не удалось применить маршруты через iphlpapi.dll — пробую PowerShell…")
+        }
 
         val safeName = psEscape(adapterName)
-        val v4List = prefixes.filter { ':' !in it }
-        val v6List = prefixes.filter { ':' in it }
-
         val script = buildString {
             appendLine("\$adapter = Get-NetAdapter -Name '$safeName' -ErrorAction Stop")
             appendLine("\$idx = \$adapter.ifIndex")
