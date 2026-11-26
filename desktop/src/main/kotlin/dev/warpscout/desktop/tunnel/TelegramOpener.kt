@@ -232,9 +232,8 @@ object TelegramOpener {
         if (!isTgProtocolRegistered()) return false
         return runCatching {
             val res = Shell32.INSTANCE.ShellExecute(null, "open", tgUrl, null, null, 1)
-            // Согласно Win32 API ShellExecute возвращает HINSTANCE > 32 при успехе.
-            val code = com.sun.jna.Pointer.nativeValue(res?.pointer)
-            code > 32L
+            // Согласно Win32 API ShellExecute возвращает HINSTANCE/INT_PTR > 32 при успехе.
+            (res?.toLong() ?: 0L) > 32L
         }.getOrDefault(false)
     }
 

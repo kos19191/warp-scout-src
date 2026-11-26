@@ -972,7 +972,7 @@ class DesktopController(
         auxWorker.execute {
             val s = _state.value.settings
             if (!byeDpiManager.snapshot.running && byeDpiManager.snapshot.available) {
-                val snap = byeDpiManager.start(
+                byeDpiManager.start(
                     presetId = s.byeDpiPresetId,
                     port = s.byeDpiPort,
                     customArgs = s.byeDpiCustomArgs,
@@ -980,7 +980,7 @@ class DesktopController(
                     bypassTunnel = s.byeDpiBypassTunnel,
                     pacDomainsText = s.byeDpiPacDomains
                 )
-                _state.update { it.copy(byeDpi = snap) }
+                _state.update { it.copy(byeDpi = byeDpiManager.snapshot) }
             }
             val port = _state.value.byeDpi.port.takeIf { it in 1024..65535 } ?: s.byeDpiPort
             val tgLink = TelegramProxyEntry.socksTgLink("127.0.0.1", port)
