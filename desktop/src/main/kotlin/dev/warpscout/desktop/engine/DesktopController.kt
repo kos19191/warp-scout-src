@@ -1,6 +1,7 @@
 package dev.warpscout.desktop.engine
 
 import dev.warpscout.core.config.ConfTarget
+import dev.warpscout.core.config.SplitRoutes
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.dpi.DpiComparator
 import dev.warpscout.core.dpi.DpiComparison
