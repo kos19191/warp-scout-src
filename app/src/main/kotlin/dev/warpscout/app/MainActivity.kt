@@ -1683,6 +1683,8 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                     renderDpi()
                     result.onSuccess { done ->
                         banner(getString(R.string.dpi_done, done.second.label))
+                        // План обхода этой сети — работающему туннелю (с 1.10.49-beta3).
+                        if (tunnel.supported && (tunnel.isUp || tunnel.active)) runCatching { tunnel.reloadDpi() }
                     }.onFailure { t ->
                         if (t is DpiCheck.NoBypass) {
                             banner(getString(R.string.dpi_no_bypass), error = true)
@@ -1698,6 +1700,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
 
     /** Итоги «Проверить DPI»: подробно — по текущей сети, по остальным — строкой. */
     private fun renderDpi() {
+        runCatching { renderDpiBypass() }
         val all = DpiCheck.load(this)
         val key = NetIdentity.currentKey(this)
         val current = all.firstOrNull { it.network == key } ?: all.firstOrNull()
@@ -1720,6 +1723,25 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         binding.textDpiOther.visibility = if (others.isEmpty()) View.GONE else View.VISIBLE
         binding.textDpiOther.text = others.joinToString("\n\n") { o ->
             getString(R.string.dpi_head, o.label, dpiWhen(o.at)) + ": " + o.summary
+        }
+    }
+
+    /**
+     * Под переключателем «Обход DPI в туннеле» (с 1.10.49-beta3): что он сделает на текущей сети — по
+     * плану из её последней проверки. Итог прежней версии (без плана) — «проверки ещё не было».
+     */
+    private fun renderDpiBypass() {
+        val on = prefs.featDpiBypass
+        if (binding.switchDpiBypass.isChecked != on) binding.switchDpiBypass.isChecked = on
+        val key = NetIdentity.currentKey(this)
+        val label = DpiCheck.labelOf(this, key)
+        val saved = DpiCheck.load(this).firstOrNull { it.network == key }
+        val plan = DpiCheck.planFor(this, key)
+        binding.textDpiBypass.text = when {
+            !on -> getString(R.string.dpi_bypass_off)
+            !plan.isEmpty -> getString(R.string.dpi_bypass_on, label, plan.describe())
+            saved != null && saved.trusted && saved.plan == DpiCheck.PLAN_NONE -> getString(R.string.dpi_bypass_none, label)
+            else -> getString(R.string.dpi_bypass_unknown, label)
         }
     }
 
@@ -2327,6 +2349,24 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                 toast(getString(R.string.schedule_on, periodLabel(hours)))
             }
             updateScheduleNote()
+        }
+
+        // Обход DPI в туннеле (с 1.10.49-beta3): YouTube и X напрямую с приёмом по плану этой сети.
+        binding.switchDpiBypass.isChecked = prefs.featDpiBypass
+        binding.switchDpiBypass.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked == prefs.featDpiBypass) return@setOnCheckedChangeListener
+            prefs.featDpiBypass = isChecked
+            TunnelDebug.stage("настройка «обход DPI в туннеле»: ${if (isChecked) "включена" else "выключена"}")
+            runCatching { renderDpiBypass() }
+            if (tunnel.supported && (tunnel.isUp || tunnel.active)) {
+                runCatching { tunnel.reloadDpi() }
+                banner(
+                    getString(
+                        R.string.dpi_bypass_applied,
+                        getString(if (isChecked) R.string.dpi_bypass_state_on else R.string.dpi_bypass_state_off)
+                    )
+                )
+            }
         }
 
         // «Проверить DPI» в Журнале (с 1.10.49-beta2): режут сайты по имени (поможет обход) или по адресу.

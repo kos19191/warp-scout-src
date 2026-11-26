@@ -40,14 +40,19 @@ data class DpiTarget(
 
 object DpiTargets {
     /**
-     * YouTube — главная страница (большая, по ней видна скорость), сервер видео и картинки: фильтр
-     * может резать их по-разному. Discord — блокировка 2024 года, Instagram и X — давние блокировки
-     * (обычно по адресам: для сравнения). Cloudflare — 256 КБ одним ответом: видно, обрывает ли сеть
-     * соединения с зарубежными хостингами после ~16 КБ. Google — контроль.
+     * YouTube — главная страница (большая, по ней видна скорость), настоящий сервер видео, его
+     * редиректор и картинки: фильтр может резать их по-разному. Discord — блокировка 2024 года,
+     * Instagram и X — давние блокировки (обычно по адресам: для сравнения). Cloudflare — 256 КБ одним
+     * ответом: видно, обрывает ли сеть соединения с зарубежными хостингами после ~16 КБ. Google — контроль.
+     *
+     * Сервер видео (с 1.10.49-beta3) — не постоянное имя: его называет редиректор ([VIDEO_ID], см.
+     * [GoogleVideo]). До beta3 вместо него проверялся только редиректор, а он видео не отдаёт: «открыт»
+     * про него ничего не говорил о видео.
      */
     val DEFAULT: List<DpiTarget> = listOf(
         DpiTarget("youtube", "YouTube", "www.youtube.com", "/", speed = true),
-        DpiTarget("googlevideo", "Видео YouTube", "redirector.googlevideo.com", "/report_mapping"),
+        DpiTarget(VIDEO_ID, "Сервер видео YouTube", "", "/generate_204"),
+        DpiTarget("googlevideo", "Редиректор видео YouTube", GoogleVideo.REDIRECTOR, GoogleVideo.MAPPING_PATH),
         DpiTarget("ytimg", "Картинки YouTube", "i.ytimg.com", "/vi/jNQXAC9IVRw/hqdefault.jpg"),
         DpiTarget("discord", "Discord", "discord.com", "/api/v9/gateway"),
         DpiTarget("instagram", "Instagram", "www.instagram.com", "/"),
@@ -55,6 +60,62 @@ object DpiTargets {
         DpiTarget("cloudflare", "Сайты за Cloudflare", "speed.cloudflare.com", "/__down?bytes=262144"),
         DpiTarget("google", "Google (контроль)", "www.google.com", "/generate_204", control = true)
     )
+
+    /** Цель «сервер видео YouTube»: имя узнаётся при проверке (см. [GoogleVideo]). */
+    const val VIDEO_ID = "ytvideo"
+}
+
+/**
+ * Серверы видео YouTube (с 1.10.49-beta3). Видео идёт не с youtube.com, а с узлов вида
+ * rr1---sn-xxxx.googlevideo.com — часто это кэш Google прямо в сети оператора (GGC). Какой узел
+ * обслуживает эту сеть, говорит редиректор: https://redirector.googlevideo.com/report_mapping?di=no
+ * отвечает «адрес => кластер (подсеть)», например «85.249.22.12 => vimpelcom-iar2 (85.249.20.0/22)».
+ * Имя кластера переводится в имя узла заменой букв — тем же способом, что в conv.py проекта
+ * lennylxx/ipv6-hosts (MIT): «vimpelcom-ovb1» → «sn-8ph2xajvh-v8ce».
+ */
+object GoogleVideo {
+    const val REDIRECTOR = "redirector.googlevideo.com"
+    const val MAPPING_PATH = "/report_mapping?di=no"
+    private const val TABLE = "1023456789abcdefghijklmnopqrstuvwxyz"
+
+    private fun letters(s: String): String = s.map { c ->
+        if (c in TABLE) TABLE[Math.floorMod((c.code - 'a'.code) * 7 + 5, 36)] else c
+    }.joinToString("")
+
+    private fun digits(s: String): String = s.map { c ->
+        if (c in TABLE) TABLE[Math.floorMod((c.code - '0'.code + 1) * 7, 36)] else c
+    }.joinToString("")
+
+    /** Кластер из ответа редиректора («… => vimpelcom-iar2 (…)»); null — ответ не такой. */
+    fun clusterOf(text: String): String? =
+        Regex("""=>\s*([a-z0-9-]+)""").find(text.lowercase())?.groupValues?.get(1)?.takeIf { it.length >= 4 }
+
+    /**
+     * Часть имени узла после «sn-»: «vimpelcom-ovb1» → «8ph2xajvh-v8ce», «fra16s48» — по аэропорту и
+     * номерам. null — имя кластера не такого вида.
+     */
+    fun snOf(cluster: String): String? {
+        val c = cluster.trim().lowercase()
+        if (!Regex("^[a-z0-9-]+$").matches(c)) return null
+        val parts = c.split('-')
+        return when (parts.size) {
+            1 -> Regex("""^([a-z]{3})(\d{2})s(\d{2})$""").find(c)?.let { m ->
+                letters(m.groupValues[1]) + digits(m.groupValues[2]) + "n" + digits(m.groupValues[3])
+            }
+
+            2 -> Regex("""^([a-z]{3})(\d{1,2})$""").find(parts[1])?.let { m ->
+                if (parts[0].isEmpty()) null else letters(parts[0]) + "-" + letters(m.groupValues[1]) + digits(m.groupValues[2])
+            }
+
+            else -> null
+        }
+    }
+
+    /** Имена узлов кластера по порядку проверки: rr1, rr2, r1. */
+    fun hostsOf(cluster: String): List<String> {
+        val sn = snOf(cluster) ?: return emptyList()
+        return listOf("rr1---sn-$sn.googlevideo.com", "rr2---sn-$sn.googlevideo.com", "r1---sn-$sn.googlevideo.com")
+    }
 }
 
 /** Докуда дошла попытка: имя → подключение → приветствие TLS → рукопожатие → ответ на запрос. */
@@ -118,7 +179,11 @@ data class DpiTargetResult(
     /** Итог по сайту — одна строка по-русски. */
     fun text(): String {
         val p = plain
-        val names = helpers.joinToString(", ") { "«${it.title}»" }
+        // Скорость приёма — если её удалось измерить (ответ не меньше 64 КБ): у страницы YouTube видно,
+        // замедляют ли её и с приёмом.
+        val names = helpers.joinToString(", ") { t ->
+            "«${t.title}»" + (attempts.firstOrNull { it.trick == t && it.ok }?.kbps?.takeIf { it > 0 }?.let { " ${DpiReport.speed(it)}" } ?: "")
+        }
         return when (verdict) {
             DpiVerdict.OPEN -> "открыт напрямую" + (p?.kbps?.takeIf { it > 0 }?.let { " · ${DpiReport.speed(it)}" } ?: "")
             DpiVerdict.FASTER -> {
@@ -252,8 +317,6 @@ class DpiProbe(
         fun set(socket: Socket, ttl: Int): Boolean
     }
 
-    private class TrickUnsupported(message: String) : IOException(message)
-
     /** Проверить все [targets] параллельно. [progress] зовётся из рабочих потоков. */
     fun run(
         targets: List<DpiTarget> = DpiTargets.DEFAULT,
@@ -290,6 +353,7 @@ class DpiProbe(
 
     /** Один сайт: адрес, «как есть», при надобности — приёмы, итог. */
     fun check(target: DpiTarget, progress: (String) -> Unit = {}, cancelled: () -> Boolean = { false }): DpiTargetResult {
+        if (target.id == DpiTargets.VIDEO_ID && target.host.isBlank()) return checkVideo(target, progress, cancelled)
         val (addresses, dnsNote) = addressesOf(target.host)
         if (addresses.isEmpty()) {
             return DpiTargetResult(target, "", dnsNote, emptyList(), DpiVerdict.DNS, emptyList())
@@ -329,6 +393,47 @@ class DpiProbe(
         return DpiTargetResult(target, addr.hostAddress ?: "", dnsNote, attempts, verdict, helpers)
     }
 
+    /**
+     * Сервер видео YouTube (с 1.10.49-beta3): имя узла называет редиректор (см. [GoogleVideo]) — его
+     * ответ берём как есть, а не открылся — с приёмами. Узел нашёлся — проверяем его как обычный сайт.
+     */
+    private fun checkVideo(target: DpiTarget, progress: (String) -> Unit, cancelled: () -> Boolean): DpiTargetResult {
+        progress("${target.name}: спрашиваю редиректор")
+        val (cluster, why) = discoverCluster(cancelled)
+        if (cluster == null) return DpiTargetResult(target, "", why, emptyList(), DpiVerdict.DNS, emptyList())
+        val hosts = GoogleVideo.hostsOf(cluster)
+        if (hosts.isEmpty()) {
+            return DpiTargetResult(
+                target, "", "редиректор назвал кластер «$cluster», имя узла из него не составить",
+                emptyList(), DpiVerdict.DNS, emptyList()
+            )
+        }
+        // Первый узел, у которого есть адрес: rr1 есть почти у всех кластеров.
+        val host = hosts.firstOrNull { h ->
+            runCatching { resolve(h) }.getOrNull().orEmpty().any { allowLocal || !bogus(it) }
+        } ?: hosts.first()
+        val r = check(target.copy(host = host), progress, cancelled)
+        return r.copy(dnsNote = "кластер $cluster" + (if (r.dnsNote.isNotBlank()) "; ${r.dnsNote}" else ""))
+    }
+
+    /** Кластер видео для этой сети по ответу редиректора: как есть, иначе с приёмами. */
+    private fun discoverCluster(cancelled: () -> Boolean): Pair<String?, String> {
+        val red = DpiTarget("googlevideo", "Редиректор", GoogleVideo.REDIRECTOR, GoogleVideo.MAPPING_PATH)
+        val (addresses, dnsNote) = addressesOf(red.host)
+        val addr = addresses.firstOrNull() ?: return null to "редиректор: ${dnsNote.ifBlank { "адрес не узнать" }}"
+        var last = ""
+        for (trick in listOf(DpiTrick.PLAIN) + DpiTrick.BYPASS) {
+            if (cancelled()) break
+            if (trick.needsTtl && ttl == null) continue
+            val (a, body) = fetch(red, addr, trick, keepBody = true)
+            val cluster = GoogleVideo.clusterOf(body)
+            if (cluster != null) return cluster to ""
+            last = if (a.ok) "редиректор ответил без имени кластера" else "редиректор не открылся (${a.reason})"
+            if (a.stage == DpiStage.CONNECT) break
+        }
+        return null to last.ifBlank { "редиректор не ответил" }
+    }
+
     /** Адреса сайта: IPv4 первыми; заглушки DNS (0.0.0.0, 127.*, частные сети) — не адреса. */
     internal fun addressesOf(host: String): Pair<List<InetAddress>, String> {
         val sys = runCatching { resolve(host) }.getOrElse { emptyList() }
@@ -343,7 +448,23 @@ class DpiProbe(
     }
 
     /** Одна попытка: подключение, TLS (первый пакет — по приёму [trick]), запрос страницы. */
-    fun attempt(target: DpiTarget, address: InetAddress, trick: DpiTrick): DpiAttempt {
+    fun attempt(target: DpiTarget, address: InetAddress, trick: DpiTrick): DpiAttempt =
+        fetch(target, address, trick, keepBody = false).first
+
+    /** То же, и начало ответа текстом ([keepBody], до 4 КБ) — для редиректора видео. */
+    private fun fetch(target: DpiTarget, address: InetAddress, trick: DpiTrick, keepBody: Boolean): Pair<DpiAttempt, String> {
+        var pumpRef: TlsPump? = null
+        val a = attemptInner(target, address, trick, keepBody) { pumpRef = it }
+        return a to (pumpRef?.bodyText().orEmpty())
+    }
+
+    private fun attemptInner(
+        target: DpiTarget,
+        address: InetAddress,
+        trick: DpiTrick,
+        keepBody: Boolean,
+        onPump: (TlsPump) -> Unit
+    ): DpiAttempt {
         if (trick.needsTtl && ttl == null) return DpiAttempt(trick, false, DpiStage.SKIPPED, "нет доступа к TTL")
         val started = System.nanoTime()
         var stage = DpiStage.CONNECT
@@ -366,8 +487,9 @@ class DpiProbe(
                 p.serverNames = listOf(SNIHostName(target.host))
                 p.endpointIdentificationAlgorithm = "HTTPS"
             }
-            val tls = TlsPump(engine, s)
+            val tls = TlsPump(engine, s, keepBody)
             pump = tls
+            onPump(tls)
             tls.handshake(
                 first = { bytes ->
                     sendFirst(s, bytes, trick)
@@ -386,7 +508,7 @@ class DpiProbe(
                 if (ok) "" else "сервер не ответил на запрос",
                 connectMs, helloMsOf(helloAt, tls), tls.rawIn, tls.status, tls.kbps()
             )
-        } catch (e: TrickUnsupported) {
+        } catch (e: TrickSender.Unsupported) {
             return DpiAttempt(trick, false, DpiStage.SKIPPED, e.message ?: "не поддерживается")
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
@@ -410,38 +532,8 @@ class DpiProbe(
     private fun helloMsOf(helloAt: Long, p: TlsPump): Long =
         if (helloAt == 0L || p.firstByteAt == 0L) -1 else ((p.firstByteAt - helloAt) / 1_000_000).coerceAtLeast(0)
 
-    /** Первый пакет — кусками по плану приёма. Паузы — чтобы куски ушли разными пакетами TCP. */
-    private fun sendFirst(s: Socket, hello: ByteArray, trick: DpiTrick) {
-        val out = s.getOutputStream()
-        val pieces = TlsHello.plan(trick, hello)
-        pieces.forEachIndexed { i, p ->
-            if (p.lowTtl) {
-                val t = ttl ?: throw TrickUnsupported("нет доступа к TTL")
-                val normal = runCatching { t.get(s) }.getOrNull()?.takeIf { it in 2..255 } ?: DEFAULT_TTL
-                if (!runCatching { t.set(s, 1) }.getOrDefault(false)) throw TrickUnsupported("система не дала поменять TTL")
-                try {
-                    out.write(p.bytes)
-                    out.flush()
-                    // Кусок должен уйти с TTL 1 до того, как вернём обычный: ядро может придержать
-                    // мелкую запись на миллисекунды (autocork), и тогда он ушёл бы с обычным TTL.
-                    Thread.sleep(LOW_TTL_HOLD_MS)
-                } finally {
-                    runCatching { t.set(s, normal) }
-                }
-            } else {
-                out.write(p.bytes)
-                out.flush()
-            }
-            if (p.oobAfter) {
-                try {
-                    s.sendUrgentData(TlsHello.OOB_BYTE)
-                } catch (e: IOException) {
-                    throw TrickUnsupported("срочный байт не отправляется: ${e.message ?: e.javaClass.simpleName}")
-                }
-            }
-            if (i < pieces.size - 1) Thread.sleep(PIECE_GAP_MS)
-        }
-    }
+    /** Первый пакет — кусками по плану приёма (см. [TrickSender]). */
+    private fun sendFirst(s: Socket, hello: ByteArray, trick: DpiTrick) = TrickSender.send(s, hello, trick, ttl)
 
     private fun reasonOf(e: Throwable, stage: DpiStage): String {
         val msg = (e.message ?: "").lowercase()
@@ -468,13 +560,7 @@ class DpiProbe(
     }
 
     companion object {
-        const val DEFAULT_TTL = 64
-
-        /** Сколько держать TTL 1 после отправки куска (см. [sendFirst]). */
-        const val LOW_TTL_HOLD_MS = 20L
-
-        /** Пауза между кусками первого пакета: иначе ядро может склеить их в один пакет. */
-        const val PIECE_GAP_MS = 15L
+        const val DEFAULT_TTL = TrickSender.DEFAULT_TTL
 
         /** Скорость считаем, только если пришло хотя бы столько: на мелочи она — шум. */
         const val SPEED_MIN_BYTES = 64 * 1024L
@@ -524,7 +610,7 @@ class DpiProbe(
  * TLS поверх обычного сокета через SSLEngine: так первый пакет (ClientHello) проходит через наши
  * руки и уходит кусками по приёму, а дальше всё как у обычного HTTPS — с проверкой сертификата.
  */
-private class TlsPump(private val engine: SSLEngine, sock: Socket) {
+private class TlsPump(private val engine: SSLEngine, sock: Socket, private val keepBody: Boolean = false) {
     private val input = sock.getInputStream()
     private val output = sock.getOutputStream()
     private var netIn: ByteBuffer = ByteBuffer.allocate(engine.session.packetBufferSize + 4096)
@@ -556,6 +642,10 @@ private class TlsPump(private val engine: SSLEngine, sock: Socket) {
     private var dataStartAt = 0L
     private var replyRaw = -1L
     private var replyAt = 0L
+    private val bodyHead = ByteArrayOutputStream()
+
+    /** Начало тела ответа (только с keepBody, до 4 КБ). */
+    fun bodyText(): String = String(bodyHead.toByteArray(), Charsets.ISO_8859_1)
 
     private fun grow(b: ByteBuffer): ByteBuffer {
         val n = ByteBuffer.allocate(b.capacity() * 2)
@@ -744,6 +834,7 @@ private class TlsPump(private val engine: SSLEngine, sock: Socket) {
         }
         val n = b.size - off
         if (n <= 0) return
+        if (keepBody && bodyHead.size() < 4096) bodyHead.write(b, off, minOf(n, 4096 - bodyHead.size()))
         body += n
         if (chunked) {
             for (i in off until b.size) {

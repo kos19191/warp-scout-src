@@ -196,6 +196,18 @@ class PacketQueueIn(private val name: String) : InputStream() {
     override fun toString(): String = "PacketQueueIn($name)"
 }
 
+/**
+ * Перехват пакетов из tun до раскладки по выходам (с 1.10.49-beta3: обход DPI в туннеле — см.
+ * dev.warpscout.core.dpi.DpiRelay). Зовётся из потока диспетчера на каждый пакет — должен быть быстрым.
+ */
+fun interface PacketTap {
+    /** true — пакет забран: в выходы его не отдавать. */
+    fun take(packet: ByteArray, len: Int): Boolean
+
+    /** Диспетчер остановлен: свои соединения закрыть. */
+    fun close() {}
+}
+
 /** Один выход в tun для нескольких data plane: записи не должны перемешиваться. */
 class SharedPacketOut(private val out: OutputStream) : OutputStream() {
 
@@ -245,6 +257,16 @@ class TunDispatcher(
     var appExits: AppExitTable? = null
 
     /**
+     * Обход DPI в туннеле (с 1.10.49-beta3, см. [PacketTap]): видит пакет первым и забирает соединения,
+     * которые туннель ведёт сам — напрямую с приёмом. null — обхода нет: прежний путь.
+     */
+    @Volatile
+    var tap: PacketTap? = null
+
+    /** Выходов больше одного: есть второй выход (диспетчер бывает и с одним — ради обхода DPI). */
+    val multiLane: Boolean get() = lanes.size > 1
+
+    /**
      * Соединения замеров автовыбора выхода (с 1.10.43, см. AppAuto): «свой порт|адрес|порт» → выход.
      * Замер сравнивает сервис через WARP и через второй выход, и направлять его по адресу назначения
      * нельзя: тем же адресом в эти секунды пользуется само приложение (у Instagram сайт и приложение —
@@ -290,6 +312,10 @@ class TunDispatcher(
     var dropped: Long = 0L
         private set
 
+    /** Пакетов, забранных обходом DPI ([tap]). */
+    var tapped: Long = 0L
+        private set
+
     /**
      * Пакеты приложений «только второй выход» (TikTok, с 1.10.44-beta1, см. [AppExitTable.lastStrict]),
      * придержанные, пока второй выход не работал: в WARP их не отдаём.
@@ -304,6 +330,7 @@ class TunDispatcher(
     fun stop() {
         stopped = true
         lanes.forEach { runCatching { it.close() } }
+        runCatching { tap?.close() }
     }
 
     override fun run() {
@@ -324,6 +351,11 @@ class TunDispatcher(
                 continue
             }
             val packet = buf.copyOf(n)
+            val t = tap
+            if (t != null && runCatching { t.take(packet, n) }.getOrDefault(false)) {
+                tapped++
+                continue
+            }
             val dst = IpPacket.dst(packet)
             if (dst == null) {
                 dropped++

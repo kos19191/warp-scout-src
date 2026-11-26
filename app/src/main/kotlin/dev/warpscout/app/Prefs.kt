@@ -690,6 +690,17 @@ class Prefs(private val context: Context) {
             pushToService()
         }
 
+    /**
+     * Обход DPI в туннеле (с 1.10.49-beta3, см. DpiRelay): YouTube и X — напрямую с приёмом, где
+     * «Проверить DPI» нашла, что приём помогает. По умолчанию включён: без проверки сети он ничего не меняет.
+     */
+    var featDpiBypass: Boolean
+        get() = sp.getBoolean("featDpiBypass", true)
+        set(v) {
+            sp.edit().putBoolean("featDpiBypass", v).apply()
+            pushToService()
+        }
+
     /** Перед переключением на выбранную точку спрашивать её пробой (рабочий туннель не трогая). */
     var featProbeBeforeSwitch: Boolean
         get() = sp.getBoolean("featProbeBeforeSwitch", true)
@@ -1110,6 +1121,9 @@ class Prefs(private val context: Context) {
             appExits = dev.warpscout.core.tunnel.AppExit.encodeAll(appExitsActive()),
             // Эксперимент (с 1.10.43): автовыбор выхода для приложений с «Само».
             appAuto = featAppAuto,
+            // Обход DPI в туннеле (с 1.10.49-beta3): переключатель и планы по сетям из «Проверить DPI».
+            dpiBypass = featDpiBypass,
+            dpiPlans = runCatching { DpiCheck.servicePlans(context) }.getOrDefault(emptyList()),
         )
     }
 

@@ -1763,6 +1763,24 @@
                     android:textAppearance="?attr/textAppearanceBodySmall"
                     android:visibility="gone" />
 
+                <!--
+                  1.10.49-beta3: обход DPI в туннеле — YouTube и X напрямую с приёмом, где проверка этой
+                  сети нашла, что приём помогает. Под переключателем — что включится на текущей сети.
+                -->
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchDpiBypass"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/dpi_bypass_switch" />
+
+                <TextView
+                    android:id="@+id/textDpiBypass"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:textIsSelectable="true" />
+
                 <TextView
                     android:id="@+id/textDpiHead"
                     android:layout_width="match_parent"

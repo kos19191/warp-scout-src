@@ -21,6 +21,9 @@ import dev.warpscout.app.TunnelDebug
 import dev.warpscout.core.config.SplitRoutes
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.crypto.Crypto
+import dev.warpscout.core.dpi.DpiFamilies
+import dev.warpscout.core.dpi.DpiPlan
+import dev.warpscout.core.dpi.DpiRelay
 import dev.warpscout.core.junk.JunkLibrary
 import dev.warpscout.core.lists.AllowLists
 import dev.warpscout.core.lists.AppServices
@@ -68,7 +71,10 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.DatagramSocket
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -225,7 +231,14 @@ class WarpVpnService : VpnService() {
         // Кто ушёл во второй выход по правилу приложения за интервал (с 1.10.44-beta1): по этой части
         // строки видно, ходит ли TikTok через второй выход на самом деле и сколько.
         val usage = runCatching { dispatcher?.appExits?.secondUsageText(sinceLast = true).orEmpty() }.getOrDefault("")
-        val tail = (if (threads.isBlank()) "" else ", $threads") + (if (usage.isBlank()) "" else ", во второй выход (вверх): $usage")
+        // Обход DPI в туннеле (с 1.10.49-beta3): сколько соединений шло напрямую с приёмом — с начала сессии.
+        val dpi = runCatching {
+            (dispatcher?.tap as? DpiRelay)?.let { r ->
+                if (r.opened.get() == 0L) "" else "обход DPI: напрямую ${r.viaDirect.get()}, через туннель ${r.viaTunnel.get() + r.fallbacks.get()}, сейчас ${r.active}"
+            }.orEmpty()
+        }.getOrDefault("")
+        val tail = (if (threads.isBlank()) "" else ", $threads") + (if (usage.isBlank()) "" else ", во второй выход (вверх): $usage") +
+            (if (dpi.isBlank()) "" else ", $dpi")
         // Тихий подбор для Wi-Fi проверяем здесь: строка статистики пишется раз в ~5 минут и при
         // погашенном экране. Сама проверка — в своём потоке: этот поток — таймер data plane.
         if (screenOffAt > 0L && !quietScanRunning) {
@@ -474,6 +487,12 @@ class WarpVpnService : VpnService() {
     private var secondSocket: DatagramSocket? = null
     /** Разделитель пакетов между выходами: tun читает только он. */
     private var dispatcher: TunDispatcher? = null
+
+    /**
+     * Диспетчер со вторым выходом. С 1.10.49-beta3 диспетчер бывает и с одним выходом — ради обхода DPI
+     * (см. dpiSetup); всё, что про второй выход (Telegram, автовыбор, адреса), смотрит только сюда.
+     */
+    private val secondDispatcher: TunDispatcher? get() = dispatcher?.takeIf { it.multiLane }
     private var tun: ParcelFileDescriptor? = null
     private var worker: Thread? = null
     private var udpSocket: DatagramSocket? = null
@@ -748,6 +767,10 @@ class WarpVpnService : VpnService() {
         }
         if (intent?.action == ACTION_SECOND_ROUTES) {
             handleSecondRoutes(startId)
+            return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_DPI_RELOAD) {
+            handleDpiReload(startId)
             return START_NOT_STICKY
         }
         // Ответ на вопрос про Telegram (с 1.10.36): кнопка уведомления или окно на экране. Приходит
@@ -1210,7 +1233,17 @@ class WarpVpnService : VpnService() {
         val tunFd = pfd.fileDescriptor
         val tunWait: (Long) -> Boolean = { ms -> waitTunReadable(tunFd, ms) }
         val rawOut = FileOutputStream(pfd.fileDescriptor)
-        val lanes = if (secondReady) listOf(PacketQueueIn("основной"), PacketQueueIn("второй")) else emptyList()
+        // Обход DPI в туннеле (с 1.10.49-beta3): YouTube и X напрямую с приёмом, если «Проверить DPI» на
+        // этой сети нашла, что приём помогает. Ему нужен диспетчер tun — и без второго выхода (с одним
+        // выходом). Обходить нечего — ровно прежний путь.
+        val dpiOn = if (quietSession) null else runCatching { dpiSetup(exitRules) }
+            .onFailure { TunnelDebug.problem("обход DPI: не включился (${it.javaClass.simpleName}: ${it.message?.take(80)})") }
+            .getOrNull()
+        val lanes = when {
+            secondReady -> listOf(PacketQueueIn("основной"), PacketQueueIn("второй"))
+            dpiOn != null -> listOf(PacketQueueIn("основной"))
+            else -> emptyList()
+        }
         val tunOut: OutputStream = if (lanes.isEmpty()) rawOut else SharedPacketOut(rawOut)
         val tunIn: InputStream = if (lanes.isEmpty()) rawIn else lanes[0]
         // Второй выход внутри WARP: его датаграммы — обычные пакеты основного туннеля (к адресу
@@ -1242,10 +1275,21 @@ class WarpVpnService : VpnService() {
             null
         }
         if (splitter != null) {
-            // Выход по приложениям (с 1.10.39): правило приложения перекрывает решение по адресу.
-            splitter.appExits = runCatching { buildAppExits(exitRules, auto = !quietSession && serviceSettings().appAuto) }
-                .onFailure { TunnelDebug.stage("выход по приложениям: не включился (${it.javaClass.simpleName}) — у всех «Само»") }
-                .getOrNull()
+            if (secondReady) {
+                // Выход по приложениям (с 1.10.39): правило приложения перекрывает решение по адресу.
+                splitter.appExits = runCatching { buildAppExits(exitRules, auto = !quietSession && serviceSettings().appAuto) }
+                    .onFailure { TunnelDebug.stage("выход по приложениям: не включился (${it.javaClass.simpleName}) — у всех «Само»") }
+                    .getOrNull()
+            } else if (exitRules.values.any { it == AppExit.SECOND } && !quietSession) {
+                // Диспетчер только ради обхода DPI: второго выхода нет — как и без диспетчера, всё через WARP
+                // (таблицы выхода нет, и «только второй выход» ничего не придерживает).
+                TunnelDebug.stage("выход по приложениям: второго выхода в этой сессии нет — приложения с «Второй выход» идут через WARP")
+            }
+            if (dpiOn != null) {
+                splitter.tap = runCatching { buildDpiRelay(dpiOn, tunOut, splitter, cfg.mtu) }
+                    .onFailure { TunnelDebug.problem("обход DPI: не включился (${it.javaClass.simpleName}: ${it.message?.take(80)})") }
+                    .getOrNull()
+            }
             this.dispatcher = splitter
             Thread(splitter, "warpscout-tun-split").apply { isDaemon = true; start() }
         } else if (exitRules.values.any { it == AppExit.SECOND } && !quietSession) {
@@ -2368,7 +2412,7 @@ class WarpVpnService : VpnService() {
     private fun appAutoAfterLink(myEpoch: Int, site: String) {
         val settings = serviceSettings()
         if (site.isNotEmpty()) appAutoLastSite = site
-        val d = dispatcher
+        val d = secondDispatcher
         if (settings.appAuto && d != null && d.appExits == null && Build.VERSION.SDK_INT >= 29) {
             // Включили, когда туннель уже шёл (а ручных правил нет): таблицы выхода по приложениям в
             // этой сессии нет — ставим её сейчас, на лету; без автоправил она ничего не меняет.
@@ -2497,7 +2541,7 @@ class WarpVpnService : VpnService() {
             saveAppAutoStatus(status)
         }
         val now = System.currentTimeMillis()
-        val d = dispatcher
+        val d = secondDispatcher
         val table = d?.appExits
         if (d == null || TunnelState.second != TunnelStatus.SECOND_UP) {
             finish(
@@ -2650,7 +2694,7 @@ class WarpVpnService : VpnService() {
      * false — второго выхода в этой сессии нет или Telegram уже идёт так.
      */
     private fun setTelegramViaSecond(want: Boolean, line: String): Boolean {
-        val splitter = dispatcher ?: return false
+        val splitter = secondDispatcher ?: return false
         synchronized(routerLock) {
             if (want == tgViaSecond) return false
             tgViaSecond = want
@@ -2705,7 +2749,7 @@ class WarpVpnService : VpnService() {
         if (!tgRouted) return
         tgMediaCheckedAt = System.currentTimeMillis()
         tgMediaCheckedSite = site
-        val secondUp = dispatcher != null && TunnelState.second == TunnelStatus.SECOND_UP
+        val secondUp = secondDispatcher != null && TunnelState.second == TunnelStatus.SECOND_UP
         if (tgViaSecond && secondUp && tgFixed == AppExit.AUTO) {
             checkBothWays(myEpoch, site)
             return
@@ -2871,7 +2915,7 @@ class WarpVpnService : VpnService() {
     private fun compareWithSecond(myEpoch: Int, site: String, moscow: TelegramMedia.Fetch) {
         if (tgFixed != AppExit.AUTO) return
         if (!serviceSettings().tgSecond) return
-        if (dispatcher == null || TunnelState.second != TunnelStatus.SECOND_UP) return
+        if (secondDispatcher == null || TunnelState.second != TunnelStatus.SECOND_UP) return
         val net = memoryNetKind()
         val choice = TelegramChoiceMemory.choiceOf(this, net)
         if (choice == TelegramChoice.STAY || choice == TelegramChoice.ASKED) return
@@ -3100,7 +3144,7 @@ class WarpVpnService : VpnService() {
      * второго выхода в этой сессии или если Telegram и так идёт этим путём — обычная загрузка.
      */
     private fun probeTelegram(viaSecond: Boolean): TelegramMedia.Fetch {
-        if (dispatcher == null || viaSecond == tgViaSecond) return runTelegramMedia()
+        if (secondDispatcher == null || viaSecond == tgViaSecond) return runTelegramMedia()
         try {
             return TelegramMedia.fetch(resolve = { host ->
                 val all = java.net.InetAddress.getAllByName(host).mapNotNull { it.hostAddress }
@@ -3462,7 +3506,7 @@ class WarpVpnService : VpnService() {
      * новые адреса просто подхватит следующее подключение.
      */
     private fun handleSecondRoutes(startId: Int) {
-        val splitter = dispatcher
+        val splitter = secondDispatcher
         val running = plane != null && worker?.isAlive == true && TunnelState.up
         if (!running) {
             idleStop(startId)
@@ -3483,6 +3527,194 @@ class WarpVpnService : VpnService() {
             "второй выход: адреса обновлены на лету — ${router.size} подсетей" +
                 if (split) " (новые адреса вне маршрутов туннеля заработают после переподключения)" else ""
         )
+    }
+
+    // ------------------------------------------------------------ обход DPI в туннеле (с 1.10.49-beta3)
+    // YouTube и X — напрямую через провайдера с приёмом ByeDPI, а не через WARP: соединения их приложений
+    // к :443 туннель принимает сам (DpiRelay) и по имени сайта в первом сообщении TLS решает, куда их
+    // вести. План — из «Проверить DPI» этой сети; напрямую не открылось — то же соединение через туннель.
+
+    /** Обход на эту сессию: план сети, приложения (uid → сервис) и правила выхода по uid. */
+    private class DpiSetup(
+        val plan: DpiPlan,
+        val apps: Map<Int, DpiRelay.App>,
+        val network: String,
+        val warpUids: Set<Int>,
+    )
+
+    /** План обхода для текущей сети; выключен или проверки на этой сети не было — пустой. */
+    private fun dpiPlanNow(settings: ServiceSettings = serviceSettings()): Pair<DpiPlan, String> {
+        val net = dev.warpscout.app.NetIdentity.currentKey(this)
+        if (!settings.dpiBypass) return DpiPlan.EMPTY to net
+        return DpiPlan.forNetwork(settings.dpiPlans, net) to net
+    }
+
+    /**
+     * Нужен ли обход в этой сессии. null — нет: выключен, Android старше 10 (владельца соединения система
+     * называет с 10-го), на этой сети проверка не нашла, что обходить, или нужных приложений нет.
+     */
+    private fun dpiSetup(exitRules: Map<String, Int>): DpiSetup? {
+        val settings = serviceSettings()
+        val (plan, net) = dpiPlanNow(settings)
+        val label = dev.warpscout.app.DpiCheck.labelOf(this, net)
+        if (!settings.dpiBypass) {
+            if (settings.dpiPlans.isNotEmpty()) TunnelDebug.stage("обход DPI: выключен в настройках — YouTube и X идут как раньше")
+            return null
+        }
+        if (plan.isEmpty) {
+            if (settings.dpiPlans.isNotEmpty()) {
+                TunnelDebug.stage("обход DPI: для сети «$label» плана нет (проверки не было или обходить нечего) — всё как раньше")
+            }
+            return null
+        }
+        if (Build.VERSION.SDK_INT < 29) {
+            TunnelDebug.stage("обход DPI: нужен Android 10 или новее — выключен")
+            return null
+        }
+        // Приложения всех сервисов, а не только из плана: план меняется на лету (новая проверка).
+        val apps = HashMap<Int, DpiRelay.App>()
+        val names = ArrayList<String>()
+        val outside = ArrayList<String>()
+        val second = ArrayList<String>()
+        val selected = settings.appsSelected.toSet()
+        for (fam in DpiFamilies.ALL) {
+            for (pkg in fam.packages) {
+                if (pkg == packageName) continue
+                val info = runCatching {
+                    @Suppress("DEPRECATION")
+                    packageManager.getApplicationInfo(pkg, 0)
+                }.getOrNull() ?: continue
+                val title = runCatching { packageManager.getApplicationLabel(info).toString() }.getOrDefault(pkg)
+                if (exitRules[pkg] == AppExit.SECOND) {
+                    if (plan.trickFor(fam.id) != null) second += title
+                    continue
+                }
+                val inTunnel = when (settings.appsMode) {
+                    ServiceSettings.APPS_ONLY -> selected.isEmpty() || pkg in selected || pkg in exitRules.keys
+                    ServiceSettings.APPS_EXCEPT -> pkg !in selected || pkg in exitRules.keys
+                    else -> true
+                }
+                if (!inTunnel) {
+                    if (plan.trickFor(fam.id) != null) outside += title
+                    continue
+                }
+                apps[info.uid] = DpiRelay.App(title, fam.id)
+                if (plan.trickFor(fam.id) != null) names += title
+            }
+        }
+        if (outside.isNotEmpty()) {
+            TunnelDebug.stage("обход DPI: ${outside.joinToString(", ")} — мимо туннеля (не отмечены в «Приложениях»), обход их не видит")
+        }
+        if (second.isNotEmpty()) {
+            TunnelDebug.stage("обход DPI: ${second.joinToString(", ")} — «Второй выход», не трогаю")
+        }
+        if (names.isEmpty()) {
+            TunnelDebug.stage("обход DPI: на сети «$label» план есть (${plan.describe()}), но приложений для него в туннеле нет")
+            return null
+        }
+        val warpUids = HashSet<Int>()
+        exitRules.forEach { (pkg, rule) ->
+            if (rule != AppExit.WARP) return@forEach
+            runCatching {
+                @Suppress("DEPRECATION")
+                packageManager.getApplicationInfo(pkg, 0).uid
+            }.getOrNull()?.let { warpUids += it }
+        }
+        TunnelDebug.stage(
+            "обход DPI: сеть «$label» — ${plan.describe()}: напрямую через провайдера, мимо WARP; приложения: " +
+                "${names.joinToString(", ")}. Их QUIC закрываю — перейдут на TCP; другие сайты этих приложений и " +
+                "всё, что напрямую не откроется, — через туннель, как раньше"
+        )
+        return DpiSetup(plan, apps, net, warpUids)
+    }
+
+    /** Свой конец TCP для обхода: сокеты мимо туннеля — с protect(), через туннель — обычные. */
+    private fun buildDpiRelay(setup: DpiSetup, out: OutputStream, splitter: TunDispatcher, mtu: Int): DpiRelay {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java)
+        val direct = object : DpiRelay.Connector {
+            override fun connect(address: InetAddress, port: Int, timeoutMs: Int, uid: Int, bound: (Int) -> Unit): Socket {
+                val s = Socket()
+                try {
+                    // Настройка создаёт дескриптор сокета: без него protect() защищать нечего.
+                    s.tcpNoDelay = true
+                    if (!protect(s)) throw java.io.IOException("protect() отказал")
+                    s.connect(InetSocketAddress(address, port), timeoutMs)
+                    return s
+                } catch (e: Exception) {
+                    runCatching { s.close() }
+                    throw e
+                }
+            }
+        }
+        val tunnel = object : DpiRelay.Connector {
+            override fun connect(address: InetAddress, port: Int, timeoutMs: Int, uid: Int, bound: (Int) -> Unit): Socket {
+                val s = Socket()
+                try {
+                    s.tcpNoDelay = true
+                    // Свой порт — до подключения: диспетчер не должен разобрать наш же SYN, а со вторым
+                    // выходом соединение закрепляется за выходом приложения («Всегда WARP» — WARP).
+                    s.bind(InetSocketAddress(0))
+                    bound(s.localPort)
+                    if (splitter.multiLane && address is Inet4Address) {
+                        val lane = if (uid in setup.warpUids) 0 else splitter.router.route(address.address)
+                        splitter.pin(s.localPort, address.hostAddress.orEmpty(), port, lane)
+                    }
+                    s.connect(InetSocketAddress(address, port), timeoutMs)
+                    return s
+                } catch (e: Exception) {
+                    runCatching { s.close() }
+                    throw e
+                }
+            }
+
+            override fun release(localPort: Int, address: InetAddress, port: Int) {
+                if (splitter.multiLane && address is Inet4Address) splitter.unpin(localPort, address.hostAddress.orEmpty(), port)
+            }
+        }
+        return DpiRelay(
+            tunOut = { p -> out.write(p, 0, p.size) },
+            owner = { proto, local, remote ->
+                if (Build.VERSION.SDK_INT >= 29 && cm != null) cm.getConnectionOwnerUid(proto, local, remote) else -1
+            },
+            apps = setup.apps,
+            plan = setup.plan,
+            direct = direct,
+            tunnel = tunnel,
+            ttl = dev.warpscout.app.DpiCheck.AndroidTtl,
+            mtu = mtu.coerceIn(576, 1420),
+            log = { line -> TunnelDebug.stage(line) },
+        )
+    }
+
+    /**
+     * План обхода или переключатель поменялись (новая «Проверить DPI», переключатель на экране). Обход в
+     * сессии есть — план меняется на лету, для новых соединений. Нет, а план появился — переподключаемся:
+     * обходу нужен диспетчер tun, и поставить его можно только при подъёме.
+     */
+    private fun handleDpiReload(startId: Int) {
+        val running = plane != null && worker?.isAlive == true && TunnelState.up
+        if (!running) {
+            idleStop(startId)
+            return
+        }
+        val relay = dispatcher?.tap as? DpiRelay
+        val (plan, net) = dpiPlanNow()
+        if (relay != null) {
+            if (relay.plan != plan) {
+                relay.plan = plan
+                TunnelDebug.stage(
+                    if (plan.isEmpty) "обход DPI: выключен — новые соединения YouTube и X идут через туннель"
+                    else "обход DPI: план обновлён на лету — ${plan.describe()}"
+                )
+            }
+            return
+        }
+        if (plan.isEmpty || quietSession) return
+        TunnelDebug.stage(
+            "обход DPI: для сети «${dev.warpscout.app.DpiCheck.labelOf(this, net)}» появился план (${plan.describe()}) — " +
+                "переподключаюсь, чтобы включить"
+        )
+        restartAfterNetworkChange("включаю обход DPI", R.string.status_reconnect_silent)
     }
 
     private fun handleSpeedRequest(startId: Int) {
@@ -4097,6 +4329,10 @@ class WarpVpnService : VpnService() {
             tun = null
         }
         runCatching { d?.stop() }
+        // Обход DPI в туннеле (с 1.10.49-beta3): итог сессии — сколько напрямую, сколько через туннель.
+        (d?.tap as? DpiRelay)?.let { relay ->
+            if (relay.opened.get() > 0 || relay.quicBlocked.get() > 0) runCatching { TunnelDebug.stage(relay.summary()) }
+        }
         // Сколько стоил выход по приложениям в этой сессии (с 1.10.39) — строка в журнал.
         d?.appExits?.let { table -> if (table.lookups > 0) runCatching { TunnelDebug.stage(table.summary()) } }
         // Пакеты «только второй выход» (TikTok, с 1.10.44-beta1), придержанные без второго выхода.
@@ -5860,6 +6096,9 @@ class WarpVpnService : VpnService() {
         /** Адреса второго выхода обновились: сменить таблицу на лету (см. handleSecondRoutes). */
         const val ACTION_SECOND_ROUTES = "dev.warpscout.app.tunnel.SECOND_ROUTES"
 
+        /** План обхода DPI или его переключатель поменялись (с 1.10.49-beta3, см. handleDpiReload). */
+        const val ACTION_DPI_RELOAD = "dev.warpscout.app.tunnel.DPI_RELOAD"
+
         /** Ответ на вопрос про Telegram (с 1.10.36, см. handleTelegramAnswer): «Переключить» / «Оставить». */
         const val ACTION_TG_SWITCH = "dev.warpscout.app.tunnel.TG_SWITCH"
         const val ACTION_TG_STAY = "dev.warpscout.app.tunnel.TG_STAY"
@@ -5979,6 +6218,13 @@ class WarpVpnService : VpnService() {
         fun reloadSecondRoutes(context: Context) {
             runCatching {
                 context.startService(Intent(context, WarpVpnService::class.java).apply { action = ACTION_SECOND_ROUTES })
+            }
+        }
+
+        /** Сообщить сервису, что план обхода DPI или его переключатель поменялись (см. handleDpiReload). */
+        fun reloadDpi(context: Context) {
+            runCatching {
+                context.startService(Intent(context, WarpVpnService::class.java).apply { action = ACTION_DPI_RELOAD })
             }
         }
 

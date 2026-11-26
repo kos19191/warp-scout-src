@@ -427,6 +427,13 @@ data class ServiceSettings(
      * медленнее. По умолчанию выключено.
      */
     val appAuto: Boolean = false,
+    /**
+     * Обход DPI в туннеле (с 1.10.49-beta3, см. dev.warpscout.core.dpi.DpiRelay): YouTube и X —
+     * напрямую с приёмом, где «Проверить DPI» нашла, что приём помогает. По умолчанию включён.
+     */
+    val dpiBypass: Boolean = true,
+    /** Планы обхода по сетям: строки «ключ сети<TAB>план» (см. DpiPlan.encode). */
+    val dpiPlans: List<String> = emptyList(),
 ) {
 
     fun toJson(): String = JsonVal.obj(
@@ -454,6 +461,8 @@ data class ServiceSettings(
         "tgSecond" to JsonVal.bool(tgSecond),
         "appExits" to JsonVal.arr(appExits.map { JsonVal.str(it) }),
         "appAuto" to JsonVal.bool(appAuto),
+        "dpiBypass" to JsonVal.bool(dpiBypass),
+        "dpiPlans" to JsonVal.arr(dpiPlans.map { JsonVal.str(it) }),
     ).render()
 
     companion object {
@@ -500,6 +509,9 @@ data class ServiceSettings(
                 appExits = strings(obj, "appExits"),
                 // Нет поля (снимок от прежней версии) — эксперимент выключен.
                 appAuto = obj.bool("appAuto") ?: false,
+                // Нет поля (снимок от прежней версии) — обход включён, но планов нет: ничего не меняется.
+                dpiBypass = obj.bool("dpiBypass") ?: true,
+                dpiPlans = strings(obj, "dpiPlans"),
             )
         }
     }

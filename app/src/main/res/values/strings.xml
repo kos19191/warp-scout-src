@@ -521,7 +521,7 @@
     <string name="avail_check_now">Проверить сейчас</string>
     <!-- Режут DPI или адрес (с 1.10.49-beta2, бета) -->
     <string name="section_dpi">Режут DPI или адрес? (бета)</string>
-    <string name="dpi_hint">Проверка напрямую через провайдера, мимо туннеля: YouTube (страница, видео, картинки), Discord, Instagram, X и сайты за Cloudflare — сначала как есть, потом с приёмами обхода DPI, как у ByeDPI (разрез, две записи TLS, перестановка, лишний байт). Видно, что режет фильтр по имени сайта (тогда поможет обход), а что закрыто по адресу (поможет только VPN). Итог хранится по каждой сети отдельно — проверь на Wi-Fi и на мобильной. Обычно до минуты.</string>
+    <string name="dpi_hint">Проверка напрямую через провайдера, мимо туннеля: YouTube (страница, настоящий сервер видео, картинки), Discord, Instagram, X и сайты за Cloudflare — сначала как есть, потом с приёмами обхода DPI, как у ByeDPI (разрез, две записи TLS, перестановка, лишний байт). Видно, что режет фильтр по имени сайта (тогда поможет обход), а что закрыто по адресу (поможет только VPN). Итог хранится по каждой сети отдельно — проверь на Wi-Fi и на мобильной. Обычно до минуты.</string>
     <string name="dpi_check_now">Проверить DPI</string>
     <string name="dpi_checking">Проверяю…</string>
     <string name="dpi_running">Идёт проверка — обычно до минуты. Туннель не трогаю.</string>
@@ -530,6 +530,14 @@
     <string name="dpi_foreign_vpn">Работает VPN другого приложения (%1$s) — проверка показала бы его, а не провайдера. Выключи его и повтори.</string>
     <string name="dpi_no_bypass">Не нашлось сети мимо туннеля — выключи туннель и повтори проверку.</string>
     <string name="dpi_done">Проверка DPI готова: %1$s. Итог — в «Журнале», раздел «Режут DPI или адрес?».</string>
+    <string name="dpi_bypass_switch">Обход DPI в туннеле (бета): YouTube и X — напрямую с приёмом</string>
+    <string name="dpi_bypass_on">На этой сети (%1$s): %2$s — напрямую через провайдера, мимо WARP. Где напрямую не откроется — через туннель, как раньше. Приложения YouTube и X должны идти через туннель; QUIC у них закрываю, они сами переходят на TCP.</string>
+    <string name="dpi_bypass_none">На этой сети (%1$s) обходить нечего: проверка не нашла, что YouTube или X режут DPI, — они идут как раньше, через туннель.</string>
+    <string name="dpi_bypass_unknown">На этой сети (%1$s) проверки ещё не было — нажми «Проверить DPI»: обход включится, если она найдёт, что приём помогает.</string>
+    <string name="dpi_bypass_off">Выключен: YouTube и X идут как раньше, через туннель.</string>
+    <string name="dpi_bypass_applied">Обход DPI: %1$s. Работающий туннель применит сразу (если обхода в нём не было — переподключится).</string>
+    <string name="dpi_bypass_state_on">включён</string>
+    <string name="dpi_bypass_state_off">выключен</string>
     <string name="dpi_head">%1$s · %2$s</string>
     <string name="dpi_other_network_note">(это другая сеть — на текущей проверки ещё не было)</string>
     <string name="dpi_byedpi">Для ByeDPI на этой сети: %1$s</string>

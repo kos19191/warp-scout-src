@@ -230,6 +230,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("бета: режут DPI или адрес — приёмы ByeDPI в самом приложении (1.10.49-beta2)") {
             DpiChecks { name, ok, detail -> check(name, ok, detail) }.run()
         }
+        section("бета: обход DPI в туннеле — YouTube и X напрямую с приёмом (1.10.49-beta3)") {
+            DpiRelayChecks { name, ok, detail -> check(name, ok, detail) }.run()
+        }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
                 liveNetwork()

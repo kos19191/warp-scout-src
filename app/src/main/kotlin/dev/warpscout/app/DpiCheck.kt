@@ -5,6 +5,7 @@ import android.net.Network
 import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.system.OsConstants
+import dev.warpscout.core.dpi.DpiPlan
 import dev.warpscout.core.dpi.DpiProbe
 import dev.warpscout.core.dpi.DpiReport
 import dev.warpscout.core.dpi.DpiTargets
@@ -43,13 +44,18 @@ object DpiCheck {
         val summary: String,
         val byedpi: String,
         val trusted: Boolean,
-        val rows: List<Row>
+        val rows: List<Row>,
+        /** План обхода в туннеле на этой сети (с 1.10.49-beta3, см. DpiPlan): «youtube=split,x=oob». */
+        val plan: String = ""
     )
 
     /** Не нашлось выхода мимо туннеля — проверка показала бы туннель, а не провайдера. */
     class NoBypass(message: String) : Exception(message)
 
     private const val PREFS = "dpi_check"
+
+    /** План в итоге: проверка была, обходить нечего (см. Saved.plan). */
+    const val PLAN_NONE = "-"
     private const val KEEP_NETWORKS = 6
 
     /**
@@ -79,7 +85,13 @@ object DpiCheck {
             ttl = AndroidTtl
         )
         val report = probe.run(DpiTargets.DEFAULT, network = label, progress = progress, cancelled = cancelled)
-        val lines = report.journalLines()
+        // План обхода в туннеле (с 1.10.49-beta3): что на этой сети туннель поведёт напрямую с приёмом.
+        val plan = DpiPlan.of(report)
+        val lines = report.journalLines() + (
+            if (!report.controlOk) emptyList()
+            else if (plan.isEmpty) listOf("DPI: обход в туннеле на этой сети не нужен — YouTube и X идут как раньше")
+            else listOf("DPI: обход в туннеле на этой сети — ${plan.describe()} (напрямую, мимо WARP)")
+        )
         lines.forEachIndexed { i, line ->
             when {
                 i == 0 -> TunnelDebug.note(line)
@@ -106,9 +118,13 @@ object DpiCheck {
                     else -> "✗"
                 }
                 Row(kind, "$mark ${r.target.name} — ${r.text()}")
-            }
+            },
+            // «Обходить нечего» — отдельной отметкой: пустое поле у итогов прежних версий значит «не знаю».
+            plan = if (!report.controlOk) "" else if (plan.isEmpty) PLAN_NONE else plan.encode()
         )
         save(app, saved)
+        // План — сервису туннеля: он читает снимок настроек, а не настройки этого процесса.
+        runCatching { dev.warpscout.app.status.ServiceSettingsStore.syncFromPrefs(app) }
         return report to saved
     }
 
@@ -140,11 +156,23 @@ object DpiCheck {
         ed.apply()
     }
 
+    /**
+     * Планы обхода по сетям для сервиса туннеля (с 1.10.49-beta3, см. ServiceSettings.dpiPlans): только
+     * итоги, которым можно верить (контрольный сайт открылся), и только непустые.
+     */
+    fun servicePlans(context: Context): List<String> = load(context)
+        .filter { it.trusted && it.network.isNotBlank() && it.plan.isNotBlank() }
+        .mapNotNull { s -> DpiPlan.decode(s.plan).takeIf { !it.isEmpty }?.let { DpiPlan.entry(s.network, it) } }
+
+    /** План обхода для сети [key] из сохранённых итогов (для экрана). */
+    fun planFor(context: Context, key: String): DpiPlan = DpiPlan.forNetwork(servicePlans(context), key)
+
     private fun clean(s: String): String = s.replace('\n', ' ').replace('\t', ' ')
 
     private fun encode(s: Saved): String = buildString {
         append(s.at).append('\t').append(clean(s.network)).append('\t').append(clean(s.label)).append('\t')
             .append(if (s.trusted) 1 else 0).append('\t').append(clean(s.byedpi)).append('\t').append(clean(s.summary))
+            .append('\t').append(clean(s.plan))
         s.rows.forEach { r -> append('\n').append(r.kind).append('\t').append(clean(r.text)) }
     }
 
@@ -156,7 +184,8 @@ object DpiCheck {
             val i = l.indexOf('\t')
             if (i <= 0) null else Row(l.substring(0, i).toIntOrNull() ?: 2, l.substring(i + 1))
         }
-        Saved(head[0].toLong(), head[1], head[2], head[5], head[4], head[3] == "1", rows)
+        // Седьмое поле — план обхода (с 1.10.49-beta3); у итогов прежних версий его нет.
+        Saved(head[0].toLong(), head[1], head[2], head[5], head[4], head[3] == "1", rows, head.getOrNull(6).orEmpty())
     }.getOrNull()
 
     // ------------------------------------------------------------------------------- запасной DNS
@@ -205,7 +234,7 @@ object DpiCheck {
      * нельзя (getsockoptInt в SDK нет) — тогда [DpiProbe] вернёт стандартные 64 (так у Android).
      * Сокеты Java в Android двухстековые: для адреса IPv4 действует IP_TTL, для IPv6 — число хопов.
      */
-    private object AndroidTtl : DpiProbe.SocketTtl {
+    internal object AndroidTtl : DpiProbe.SocketTtl {
         override fun get(socket: Socket): Int? = null
 
         override fun set(socket: Socket, ttl: Int): Boolean = runCatching {

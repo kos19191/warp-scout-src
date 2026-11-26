@@ -181,6 +181,12 @@ class VpnTunnelController(private val context: Context) : TunnelController {
         WarpVpnService.reloadSecondRoutes(context)
     }
 
+    override fun reloadDpi() {
+        // Как и с адресами второго выхода: сначала снимок настроек, сервис читает план оттуда.
+        runCatching { dev.warpscout.app.status.ServiceSettingsStore.syncFromPrefs(context) }
+        WarpVpnService.reloadDpi(context)
+    }
+
     override fun answerTelegram(switch: Boolean) = WarpVpnService.answerTelegram(context, switch)
 
     // Причину отказа называет сервис, а живёт она в снимке его состояния: в процессе интерфейса
