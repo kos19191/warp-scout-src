@@ -1,0 +1,177 @@
+/*
+ * Облик дизайнов «Нежный» и «Стекло» поверх общей разметки (цвета — в designs.js).
+ * «Премиум» — style.css без изменений.
+ */
+
+/* ════════════════════ «Нежный» ════════════════════ */
+.app[data-design="soft"] .card {
+  border-radius: 24px; -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+}
+.app[data-design="soft"] .logo {
+  width: 44px; height: 44px; padding: 5px; border-radius: 50%;
+  background: rgba(255, 255, 255, .85); box-shadow: 0 6px 16px var(--glow); filter: none;
+}
+.app[data-design="soft"][data-theme="dark"] .logo { background: rgba(255, 255, 255, .08); box-shadow: none; }
+.app[data-design="soft"] .adv-top .logo { width: 36px; height: 36px; padding: 4px; }
+.app[data-design="soft"] .brand { font-weight: 700; letter-spacing: 0; }
+.app[data-design="soft"] .icon-btn { color: var(--accent); }
+.app[data-design="soft"] .orb .state { font-weight: 600; }
+.app[data-design="soft"] .orb[data-state="on"] .power,
+.app[data-design="soft"] .orb[data-state="scan"] .power,
+.app[data-design="soft"] .orb[data-state="connecting"] .power { filter: none; }
+.app[data-design="soft"] .dot { box-shadow: none; }
+.app[data-design="soft"] .btn { border-radius: 999px; font-weight: 600; }
+.app[data-design="soft"] .btn.primary {
+  background: linear-gradient(135deg, var(--pastel), var(--partner)); color: #2b2633;
+  box-shadow: 0 8px 20px var(--glow);
+}
+.app[data-design="soft"] .btn.tonal { background: var(--accent-soft); border: none; }
+.app[data-design="soft"] .btn.ghost { border-color: var(--line); }
+.app[data-design="soft"] .switch.on {
+  background: linear-gradient(135deg, var(--pastel), var(--partner)); box-shadow: none;
+}
+.app[data-design="soft"] .switch.on::after { box-shadow: 0 2px 6px rgba(60, 40, 90, .25); }
+.app[data-design="soft"] .mini .mh svg,
+.app[data-design="soft"] .fold-h .fi {
+  width: 34px; height: 34px; padding: 7px; border-radius: 12px; background: var(--accent-soft); color: var(--accent);
+}
+.app[data-design="soft"] .mini .mv { font-weight: 600; }
+.app[data-design="soft"] .mini .ma { font-weight: 600; }
+.app[data-design="soft"] .route-card .ri { padding: 3px; }
+.app[data-design="soft"] .mode-row::before { background: linear-gradient(90deg, transparent, var(--line), transparent); }
+.app[data-design="soft"] .sh {
+  text-transform: none; letter-spacing: 0; font-size: 14px; font-weight: 600; margin: 22px 6px 10px;
+}
+.app[data-design="soft"] .sh::after { display: none; }
+.app[data-design="soft"] .navbar {
+  margin: 0 12px 8px; height: 66px; border-radius: 24px; border: 1px solid var(--card-border);
+  box-shadow: var(--card-shadow); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); padding-bottom: 0;
+}
+.app[data-design="soft"] .navbar button.on svg { filter: none; }
+.app[data-design="soft"] .navbar button > * { position: relative; z-index: 1; }
+.app[data-design="soft"] .navbar button.on::before {
+  top: 8px; width: 50px; height: 30px; border-radius: 15px; background: var(--accent-soft); box-shadow: none; z-index: 0;
+}
+.app[data-design="soft"] .segc { border-radius: 999px; }
+.app[data-design="soft"] .segc button { border-radius: 999px; }
+.app[data-design="soft"] .segc button.on { box-shadow: none; background: var(--card-solid); color: var(--accent); }
+.app[data-design="soft"] .field, .app[data-design="soft"] .chip { border-radius: 16px; }
+.app[data-design="soft"] .radio.on i, .app[data-design="soft"] .check.on { box-shadow: none; }
+.app[data-design="soft"] .check { border-radius: 7px; }
+.app[data-design="soft"] .step .si { box-shadow: none; }
+.app[data-design="soft"] .step + .step::before { opacity: .5; }
+.app[data-design="soft"] .map-wrap { border-radius: 26px; border-color: var(--card-border); }
+.app[data-design="soft"] .tag, .app[data-design="soft"] .exit { border: none; border-radius: 999px; }
+.app[data-design="soft"] .tag.warp, .app[data-design="soft"] .exit.warp {
+  background: color-mix(in srgb, var(--blue) 16%, transparent);
+}
+.app[data-design="soft"] .top-row .n { border-radius: 50%; }
+.app[data-design="soft"] .sheet {
+  border-radius: 30px 30px 0 0; border-top: none; box-shadow: 0 -12px 40px rgba(60, 40, 90, .18);
+}
+.app[data-design="soft"] .opt { border-radius: 20px; border-color: transparent; }
+.app[data-design="soft"] .opt.on { box-shadow: none; border-color: var(--accent-line); }
+.app[data-design="soft"] .toast {
+  background: var(--card-solid); color: var(--text); border: none; border-radius: 999px; padding: 11px 18px;
+  box-shadow: 0 10px 26px rgba(60, 40, 90, .2);
+}
+
+/* ════════════════════ «Стекло» ════════════════════ */
+.app[data-design="glass"] .card {
+  border-radius: 22px; -webkit-backdrop-filter: blur(22px) saturate(170%); backdrop-filter: blur(22px) saturate(170%);
+  background-image: linear-gradient(135deg, rgba(255, 255, 255, .10), rgba(255, 255, 255, 0) 45%);
+}
+.app[data-design="glass"][data-theme="light"] .card {
+  background-image: linear-gradient(135deg, rgba(255, 255, 255, .7), rgba(255, 255, 255, .2) 60%);
+}
+.app[data-design="glass"] .logo { filter: drop-shadow(0 0 10px var(--glow)); }
+.app[data-design="glass"] .brand .s {
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.app[data-design="glass"][data-theme="dark"] .brand .s { filter: drop-shadow(0 0 8px var(--glow)); }
+.app[data-design="glass"] .icon-btn { color: var(--text); }
+.app[data-design="glass"] .orb[data-state="on"] .power { filter: drop-shadow(0 0 10px var(--glow)); }
+.app[data-design="glass"] .orb .rate .ra { color: var(--accent); }
+.app[data-design="glass"] .orb .rate .ra.u { color: var(--accent2); }
+.app[data-design="glass"] .btn { border-radius: 16px; }
+.app[data-design="glass"] .btn.primary {
+  background: linear-gradient(90deg, var(--accent), var(--accent2)); color: #0a0a16;
+  box-shadow: 0 0 22px var(--glow), inset 0 1px 0 rgba(255, 255, 255, .45);
+}
+.app[data-design="glass"][data-theme="light"] .btn.primary { color: #fff; }
+.app[data-design="glass"] .btn.tonal {
+  background: rgba(255, 255, 255, .08); border: 1px solid var(--accent-line);
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+}
+.app[data-design="glass"][data-theme="light"] .btn.tonal { background: rgba(255, 255, 255, .55); }
+.app[data-design="glass"] .btn.ghost { background: rgba(255, 255, 255, .06); border-color: var(--card-border); }
+.app[data-design="glass"] .switch { -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+.app[data-design="glass"] .switch.on { background: linear-gradient(90deg, var(--accent), var(--accent2)); box-shadow: 0 0 14px var(--glow); }
+.app[data-design="glass"] .mini .mh svg,
+.app[data-design="glass"] .fold-h .fi,
+.app[data-design="glass"] .route-card .ri,
+.app[data-design="glass"] .chev { filter: drop-shadow(0 0 6px var(--glow)); }
+.app[data-design="glass"] .mini:nth-child(2) .mh svg { color: var(--accent2); }
+.app[data-design="glass"] .mini .ma { color: var(--accent); }
+.app[data-design="glass"] .sh { text-shadow: 0 0 10px var(--glow); }
+.app[data-design="glass"] .sh::after { background: linear-gradient(90deg, var(--accent), var(--accent2) 40%, transparent); opacity: .5; }
+.app[data-design="glass"] .mode-row::before { background: linear-gradient(90deg, transparent, var(--accent), var(--accent2), transparent); opacity: .55; }
+.app[data-design="glass"] .navbar {
+  margin: 0 10px 8px; height: 66px; border-radius: 22px; border: 1px solid var(--card-border); padding-bottom: 0;
+  -webkit-backdrop-filter: blur(22px) saturate(170%); backdrop-filter: blur(22px) saturate(170%);
+  box-shadow: var(--card-shadow);
+}
+.app[data-design="glass"] .navbar button.on span { text-shadow: 0 0 10px var(--glow); }
+.app[data-design="glass"] .navbar button.on::before {
+  top: auto; bottom: 7px; width: 22px; height: 3px; border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+}
+.app[data-design="glass"] .segc button.on { background: rgba(255, 255, 255, .10); box-shadow: inset 0 0 0 1px var(--accent-line), 0 0 12px var(--accent-soft); }
+.app[data-design="glass"] .step .si { border-color: var(--accent); }
+.app[data-design="glass"] .step .si.ring { border-color: var(--accent2); box-shadow: 0 0 10px color-mix(in srgb, var(--accent2) 55%, transparent); }
+.app[data-design="glass"] .step + .step::before { background: linear-gradient(var(--accent), var(--accent2)); opacity: .55; }
+.app[data-design="glass"] .tag.warp, .app[data-design="glass"] .exit.warp {
+  color: var(--accent2); background: color-mix(in srgb, var(--accent2) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent2) 45%, transparent);
+}
+.app[data-design="glass"] .map-wrap { border-radius: 24px; }
+.app[data-design="glass"] .sheet {
+  -webkit-backdrop-filter: blur(26px) saturate(160%); backdrop-filter: blur(26px) saturate(160%);
+  border-top: 1px solid var(--card-border); box-shadow: 0 -10px 40px rgba(0, 0, 0, .4);
+}
+.app[data-design="glass"] .opt { background: rgba(255, 255, 255, .05); border-color: var(--card-border); }
+.app[data-design="glass"] .opt.on { box-shadow: 0 0 16px var(--accent-soft); }
+.app[data-design="glass"] .toast {
+  background: rgba(20, 20, 40, .7); color: #f3f4ff; border: 1px solid rgba(255, 255, 255, .18);
+  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+}
+.app[data-design="glass"] .sysnav { background: transparent; }
+
+/* ════════════════════ «Оформление» в телефоне ════════════════════ */
+.look-l { font-size: 12.5px; color: var(--text2); margin: 12px 16px 6px; }
+.look-l:first-child { margin-top: 14px; }
+.design-list { padding: 0 8px; }
+.design-list .radio { padding: 9px 8px; }
+.design-list .radio small { color: var(--text3); font-size: 12px; margin-left: auto; }
+.swatches { display: flex; gap: 10px; padding: 4px 16px 4px; flex-wrap: wrap; }
+.sw {
+  width: 38px; height: 38px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; position: relative;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .06);
+}
+.sw.on { border-color: var(--text); }
+.sw.on::after {
+  content: ""; position: absolute; left: 50%; top: 46%; width: 11px; height: 6px;
+  border-left: 2.4px solid #fff; border-bottom: 2.4px solid #fff; transform: translate(-50%, -50%) rotate(-45deg);
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, .45));
+}
+.sw-name { padding: 2px 16px 10px; font-size: 12.5px; color: var(--text2); }
+
+/* ════════════════════ панель макета ════════════════════ */
+body[data-design="soft"] .stage { background: radial-gradient(1100px 760px at 55% 40%, #1f1b28, #08070b); }
+body[data-design="glass"] .stage { background: radial-gradient(1100px 760px at 55% 40%, #10122a, #040409); }
+.panel .swatches { padding: 2px 0 0; }
+.panel .sw.on { border-color: #fff; }
+.panel .sw-name { padding: 6px 0 0; color: #9a938c; }
+.panel .seg button.on.soft { border-color: #c9b8f2; color: #ded3ff; background: rgba(201, 184, 242, .14); }
+.panel .seg button.on.glass { border-color: #22e1ff; color: #a5f3ff; background: rgba(34, 225, 255, .12); }

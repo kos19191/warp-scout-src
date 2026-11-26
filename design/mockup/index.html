@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>WilyScout — макет нового дизайна</title>
+<title>WilyScout — макеты дизайнов</title>
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="designs.css">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -47,8 +48,11 @@
 
 <div class="page">
   <aside class="panel" id="panel">
-    <h1>Wily<span>Scout</span> · макет</h1>
-    <p class="lead">Новый стиль для беты 7. Данные выдуманы. В телефоне всё нажимается: круглая кнопка включает и выключает, стрелка-круг в шапке запускает подбор, карточка маршрута открывает схему, карточки внизу — шторки, тумблер — расширенный режим.</p>
+    <h1>Wily<span>Scout</span> · макеты</h1>
+    <p class="lead">«Премиум» уже в бете 7, «Нежный» и «Стекло» — пока только макеты. Данные выдуманы. В телефоне всё нажимается: круглая кнопка включает и выключает, стрелка-круг в шапке запускает подбор, карточка маршрута открывает схему, карточки внизу — шторки, тумблер — расширенный режим. Дизайн и цвет меняются и здесь, и в телефоне: «Настройки» → «Оформление».</p>
+    <h2>Дизайн</h2>
+    <div class="seg" id="ctlDesign"><button data-v="premium">Премиум</button><button data-v="soft">Нежный</button><button data-v="glass">Стекло</button></div>
+    <div id="ctlToneBox"><h2>Цвет</h2><div class="swatches" id="ctlTone"></div><div class="sw-name" id="ctlToneName"></div></div>
     <h2>Тема</h2>
     <div class="seg" id="ctlTheme"><button data-v="system">Как в системе</button><button data-v="dark">Тёмная</button><button data-v="light">Светлая</button></div>
     <h2>Экран</h2>
@@ -61,7 +65,9 @@
       <b>Подключение.</b> По кольцу бежит свет, ореол дышит.<br>
       <b>Подключено.</b> Вспыхивает щит и расходится волна — дальше всё замирает: в покое анимаций нет, батарея не тратится.<br>
       <b>Маршрут.</b> Линия прорисовывается от вас через вход и выход WARP до второго выхода; пунктир — приложения, которые идут через каждый выход.<br>
-      <b>Расширенный режим.</b> Те же цвета и карточки, шапка с лого, вкладки с иконками, на «Главной» та же кнопка-кольцо.
+      <b>Расширенный режим.</b> Те же цвета и карточки, шапка с лого, вкладки с иконками, на «Главной» та же кнопка-кольцо.<br>
+      <b>Нежный.</b> Светлая пастель: акварельные пятна и волны на фоне, круглые карточки и кнопки-«пилюли». Подбор — кольцо заполняется, вокруг кружат три точки; подключение — от кольца расходятся мягкие круги; подключилось — распускаются лепестки.<br>
+      <b>Стекло.</b> Матовое стекло поверх неонового света: сквозь карточки видны цветные пятна фона. Кольцо — неон двух цветов. Подбор — бегущий луч и пунктирные орбиты; подключение — две кометы; подключилось — по кольцу пробегает блик и расходится волна.
     </div>
   </aside>
 
@@ -93,7 +99,7 @@
                   <svg class="power" viewBox="0 0 24 24"><use href="#i-power"/></svg>
                   <div class="state">Подключено</div>
                   <div class="sub">00:17:01</div>
-                  <div class="rate"><div class="div"></div><div><svg class="ico ra" viewBox="0 0 24 24"><use href="#i-arr-down"/></svg><span class="dn">118 Кбит/с</span></div><div><svg class="ico ra" viewBox="0 0 24 24"><use href="#i-arr-up"/></svg><span class="up">115 Кбит/с</span></div></div>
+                  <div class="rate"><div class="div"></div><div><svg class="ico ra" viewBox="0 0 24 24"><use href="#i-arr-down"/></svg><span class="dn">118 Кбит/с</span></div><div><svg class="ico ra u" viewBox="0 0 24 24"><use href="#i-arr-up"/></svg><span class="up">115 Кбит/с</span></div></div>
                 </div>
               </div>
               <div class="activity" id="sAct"></div>
@@ -161,7 +167,7 @@
                       <svg class="power" viewBox="0 0 24 24"><use href="#i-power"/></svg>
                       <div class="state">Подключено</div>
                       <div class="sub">00:17:01</div>
-                      <div class="rate"><div class="div"></div><div><svg class="ico ra" viewBox="0 0 24 24"><use href="#i-arr-down"/></svg><span class="dn">118 Кбит/с</span></div><div><svg class="ico ra" viewBox="0 0 24 24"><use href="#i-arr-up"/></svg><span class="up">115 Кбит/с</span></div></div>
+                      <div class="rate"><div class="div"></div><div><svg class="ico ra" viewBox="0 0 24 24"><use href="#i-arr-down"/></svg><span class="dn">118 Кбит/с</span></div><div><svg class="ico ra u" viewBox="0 0 24 24"><use href="#i-arr-up"/></svg><span class="up">115 Кбит/с</span></div></div>
                     </div>
                   </div>
                   <div class="activity" id="aAct"></div>
@@ -278,11 +284,22 @@
                   <div class="fold-b pad"><div class="btn-row" style="margin:0"><button class="btn ghost">Сохранить</button><button class="btn ghost">Восстановить</button></div></div></div>
                 <div class="card fold"><div class="fold-h"><svg class="ico fi" viewBox="0 0 24 24"><use href="#i-download"/></svg><div><div class="ft">Обновления и версия</div><div class="fs">1.10.49-beta7 · проверить новую</div></div><svg class="arr ico" viewBox="0 0 24 24"><use href="#i-down"/></svg></div>
                   <div class="fold-b pad"><button class="btn tonal small">Проверить обновления</button></div></div>
-                <div class="card fold open"><div class="fold-h"><svg class="ico fi" viewBox="0 0 24 24"><use href="#i-moon"/></svg><div><div class="ft">Оформление</div><div class="fs">Тема: как в системе, светлая или тёмная</div></div><svg class="arr ico" viewBox="0 0 24 24"><use href="#i-down"/></svg></div>
-                  <div class="fold-b" id="themeRadios">
-                    <div class="radio" data-v="system"><i></i>Как в системе</div>
-                    <div class="radio" data-v="light"><i></i>Светлая</div>
-                    <div class="radio" data-v="dark"><i></i>Тёмная</div>
+                <div class="card fold open"><div class="fold-h"><svg class="ico fi" viewBox="0 0 24 24"><use href="#i-moon"/></svg><div><div class="ft">Оформление</div><div class="fs" id="lookSummary">Дизайн, цвет и тема</div></div><svg class="arr ico" viewBox="0 0 24 24"><use href="#i-down"/></svg></div>
+                  <div class="fold-b">
+                    <div class="look-l">Дизайн</div>
+                    <div class="design-list" id="designRadios">
+                      <div class="radio" data-v="premium"><i></i>Премиум</div>
+                      <div class="radio" data-v="soft"><i></i>Нежный</div>
+                      <div class="radio" data-v="glass"><i></i>Стекло</div>
+                      <div class="radio" data-v="classic"><i></i>Классический<small>прежний вид</small></div>
+                    </div>
+                    <div id="toneBox"><div class="look-l">Цвет</div><div class="swatches" id="toneSw"></div><div class="sw-name" id="toneName"></div></div>
+                    <div class="look-l">Тема</div>
+                    <div id="themeRadios">
+                      <div class="radio" data-v="system"><i></i>Как в системе</div>
+                      <div class="radio" data-v="light"><i></i>Светлая</div>
+                      <div class="radio" data-v="dark"><i></i>Тёмная</div>
+                    </div>
                   </div></div>
                 <div class="card fold"><div class="fold-h"><svg class="ico fi" viewBox="0 0 24 24"><use href="#i-reset"/></svg><div><div class="ft">Сброс</div><div class="fs">Вернуть всё как после установки</div></div><svg class="arr ico" viewBox="0 0 24 24"><use href="#i-down"/></svg></div>
                   <div class="fold-b pad"><button class="btn ghost" style="color:var(--err)">Сбросить настройки</button></div></div>
@@ -326,6 +343,7 @@
   </main>
 </div>
 <button class="fab" id="fab">Макет</button>
+<script src="designs.js"></script>
 <script src="ring.js"></script>
 <script src="map.js"></script>
 <script src="bg.js"></script>

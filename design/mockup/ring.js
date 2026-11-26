@@ -85,6 +85,20 @@
         acc: g('--accent'), acc2: g('--accent2'), light: g('--accent-light'), err: g('--err'), warn: g('--warn'),
         discA: g('--disc-a'), discB: g('--disc-b'), off: g('--ring-off'), text: g('--text'),
       };
+      // Полупрозрачные цвета диска («Стекло») — с альфой: rgba(…, a).
+      const ga = (n) => {
+        const v = cs.getPropertyValue(n).trim();
+        const m = v.match(/rgba?\(([^)]+)\)/);
+        if (!m) return toRgb(v).concat(1);
+        const p = m[1].split(',').map((x) => parseFloat(x));
+        return [p[0], p[1], p[2], p.length > 3 ? p[3] : 1];
+      };
+      this.design = this.host.dataset.design || 'premium';
+      if (this.design === 'soft') this.col.partner = g('--partner');
+      if (this.design === 'glass') {
+        this.col.a = g('--neon-a'); this.col.b = g('--neon-b');
+        this.col.discAa = ga('--disc-a'); this.col.discBa = ga('--disc-b'); this.col.offA = ga('--ring-off');
+      }
       this.dark = this.host.dataset.theme !== 'light';
       this.kick();
     }
@@ -135,6 +149,8 @@
       if (!S) return;
       ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
       ctx.clearRect(0, 0, S, S);
+      if (this.design === 'soft') { this.drawSoft(now); return; }
+      if (this.design === 'glass') { this.drawGlass(now); return; }
       const cx = S / 2, cy = S / 2, R = S / 2;
       const r0 = R * 0.79, r1 = R * 0.725;
       const st = this.state, C = this.col, dark = this.dark;
@@ -267,6 +283,308 @@
         ctx.strokeStyle = rgba(C.light, 0.75 * (1 - e));
         ctx.shadowColor = rgba(C.acc, 0.8);
         ctx.shadowBlur = 14 * k;
+        ctx.beginPath(); ctx.arc(cx, cy, r0 + (R - r0 - 2) * e, 0, TAU); ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    /** Ход заполнения при подборе (общий для всех дизайнов). */
+    stepProgress(now) {
+      if (this.state === 'scan') {
+        const q = Math.min(1, (now - this.progAt) / 320);
+        this.shown = this.progFrom + (this.target - this.progFrom) * easeOut(q);
+      }
+    }
+
+    /**
+     * «Нежный»: мягкий диск с тенью, толстое пастельное кольцо со скруглёнными концами.
+     * Подбор — кольцо заполняется, вокруг медленно кружат три точки; подключение — от кольца мягко
+     * расходятся круги («дыхание»); подключилось — распускаются лепестки, потом всё замирает.
+     */
+    drawSoft(now) {
+      const ctx = this.ctx, S = this.size, C = this.col, dark = this.dark, st = this.state;
+      const cx = S / 2, cy = S / 2, R = S / 2, k = S / 318;
+      const r0 = R * 0.75, r1 = R * 0.69, lw = 11 * k;
+      const t = (now - this.t0) / 1000;
+      this.stepProgress(now);
+      const flashK = this.flashAt > 0 ? Math.min(1, (now - this.flashAt) / FLASH_MS) : 1;
+      const flashing = flashK < 1 && st === 'on';
+      const main = st === 'error' ? C.err : C.light;
+      const deep = st === 'error' ? C.err : C.acc;
+
+      // 1. Мягкий ореол.
+      let halo = ({ off: 0, scan: 0.22, connecting: 0.2, on: 0.42, error: 0.25 })[st] || 0;
+      if (st === 'connecting') halo += 0.1 * Math.sin(t * 2.6);
+      if (flashing) halo += 0.35 * (1 - easeOut(flashK));
+      if (dark) halo *= 0.7;
+      if (halo > 0) {
+        const g = ctx.createRadialGradient(cx, cy, r1, cx, cy, R);
+        g.addColorStop(0, rgba(main, halo));
+        g.addColorStop(0.55, rgba(st === 'on' ? C.partner : main, halo * 0.35));
+        g.addColorStop(1, rgba(main, 0));
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.fill();
+      }
+
+      // 2. Подключение: мягкие круги расходятся от кольца.
+      if (st === 'connecting') {
+        for (let i = 0; i < 2; i++) {
+          const u = ((t / 1.8) + i / 2) % 1;
+          ctx.lineWidth = (6 - 5 * u) * k;
+          ctx.strokeStyle = rgba(main, (dark ? 0.45 : 0.6) * (1 - u));
+          ctx.beginPath(); ctx.arc(cx, cy, r0 + (R - r0 - 3 * k) * easeOut(u), 0, TAU); ctx.stroke();
+        }
+      }
+
+      // 3. Диск с мягкой тенью.
+      ctx.save();
+      ctx.shadowColor = dark ? 'rgba(0,0,0,0.45)' : rgba(deep, 0.18);
+      ctx.shadowBlur = 26 * k; ctx.shadowOffsetY = 9 * k;
+      const dg = ctx.createRadialGradient(cx - r1 * 0.25, cy - r1 * 0.35, r1 * 0.1, cx, cy, r1);
+      dg.addColorStop(0, rgba(C.discA, 1));
+      dg.addColorStop(1, rgba(C.discB, 1));
+      ctx.fillStyle = dg;
+      ctx.beginPath(); ctx.arc(cx, cy, r1, 0, TAU); ctx.fill();
+      ctx.restore();
+      // Блик сверху — диск как мягкая пуговица.
+      const gl = ctx.createLinearGradient(cx, cy - r1, cx, cy);
+      gl.addColorStop(0, dark ? 'rgba(255,255,255,0.07)' : 'rgba(255,255,255,0.9)');
+      gl.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = gl;
+      ctx.beginPath(); ctx.ellipse(cx, cy - r1 * 0.38, r1 * 0.72, r1 * 0.5, 0, 0, TAU); ctx.fill();
+
+      // 4. Дорожка кольца.
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.lineWidth = lw;
+      ctx.strokeStyle = rgba(C.off, dark ? 0.9 : 1);
+      ctx.beginPath(); ctx.arc(cx, cy, r0, 0, TAU); ctx.stroke();
+
+      if (st === 'scan') {
+        const p = this.shown;
+        if (p > 0.002) {
+          const a0 = -Math.PI / 2;
+          ctx.strokeStyle = this.sweep(ctx, cx, cy, a0, C.light, C.acc, p);
+          ctx.shadowColor = rgba(C.light, 0.8); ctx.shadowBlur = 10 * k;
+          ctx.beginPath(); ctx.arc(cx, cy, r0, a0, a0 + p * TAU); ctx.stroke();
+        }
+        // Три точки кружат вокруг кольца.
+        ctx.shadowBlur = 8 * k; ctx.shadowColor = rgba(C.light, 0.9);
+        for (let i = 0; i < 3; i++) {
+          const a = t * TAU / 3.2 + i * TAU / 3;
+          const pulse = 0.6 + 0.4 * Math.sin(t * 3 + i * 2);
+          ctx.fillStyle = rgba(i === 1 ? C.partner : C.light, 0.95);
+          ctx.beginPath(); ctx.arc(cx + (r0 + 19 * k) * Math.cos(a), cy + (r0 + 19 * k) * Math.sin(a), (3.2 + 1.6 * pulse) * k, 0, TAU); ctx.fill();
+        }
+      } else if (st === 'connecting') {
+        // Дуга плавно бежит по дорожке.
+        const head = -Math.PI / 2 + t * TAU / 1.6;
+        const len = Math.PI * (0.45 + 0.15 * Math.sin(t * 2));
+        if (ctx.createConicGradient) {
+          const g = ctx.createConicGradient(head - len, cx, cy);
+          g.addColorStop(0, rgba(C.light, 0));
+          g.addColorStop(len / TAU, rgba(C.acc, 1));
+          g.addColorStop(Math.min(1, len / TAU + 0.001), rgba(C.light, 0));
+          ctx.strokeStyle = g;
+        } else ctx.strokeStyle = rgba(C.acc, 1);
+        ctx.beginPath(); ctx.arc(cx, cy, r0, head - len, head); ctx.stroke();
+      } else if (st === 'on' || st === 'error') {
+        if (st === 'on' && ctx.createConicGradient) {
+          const g = ctx.createConicGradient(-Math.PI / 2, cx, cy);
+          g.addColorStop(0, rgba(C.light, 1));
+          g.addColorStop(0.35, rgba(C.partner, 1));
+          g.addColorStop(0.65, rgba(mix(C.light, C.acc, 0.35), 1));
+          g.addColorStop(1, rgba(C.light, 1));
+          ctx.strokeStyle = g;
+        } else ctx.strokeStyle = rgba(main, 1);
+        ctx.shadowColor = rgba(main, dark ? 0.6 : 0.75);
+        ctx.shadowBlur = (flashing ? 22 : 12) * k;
+        ctx.beginPath(); ctx.arc(cx, cy, r0, 0, TAU); ctx.stroke();
+        // Тонкая светлая сердцевина — кольцо «объёмное», как сатиновая лента.
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = 2 * k;
+        ctx.strokeStyle = dark ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.75)';
+        ctx.beginPath(); ctx.arc(cx, cy, r0 - lw * 0.18, Math.PI * 1.05, Math.PI * 1.75); ctx.stroke();
+      }
+      ctx.restore();
+
+      // 5. Подключилось: распускаются лепестки.
+      if (flashing) {
+        const e = easeOut(flashK);
+        ctx.save();
+        for (let i = 0; i < 10; i++) {
+          const a = i * TAU / 10 + e * 0.5;
+          const rr = r0 + (8 + 26 * e) * k;
+          ctx.save();
+          ctx.translate(cx + rr * Math.cos(a), cy + rr * Math.sin(a));
+          ctx.rotate(a);
+          ctx.fillStyle = rgba(i % 2 ? C.partner : C.light, 0.85 * (1 - e));
+          ctx.beginPath(); ctx.ellipse(0, 0, (9 - 3 * e) * k, (4.5 - 1.5 * e) * k, 0, 0, TAU); ctx.fill();
+          ctx.restore();
+        }
+        ctx.restore();
+      }
+    }
+
+    /**
+     * «Стекло»: прозрачный диск с бликом, за ним цветной свет; кольцо — неон двух цветов.
+     * Подбор — вокруг кольца бежит луч и крутится пунктирная орбита; подключение — две кометы
+     * догоняют друг друга; подключилось — по кольцу пробегает белый блик и расходится волна.
+     */
+    drawGlass(now) {
+      const ctx = this.ctx, S = this.size, C = this.col, dark = this.dark, st = this.state;
+      const cx = S / 2, cy = S / 2, R = S / 2, k = S / 318;
+      const r0 = R * 0.78, r1 = R * 0.71;
+      const t = (now - this.t0) / 1000;
+      this.stepProgress(now);
+      const flashK = this.flashAt > 0 ? Math.min(1, (now - this.flashAt) / FLASH_MS) : 1;
+      const flashing = flashK < 1 && st === 'on';
+      const A = st === 'error' ? C.err : C.a, B = st === 'error' ? C.err : C.b;
+
+      // 1. Цветной свет за стеклом: A сверху слева, B снизу справа.
+      let light = ({ off: 0.10, scan: 0.28, connecting: 0.30, on: 0.48, error: 0.32 })[st] || 0.1;
+      if (st === 'connecting') light += 0.08 * Math.sin(t * 3.2);
+      if (flashing) light += 0.35 * (1 - easeOut(flashK));
+      if (!dark) light *= 0.75;
+      const blob = (x, y, c, a) => {
+        const g = ctx.createRadialGradient(x, y, 0, x, y, R * 0.95);
+        g.addColorStop(0, rgba(c, a)); g.addColorStop(1, rgba(c, 0));
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.fill();
+      };
+      blob(cx - R * 0.32, cy - R * 0.3, A, light);
+      blob(cx + R * 0.34, cy + R * 0.32, B, light * 0.9);
+
+      // 2. Подбор: луч бежит вокруг кольца, снаружи крутится пунктирная орбита.
+      if (st === 'scan') {
+        if (ctx.createConicGradient) {
+          const g = ctx.createConicGradient(t * TAU / 2, cx, cy);
+          g.addColorStop(0, rgba(A, 0)); g.addColorStop(0.8, rgba(A, 0)); g.addColorStop(1, rgba(A, dark ? 0.32 : 0.22));
+          ctx.fillStyle = g;
+          ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.arc(cx, cy, r0 + 4 * k, 0, TAU, true); ctx.fill();
+        }
+        ctx.save();
+        ctx.translate(cx, cy); ctx.rotate(-t * TAU / 14);
+        ctx.setLineDash([2 * k, 7 * k]);
+        ctx.lineWidth = 2 * k; ctx.strokeStyle = rgba(B, 0.6);
+        ctx.beginPath(); ctx.arc(0, 0, r0 + 16 * k, 0, TAU); ctx.stroke();
+        ctx.setLineDash([16 * k, 30 * k]);
+        ctx.lineWidth = 1.2 * k; ctx.strokeStyle = rgba(A, 0.5);
+        ctx.rotate(t * TAU / 6);
+        ctx.beginPath(); ctx.arc(0, 0, r0 + 26 * k, 0, TAU); ctx.stroke();
+        ctx.restore();
+      }
+
+      // 3. Стеклянный диск.
+      const dg = ctx.createRadialGradient(cx - r1 * 0.3, cy - r1 * 0.4, r1 * 0.1, cx, cy, r1);
+      const da = C.discAa, db = C.discBa;
+      dg.addColorStop(0, 'rgba(' + da[0] + ',' + da[1] + ',' + da[2] + ',' + da[3] + ')');
+      dg.addColorStop(1, 'rgba(' + db[0] + ',' + db[1] + ',' + db[2] + ',' + db[3] + ')');
+      ctx.fillStyle = dg;
+      ctx.beginPath(); ctx.arc(cx, cy, r1, 0, TAU); ctx.fill();
+      // Цветной отсвет кольца на стекле.
+      const tint = ctx.createLinearGradient(cx - r1, cy - r1, cx + r1, cy + r1);
+      tint.addColorStop(0, rgba(A, dark ? 0.10 : 0.06)); tint.addColorStop(1, rgba(B, dark ? 0.12 : 0.07));
+      ctx.fillStyle = tint;
+      ctx.beginPath(); ctx.arc(cx, cy, r1, 0, TAU); ctx.fill();
+      // Блик — стекло выпуклое.
+      ctx.save();
+      ctx.beginPath(); ctx.arc(cx, cy, r1, 0, TAU); ctx.clip();
+      const hl = ctx.createLinearGradient(cx, cy - r1, cx, cy - r1 * 0.1);
+      hl.addColorStop(0, dark ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.85)');
+      hl.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = hl;
+      ctx.beginPath(); ctx.ellipse(cx - r1 * 0.12, cy - r1 * 0.52, r1 * 0.78, r1 * 0.44, -0.25, 0, TAU); ctx.fill();
+      ctx.restore();
+      // Кромка стекла: светлая сверху, гаснет книзу.
+      const edge = ctx.createLinearGradient(cx, cy - r1, cx, cy + r1);
+      edge.addColorStop(0, dark ? 'rgba(255,255,255,0.45)' : 'rgba(255,255,255,1)');
+      edge.addColorStop(1, dark ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.3)');
+      ctx.lineWidth = 1.3 * k; ctx.strokeStyle = edge;
+      ctx.beginPath(); ctx.arc(cx, cy, r1 - 0.6, 0, TAU); ctx.stroke();
+
+      // 4. Кольцо.
+      ctx.save();
+      ctx.lineCap = 'round';
+      const neon = (rot) => {
+        if (!ctx.createConicGradient) return rgba(A, 1);
+        const g = ctx.createConicGradient(rot, cx, cy);
+        g.addColorStop(0, rgba(A, 1)); g.addColorStop(0.5, rgba(B, 1)); g.addColorStop(1, rgba(A, 1));
+        return g;
+      };
+      const oa = C.offA;
+      ctx.lineWidth = 3 * k;
+      ctx.strokeStyle = 'rgba(' + oa[0] + ',' + oa[1] + ',' + oa[2] + ',' + oa[3] + ')';
+      ctx.beginPath(); ctx.arc(cx, cy, r0, 0, TAU); ctx.stroke();
+      if (st === 'off') {
+        ctx.globalAlpha = dark ? 0.28 : 0.35;
+        ctx.lineWidth = 2 * k; ctx.strokeStyle = neon(-Math.PI / 2);
+        ctx.beginPath(); ctx.arc(cx, cy, r0, 0, TAU); ctx.stroke();
+        ctx.globalAlpha = 1;
+      } else if (st === 'scan') {
+        const p = this.shown;
+        if (p > 0.002) {
+          const a0 = -Math.PI / 2;
+          ctx.strokeStyle = this.sweep(ctx, cx, cy, a0, A, B, p);
+          ctx.lineWidth = 5 * k;
+          ctx.shadowColor = rgba(A, 0.9); ctx.shadowBlur = 16 * k;
+          ctx.beginPath(); ctx.arc(cx, cy, r0, a0, a0 + p * TAU); ctx.stroke();
+          ctx.fillStyle = '#ffffff'; ctx.shadowColor = rgba(B, 1); ctx.shadowBlur = 16 * k;
+          const a1 = a0 + p * TAU;
+          ctx.beginPath(); ctx.arc(cx + r0 * Math.cos(a1), cy + r0 * Math.sin(a1), 4.2 * k, 0, TAU); ctx.fill();
+        }
+      } else if (st === 'connecting') {
+        // Две кометы — цвета A и B — догоняют друг друга.
+        for (let c = 0; c < 2; c++) {
+          const col = c ? B : A;
+          const head = -Math.PI / 2 + t * TAU / 1.4 + c * Math.PI;
+          const tail = Math.PI * 0.55, steps = 24;
+          ctx.shadowColor = rgba(col, 0.9); ctx.shadowBlur = 14 * k;
+          for (let i = 0; i < steps; i++) {
+            const f0 = i / steps, f1 = (i + 1) / steps;
+            ctx.strokeStyle = rgba(col, f1 * f1);
+            ctx.lineWidth = (1.2 + 4 * f1) * k;
+            ctx.beginPath(); ctx.arc(cx, cy, r0, head - tail + tail * f0, head - tail + tail * f1 + 0.012); ctx.stroke();
+          }
+          ctx.fillStyle = '#ffffff';
+          ctx.beginPath(); ctx.arc(cx + r0 * Math.cos(head), cy + r0 * Math.sin(head), 3.6 * k, 0, TAU); ctx.fill();
+        }
+      } else {
+        // Подключено: неон двух цветов — мягкая подложка, свечение A и B, яркая сердцевина.
+        ctx.lineWidth = 14 * k;
+        ctx.strokeStyle = rgba(A, dark ? 0.10 : 0.08);
+        ctx.beginPath(); ctx.arc(cx, cy, r0, 0, TAU); ctx.stroke();
+        ctx.lineWidth = 5 * k;
+        ctx.strokeStyle = st === 'error' ? rgba(A, 1) : neon(-Math.PI / 2);
+        ctx.shadowColor = rgba(A, dark ? 0.95 : 0.6); ctx.shadowBlur = (dark ? 22 : 12) * k;
+        ctx.beginPath(); ctx.arc(cx, cy, r0, -Math.PI / 2, Math.PI / 2); ctx.stroke();
+        ctx.shadowColor = rgba(B, dark ? 0.95 : 0.6);
+        ctx.beginPath(); ctx.arc(cx, cy, r0, Math.PI / 2, Math.PI * 1.5); ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = 1.2 * k;
+        ctx.strokeStyle = 'rgba(255,255,255,' + (dark ? 0.55 : 0.8) + ')';
+        ctx.beginPath(); ctx.arc(cx, cy, r0 - 0.4, 0, TAU); ctx.stroke();
+        // Вспышка: по кольцу пробегает белый блик.
+        if (flashing && ctx.createConicGradient) {
+          const head = -Math.PI / 2 + easeOut(flashK) * TAU;
+          const g = ctx.createConicGradient(head - 0.9, cx, cy);
+          g.addColorStop(0, 'rgba(255,255,255,0)');
+          g.addColorStop(0.14, 'rgba(255,255,255,' + (0.95 * (1 - flashK)).toFixed(3) + ')');
+          g.addColorStop(0.145, 'rgba(255,255,255,0)');
+          g.addColorStop(1, 'rgba(255,255,255,0)');
+          ctx.strokeStyle = g; ctx.lineWidth = 6 * k;
+          ctx.shadowColor = 'rgba(255,255,255,0.9)'; ctx.shadowBlur = 16 * k;
+          ctx.beginPath(); ctx.arc(cx, cy, r0, 0, TAU); ctx.stroke();
+        }
+      }
+      ctx.restore();
+
+      // 5. Волна от кольца наружу.
+      if (flashing) {
+        const e = easeOut(flashK);
+        ctx.save();
+        ctx.lineWidth = (2.6 * (1 - e) + 0.6) * k;
+        ctx.strokeStyle = rgba(B, 0.8 * (1 - e));
+        ctx.shadowColor = rgba(B, 0.9); ctx.shadowBlur = 14 * k;
         ctx.beginPath(); ctx.arc(cx, cy, r0 + (R - r0 - 2) * e, 0, TAU); ctx.stroke();
         ctx.restore();
       }

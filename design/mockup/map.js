@@ -26,6 +26,9 @@
       const g = (n) => toRgb(cs.getPropertyValue(n));
       this.dark = this.host.dataset.theme !== 'light';
       this.col = { acc: g('--accent'), acc2: g('--accent2'), light: g('--accent-light'), text: g('--text'), blue: g('--blue') };
+      // «Нежный» и «Стекло» задают карте свои цвета; у «Премиума» их нет — карта как была.
+      const v = (n) => cs.getPropertyValue(n).trim();
+      this.mapc = v('--map-bg') ? { bg: v('--map-bg'), block: g('--map-block'), street: v('--map-street'), core: g('--route-core') } : null;
       this.base = null;
     }
 
@@ -76,7 +79,8 @@
       off.width = Math.round(W * dpr); off.height = Math.round(H * dpr);
       const g = off.getContext('2d');
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
-      g.fillStyle = dark ? '#0d0a08' : '#efe6dc';
+      const mc = this.mapc;
+      g.fillStyle = mc ? mc.bg : dark ? '#0d0a08' : '#efe6dc';
       g.fillRect(0, 0, W, H);
       const rnd = mulberry32(1126);
       g.save();
@@ -89,7 +93,10 @@
       for (let y = oy - M * 3; y < y1; y += M) majY.push(y);
       this.grid = { M, ox, oy };
       // Кварталы между главными улицами: дома мелкими прямоугольниками.
-      const houses = dark
+      const { mix } = window.MockColor;
+      const shade = (f) => { const c = mix(mc.block, f > 0 ? [255, 255, 255] : [0, 0, 0], Math.abs(f)); return 'rgb(' + c.join(',') + ')'; };
+      const houses = mc ? [shade(0), shade(0.12), shade(-0.08), shade(0.22), shade(-0.15)]
+        : dark
         ? ['#2b1d13', '#33220f', '#3d2914', '#241912', '#4a2f15']
         : ['#e3cbb2', '#dcc1a6', '#ead6c1', '#d6b796', '#f0dfcc'];
       for (let i = 0; i < majX.length - 1; i++) {
@@ -113,23 +120,25 @@
       }
       // Улицы.
       g.lineCap = 'butt';
-      g.strokeStyle = dark ? 'rgba(120,100,85,0.22)' : 'rgba(255,255,255,0.95)';
+      g.strokeStyle = mc ? mc.street : dark ? 'rgba(120,100,85,0.22)' : 'rgba(255,255,255,0.95)';
       g.lineWidth = 3;
       for (const x of majX) { g.beginPath(); g.moveTo(x, y0); g.lineTo(x, y1); g.stroke(); }
       for (const y of majY) { g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke(); }
-      g.strokeStyle = dark ? 'rgba(120,100,85,0.12)' : 'rgba(255,255,255,0.7)';
+      g.strokeStyle = mc ? mc.street : dark ? 'rgba(120,100,85,0.12)' : 'rgba(255,255,255,0.7)';
+      if (mc) g.globalAlpha = 0.55;
       g.lineWidth = 1.2;
       for (const x of majX) { g.beginPath(); g.moveTo(x + M / 2, y0); g.lineTo(x + M / 2, y1); g.stroke(); }
       for (const y of majY) { g.beginPath(); g.moveTo(x0, y + M / 2); g.lineTo(x1, y + M / 2); g.stroke(); }
       // Проспект наискосок.
-      g.strokeStyle = dark ? 'rgba(140,110,90,0.20)' : 'rgba(255,255,255,0.9)';
+      g.globalAlpha = 1;
+      g.strokeStyle = mc ? mc.street : dark ? 'rgba(140,110,90,0.20)' : 'rgba(255,255,255,0.9)';
       g.lineWidth = 4;
       g.beginPath(); g.moveTo(x0, y1 - 60); g.lineTo(x1, y0 + 120); g.stroke();
       g.restore();
       // Края темнее — взгляд к маршруту.
       const v = g.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.75);
       v.addColorStop(0, 'rgba(0,0,0,0)');
-      v.addColorStop(1, dark ? 'rgba(0,0,0,0.55)' : 'rgba(120,80,40,0.10)');
+      v.addColorStop(1, dark ? 'rgba(0,0,0,0.55)' : mc ? 'rgba(60,50,90,0.08)' : 'rgba(120,80,40,0.10)');
       g.fillStyle = v; g.fillRect(0, 0, W, H);
       this.base = off;
     }
@@ -189,7 +198,7 @@
         ctx.shadowColor = rgba(C.acc, 0.9); ctx.shadowBlur = dark ? 16 : 8;
         this.polyline(ctx, pts, reach);
         ctx.shadowBlur = 0;
-        ctx.strokeStyle = dark ? rgba([255, 214, 160], 1) : rgba(C.acc, 1); ctx.lineWidth = 2.6;
+        ctx.strokeStyle = this.mapc ? rgba(this.mapc.core, 1) : dark ? rgba([255, 214, 160], 1) : rgba(C.acc, 1); ctx.lineWidth = 2.6;
         this.polyline(ctx, pts, reach);
         ctx.restore();
       }
@@ -271,7 +280,7 @@
       let x = p.x + off[0], y = p.y + off[1];
       x = Math.max(6, Math.min(this.W - w - 6, x)); y = Math.max(6, Math.min(this.H - h - 6, y));
       ctx.fillStyle = dark ? 'rgba(14,10,8,0.82)' : 'rgba(255,255,255,0.92)';
-      ctx.strokeStyle = dark ? 'rgba(255,138,48,0.35)' : 'rgba(234,88,12,0.30)';
+      ctx.strokeStyle = rgba(this.col.acc, dark ? 0.35 : 0.30);
       ctx.lineWidth = 1;
       const r = 8;
       ctx.beginPath();

@@ -7,6 +7,7 @@
   const app = $('#app');
 
   const M = {
+    design: 'premium', tone: { soft: 0, glass: 0 },
     theme: 'system', screen: 'simple', back: 'simple', state: 'on', progress: 0,
     connectedAt: Date.now() - 1021 * 1000, tab: 0, run: 0, act: '', dn: 118, up: 115,
   };
@@ -19,13 +20,64 @@
   // ───────── тема ─────────
   const mq = window.matchMedia('(prefers-color-scheme: dark)');
   const effTheme = () => (M.theme === 'system' ? (mq.matches ? 'dark' : 'light') : M.theme);
+  const DESIGN_NAME = { premium: 'Премиум', soft: 'Нежный', glass: 'Стекло' };
+  const THEME_NAME = { system: 'как в системе', light: 'светлая', dark: 'тёмная' };
+  const tones = () => (M.design === 'soft' ? Designs.SOFT : M.design === 'glass' ? Designs.GLASS : null);
+
   function applyTheme() {
-    app.dataset.theme = effTheme();
+    const th = effTheme();
+    app.dataset.theme = th;
+    Designs.apply(app, M.design, M.tone[M.design] || 0, th === 'dark');
+    document.body.dataset.design = M.design;
     rings.forEach((r) => r.readColors());
     map.readColors(); map.kick();
     drawBg();
     mark('#ctlTheme', M.theme);
+    mark('#ctlDesign', M.design);
+    $$('#ctlDesign button').forEach((b) => { b.classList.toggle('soft', b.dataset.v === 'soft'); b.classList.toggle('glass', b.dataset.v === 'glass'); });
     $$('#themeRadios .radio').forEach((r) => r.classList.toggle('on', r.dataset.v === M.theme));
+    $$('#designRadios .radio').forEach((r) => r.classList.toggle('on', r.dataset.v === M.design));
+    renderTones();
+    save();
+  }
+
+  /** Кружки цветов: в панели макета и в «Оформлении»; у «Премиума» выбора цвета нет. */
+  function renderTones() {
+    const list = tones();
+    const cur = M.tone[M.design] || 0;
+    $('#ctlToneBox').style.display = list ? '' : 'none';
+    $('#toneBox').style.display = list ? '' : 'none';
+    let summary = DESIGN_NAME[M.design];
+    if (list) {
+      const html = list.map((t, i) => {
+        const bg = M.design === 'soft' ? t.pastel : 'linear-gradient(135deg,' + t.a + ',' + t.b + ')';
+        return '<button class="sw' + (i === cur ? ' on' : '') + '" data-i="' + i + '" title="' + t.name + '" style="background:' + bg + '"></button>';
+      }).join('');
+      $('#ctlTone').innerHTML = html; $('#toneSw').innerHTML = html;
+      $('#ctlToneName').textContent = list[cur].name; $('#toneName').textContent = list[cur].name;
+      summary += ' · ' + list[cur].name;
+    }
+    $('#lookSummary').textContent = summary + ' · ' + THEME_NAME[M.theme];
+  }
+
+  function setDesign(d) {
+    if (d === 'classic') { toast('«Классический» — прежний вид, он есть в приложении'); return; }
+    if (!DESIGN_NAME[d] || d === M.design) return;
+    M.design = d; applyTheme();
+  }
+  function setTone(i) { M.tone[M.design] = i; applyTheme(); }
+
+  // Выбор запоминается; адрес вида #design=soft&tone=2&theme=light открывает нужный вид сразу.
+  function save() { try { localStorage.setItem('wilyscout-mock', JSON.stringify({ design: M.design, tone: M.tone, theme: M.theme })); } catch (e) { /* без хранилища */ } }
+  function restore() {
+    try {
+      const v = JSON.parse(localStorage.getItem('wilyscout-mock') || 'null');
+      if (v) { if (DESIGN_NAME[v.design]) M.design = v.design; if (v.tone) Object.assign(M.tone, v.tone); if (THEME_NAME[v.theme]) M.theme = v.theme; }
+    } catch (e) { /* без хранилища */ }
+    const h = new URLSearchParams(location.hash.slice(1));
+    if (DESIGN_NAME[h.get('design')]) M.design = h.get('design');
+    if (h.get('tone') !== null && M.design !== 'premium') M.tone[M.design] = Math.max(0, parseInt(h.get('tone'), 10) || 0) % tones().length;
+    if (THEME_NAME[h.get('theme')]) M.theme = h.get('theme');
   }
   if (mq.addEventListener) mq.addEventListener('change', () => { if (M.theme === 'system') applyTheme(); });
 
@@ -313,11 +365,17 @@
     }
     if (t.closest('.js-close')) { closeSheet(); return; }
     const th = t.closest('#themeRadios .radio');
-    if (th) { M.theme = th.dataset.v; applyTheme(); }
+    if (th) { M.theme = th.dataset.v; applyTheme(); return; }
+    const dr = t.closest('#designRadios .radio');
+    if (dr) { setDesign(dr.dataset.v); return; }
+    const tsw = t.closest('#toneSw .sw');
+    if (tsw) setTone(+tsw.dataset.i);
   });
 
   // ───────── панель макета ─────────
   $$('#ctlTheme button').forEach((b) => b.addEventListener('click', () => { M.theme = b.dataset.v; applyTheme(); }));
+  $$('#ctlDesign button').forEach((b) => b.addEventListener('click', () => setDesign(b.dataset.v)));
+  $('#ctlTone').addEventListener('click', (e) => { const sw = e.target.closest('.sw'); if (sw) setTone(+sw.dataset.i); });
   $$('#ctlScreen button').forEach((b) => b.addEventListener('click', () => showScreen(b.dataset.v)));
   $$('#ctlState button').forEach((b) => b.addEventListener('click', () => {
     cancelRun();
@@ -350,6 +408,7 @@
   window.addEventListener('resize', fit);
 
   // ───────── старт ─────────
+  restore();
   applyTheme();
   mark('#ctlScreen', 'simple');
   setState('on');
