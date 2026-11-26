@@ -1,5 +1,7 @@
 package dev.warpscout.desktop.update
 
+import com.sun.jna.platform.win32.Advapi32Util
+import com.sun.jna.platform.win32.WinReg
 import dev.warpscout.core.json.JsonVal
 import dev.warpscout.core.json.parseJson
 import dev.warpscout.desktop.tunnel.WindowsAutostart
@@ -120,11 +122,46 @@ object AppUpdater {
         val exePath = System.getProperty("jpackage.app-path")?.trim().orEmpty()
         if (exePath.isBlank()) return InstallKind.MSI
         val normalized = exePath.replace('/', '\\').lowercase()
-        return if ("\\program files\\" in normalized || "\\program files (x86)\\" in normalized) {
-            InstallKind.MSI
-        } else {
-            InstallKind.PORTABLE
+        if ("\\program files\\" in normalized || "\\program files (x86)\\" in normalized) {
+            return InstallKind.MSI
         }
+        // Если пользователь поставил MSI в нестандартную папку (например D:\WarpScout),
+        // проверяем наличие записи MSI-деинсталлятора Windows с совпадающим InstallLocation.
+        val appDir = File(exePath).parentFile
+        if (appDir != null && isRegisteredMsiInstall(appDir)) {
+            return InstallKind.MSI
+        }
+        return InstallKind.PORTABLE
+    }
+
+    private fun isRegisteredMsiInstall(appDir: File): Boolean {
+        if (!WindowsAutostart.isWindows()) return false
+        val targetNorm = runCatching { appDir.canonicalPath }.getOrDefault(appDir.absolutePath)
+            .replace('/', '\\').trimEnd('\\').lowercase()
+        val roots = listOf(
+            WinReg.HKEY_LOCAL_MACHINE to "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+            WinReg.HKEY_LOCAL_MACHINE to "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+            WinReg.HKEY_CURRENT_USER to "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"
+        )
+        for ((hkey, basePath) in roots) {
+            val keys = runCatching { Advapi32Util.registryGetKeys(hkey, basePath) }.getOrNull() ?: continue
+            for (k in keys) {
+                val full = "$basePath\\$k"
+                val name = runCatching {
+                    if (Advapi32Util.registryValueExists(hkey, full, "DisplayName"))
+                        Advapi32Util.registryGetStringValue(hkey, full, "DisplayName")
+                    else null
+                }.getOrNull() ?: continue
+                if (!name.equals("WarpScout", ignoreCase = true)) continue
+                val loc = runCatching {
+                    if (Advapi32Util.registryValueExists(hkey, full, "InstallLocation"))
+                        Advapi32Util.registryGetStringValue(hkey, full, "InstallLocation")
+                    else null
+                }.getOrNull()?.replace('/', '\\')?.trimEnd('\\')?.lowercase()
+                if (!loc.isNullOrBlank() && loc == targetNorm) return true
+            }
+        }
+        return false
     }
 
     fun currentExeFile(): File? =
@@ -361,6 +398,185 @@ object AppUpdater {
         )
     }
 
+    private const val UPDATE_ERROR_FILE = "update-error.txt"
+
+    /** Читает и удаляет сообщение об ошибке предыдущей попытки самообновления (если оно было). */
+    fun consumeLastUpdateError(updatesDir: File): String? {
+        val errFile = File(updatesDir, UPDATE_ERROR_FILE)
+        if (!errFile.isFile) return null
+        val text = runCatching { errFile.readText(Charsets.UTF_8).trim() }.getOrNull()
+        runCatching { errFile.delete() }
+        return text?.takeIf { it.isNotBlank() }
+    }
+
+    /** Записывает PowerShell-скрипт с обязательным UTF-8 BOM, чтобы PowerShell 5.1 корректно читал кириллицу в путях. */
+    internal fun writeScriptWithUtf8Bom(file: File, script: String) {
+        file.parentFile?.mkdirs()
+        val bom = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte())
+        val body = script.replace("\r\n", "\n").replace("\n", "\r\n").toByteArray(Charsets.UTF_8)
+        FileOutputStream(file).use { out ->
+            out.write(bom)
+            out.write(body)
+        }
+    }
+
+    /**
+     * Генерирует PowerShell-скрипт установки обновления:
+     *  • ждёт завершения текущего процесса WarpScout (и дочернего ciadpi.exe из той же папки);
+     *  • для MSI передаёт аргументы единой строкой в двойных кавычках (безопасно для пробелов и кириллицы),
+     *    пишет подробный `msi-install.log`, повторяет при `1618` и пробует `REINSTALL=ALL` при `1638`;
+     *  • для Portable ZIP использует `Expand-Archive` + `robocopy.exe` с `/R:15 /W:1` (устойчиво к временным
+     *    блокировкам файлов, очищает устаревшие jar-ы в `app/`/`runtime/`/`bin/`, не трогает лишние файлы в корне);
+     *  • пишет подробный журнал в `update.log`, сохраняет ошибку в `update-error.txt` при сбое и
+     *    в блоке `finally` ВСЕГДА запускает `WarpScout.exe` обратно.
+     */
+    internal fun buildUpdateScript(
+        downloadedFile: File,
+        isMsi: Boolean,
+        sameVersion: Boolean,
+        updatesDir: File,
+        currentPid: Long,
+        currentExe: File?,
+        launchAfter: Boolean = true
+    ): String {
+        val psQuote = { s: String -> s.replace("'", "''") }
+        val logEsc = psQuote(File(updatesDir, "update.log").absolutePath)
+        val errEsc = psQuote(File(updatesDir, UPDATE_ERROR_FILE).absolutePath)
+        val msiLogEsc = psQuote(File(updatesDir, "msi-install.log").absolutePath)
+        val defaultExePath = currentExe?.absolutePath ?: """C:\Program Files\WarpScout\WarpScout.exe"""
+        val defaultExeEsc = psQuote(defaultExePath)
+        val appDirEsc = psQuote((currentExe?.parentFile ?: File("""C:\Program Files\WarpScout""")).absolutePath)
+
+        return buildString {
+            appendLine("\$ErrorActionPreference = 'Stop'")
+            appendLine("\$ProgressPreference = 'SilentlyContinue'")
+            appendLine("\$logFile = '$logEsc'")
+            appendLine("\$errFile = '$errEsc'")
+            appendLine("Remove-Item -Path \$errFile -Force -ErrorAction SilentlyContinue")
+            appendLine("function Write-Log([string]\$msg) {")
+            appendLine("  \$ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'")
+            appendLine("  Add-Content -Path \$logFile -Value \"[\$ts] \$msg\" -Encoding UTF8 -ErrorAction SilentlyContinue")
+            appendLine("}")
+            appendLine("Write-Log '=== WarpScout self-update start ==='")
+            appendLine("Write-Log 'Mode: ${if (isMsi) "MSI" else "PORTABLE"} | WaitPid: $currentPid | File: ${psQuote(downloadedFile.absolutePath)}'")
+            appendLine("try {")
+            if (currentPid > 0L) {
+                appendLine("  for (\$i = 0; \$i -lt 120; \$i++) {")
+                appendLine("    if (-not (Get-Process -Id $currentPid -ErrorAction SilentlyContinue)) { break }")
+                appendLine("    Start-Sleep -Milliseconds 250")
+                appendLine("  }")
+                appendLine("  Write-Log 'Process $currentPid exited (or wait elapsed)'")
+            }
+            // На всякий случай завершаем оставшийся ciadpi.exe из нашей папки установки, чтобы не держал bin\ciadpi.exe.
+            appendLine("  Get-Process -Name 'ciadpi' -ErrorAction SilentlyContinue | ForEach-Object {")
+            appendLine("    try {")
+            appendLine("      if (\$_.Path -and \$_.Path.StartsWith('$appDirEsc', [System.StringComparison]::OrdinalIgnoreCase)) {")
+            appendLine("        Stop-Process -Id \$_.Id -Force -ErrorAction SilentlyContinue")
+            appendLine("      }")
+            appendLine("    } catch {}")
+            appendLine("  }")
+            appendLine("  Start-Sleep -Milliseconds 1200")
+
+            if (isMsi) {
+                val msiEsc = psQuote(downloadedFile.absolutePath)
+                appendLine("  \$msiPath = '$msiEsc'")
+                appendLine("  \$msiLog = '$msiLogEsc'")
+                appendLine("  if (-not (Test-Path -LiteralPath \$msiPath)) { throw \"Файл обновления не найден: \$msiPath\" }")
+                appendLine("  function Invoke-Msi([string]\$extra) {")
+                appendLine("    if ([string]::IsNullOrWhiteSpace(\$extra)) {")
+                appendLine("      \$argStr = \"/i `\"\$msiPath`\" /qb! /norestart /l*v `\"\$msiLog`\"\"")
+                appendLine("    } else {")
+                appendLine("      \$argStr = \"/i `\"\$msiPath`\" \$extra /qb! /norestart /l*v `\"\$msiLog`\"\"")
+                appendLine("    }")
+                appendLine("    Write-Log \"Running: msiexec.exe \$argStr\"")
+                appendLine("    \$p = Start-Process -FilePath 'msiexec.exe' -ArgumentList \$argStr -Wait -PassThru")
+                appendLine("    Write-Log \"msiexec exit code: \$(\$p.ExitCode)\"")
+                appendLine("    return \$p.ExitCode")
+                appendLine("  }")
+                appendLine("  \$rc = -1")
+                appendLine("  for (\$attempt = 1; \$attempt -le 3; \$attempt++) {")
+                if (sameVersion) {
+                    appendLine("    \$rc = Invoke-Msi 'REINSTALL=ALL REINSTALLMODE=vomus'")
+                    appendLine("    if (\$rc -ne 0 -and \$rc -ne 3010 -and \$rc -ne 1618) {")
+                    appendLine("      \$rc = Invoke-Msi ''")
+                    appendLine("    }")
+                } else {
+                    appendLine("    \$rc = Invoke-Msi ''")
+                    appendLine("    if (\$rc -eq 1638) {")
+                    appendLine("      \$rc = Invoke-Msi 'REINSTALL=ALL REINSTALLMODE=vomus'")
+                    appendLine("    }")
+                }
+                appendLine("    if (\$rc -eq 0 -or \$rc -eq 3010) { break }")
+                appendLine("    if (\$rc -eq 1618 -and \$attempt -lt 3) {")
+                appendLine("      Write-Log 'msiexec busy (1618), retrying in 4s...'")
+                appendLine("      Start-Sleep -Seconds 4")
+                appendLine("      continue")
+                appendLine("    }")
+                appendLine("    break")
+                appendLine("  }")
+                appendLine("  if (\$rc -ne 0 -and \$rc -ne 3010) {")
+                appendLine("    \$errMsg = \"MSI-установщик завершился с кодом \$rc (подробности в \$msiLog). Попробуйте запустить файл \$msiPath вручную.\"")
+                appendLine("    Write-Log \$errMsg")
+                appendLine("    Set-Content -Path \$errFile -Value \$errMsg -Encoding UTF8 -ErrorAction SilentlyContinue")
+                appendLine("  } else {")
+                appendLine("    Write-Log 'MSI update completed successfully'")
+                appendLine("  }")
+            } else {
+                val zipEsc = psQuote(downloadedFile.absolutePath)
+                val stageEsc = psQuote(File(updatesDir, "stage").absolutePath)
+                appendLine("  \$zipPath = '$zipEsc'")
+                appendLine("  \$appDir = '$appDirEsc'")
+                appendLine("  \$stageDir = '$stageEsc'")
+                appendLine("  if (-not (Test-Path -LiteralPath \$zipPath)) { throw \"Архив обновления не найден: \$zipPath\" }")
+                appendLine("  if (Test-Path -LiteralPath \$stageDir) { Remove-Item -LiteralPath \$stageDir -Recurse -Force }")
+                appendLine("  Write-Log \"Extracting archive to \$stageDir...\"")
+                appendLine("  Expand-Archive -LiteralPath \$zipPath -DestinationPath \$stageDir -Force")
+                // Если в архиве файлы лежат внутри одной корневой подпапки (например WarpScout/WarpScout.exe), разворачиваем её.
+                appendLine("  \$srcRoot = \$stageDir")
+                appendLine("  if (-not (Test-Path -LiteralPath (Join-Path \$srcRoot 'WarpScout.exe'))) {")
+                appendLine("    \$sub = Get-ChildItem -LiteralPath \$stageDir -Directory | Where-Object { Test-Path -LiteralPath (Join-Path \$_.FullName 'WarpScout.exe') } | Select-Object -First 1")
+                appendLine("    if (\$sub) { \$srcRoot = \$sub.FullName }")
+                appendLine("  }")
+                appendLine("  Write-Log \"Syncing files from \$srcRoot -> \$appDir\"")
+                appendLine("  foreach (\$subDir in @('app', 'runtime', 'bin')) {")
+                appendLine("    \$s = Join-Path \$srcRoot \$subDir")
+                appendLine("    if (Test-Path -LiteralPath \$s) {")
+                appendLine("      \$d = Join-Path \$appDir \$subDir")
+                appendLine("      & robocopy.exe \$s \$d /MIR /R:15 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null")
+                appendLine("      \$rc = \$LASTEXITCODE")
+                appendLine("      Write-Log \"robocopy \$subDir exit code: \$rc\"")
+                appendLine("      if (\$rc -ge 8) { throw \"Не удалось обновить каталог \$subDir (robocopy код \$rc)\" }")
+                appendLine("    }")
+                appendLine("  }")
+                appendLine("  & robocopy.exe \$srcRoot \$appDir /LEV:1 /R:15 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null")
+                appendLine("  \$rootRc = \$LASTEXITCODE")
+                appendLine("  Write-Log \"robocopy root exit code: \$rootRc\"")
+                appendLine("  if (\$rootRc -ge 8) { throw \"Не удалось обновить файлы приложения (robocopy код \$rootRc)\" }")
+                appendLine("  Remove-Item -LiteralPath \$stageDir -Recurse -Force -ErrorAction SilentlyContinue")
+                appendLine("  Write-Log 'Portable update completed successfully'")
+            }
+
+            appendLine("} catch {")
+            appendLine("  \$msg = \"Ошибка установки обновления: \$(\$_.Exception.Message)\"")
+            appendLine("  Write-Log \$msg")
+            appendLine("  Set-Content -Path \$errFile -Value \$msg -Encoding UTF8 -ErrorAction SilentlyContinue")
+            appendLine("} finally {")
+            if (launchAfter) {
+                appendLine("  \$candidates = @('$defaultExeEsc', 'C:\\Program Files\\WarpScout\\WarpScout.exe')")
+                appendLine("  \$launchExe = \$candidates | Where-Object { \$_ -and (Test-Path -LiteralPath \$_) } | Select-Object -First 1")
+                appendLine("  if (\$launchExe) {")
+                appendLine("    \$workDir = Split-Path -Parent \$launchExe")
+                appendLine("    Write-Log \"Relaunching: \$launchExe\"")
+                appendLine("    Start-Process -FilePath \$launchExe -WorkingDirectory \$workDir")
+                appendLine("  } else {")
+                appendLine("    Write-Log 'WarpScout.exe not found for relaunch'")
+                appendLine("  }")
+            }
+            appendLine("  Write-Log '=== WarpScout self-update end ==='")
+            appendLine("}")
+        }
+    }
+
     /**
      * Запускает фоновый PowerShell-скрипт установки обновления (ждёт завершения текущего процесса,
      * ставит MSI или распаковывает Portable ZIP поверх текущей папки и запускает обновлённый WarpScout.exe).
@@ -373,68 +589,39 @@ object AppUpdater {
         currentExe: File? = currentExeFile()
     ): Boolean {
         if (!WindowsAutostart.isWindows()) return false
+        if (!isMsi && currentExe?.parentFile == null) return false
         updatesDir.mkdirs()
         val scriptFile = File(updatesDir, "apply-update.ps1")
+        val stdoutLog = File(updatesDir, "update-stdout.log")
         val currentPid = ProcessHandle.current().pid()
 
-        val psPath = { f: File -> f.absolutePath.replace("'", "''") }
-        val script = if (isMsi) {
-            val defaultExe = currentExe?.absolutePath ?: """C:\Program Files\WarpScout\WarpScout.exe"""
-            val escapedDefaultExe = defaultExe.replace("'", "''")
-            val msiEsc = psPath(downloadedFile)
-            buildString {
-                appendLine("\$ErrorActionPreference = 'Continue'")
-                appendLine("for (\$i = 0; \$i -lt 40; \$i++) {")
-                appendLine("  if (-not (Get-Process -Id $currentPid -ErrorAction SilentlyContinue)) { break }")
-                appendLine("  Start-Sleep -Milliseconds 250")
-                appendLine("}")
-                appendLine("Start-Sleep -Milliseconds 500")
-                if (sameVersion) {
-                    // Скользящее обновление preview с тем же номером версии: принудительно обновляем файлы.
-                    appendLine("\$p = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', '$msiEsc', 'REINSTALL=ALL', 'REINSTALLMODE=vomus', '/qb', '/norestart') -Wait -PassThru")
-                    appendLine("if (\$p.ExitCode -ne 0 -and \$p.ExitCode -ne 3010) {")
-                    appendLine("  Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', '$msiEsc', '/qb', '/norestart') -Wait -PassThru | Out-Null")
-                    appendLine("}")
-                } else {
-                    appendLine("\$p = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', '$msiEsc', '/qb', '/norestart') -Wait -PassThru")
-                    appendLine("if (\$p.ExitCode -eq 1638) {")
-                    appendLine("  Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', '$msiEsc', 'REINSTALL=ALL', 'REINSTALLMODE=vomus', '/qb', '/norestart') -Wait -PassThru | Out-Null")
-                    appendLine("}")
-                }
-                appendLine("\$candidates = @('$escapedDefaultExe', 'C:\\Program Files\\WarpScout\\WarpScout.exe')")
-                appendLine("\$launchExe = \$candidates | Where-Object { Test-Path \$_ } | Select-Object -First 1")
-                appendLine("if (\$launchExe) { Start-Process -FilePath \$launchExe }")
-            }
-        } else {
-            val appDir = currentExe?.parentFile ?: return false
-            val appDirEsc = psPath(appDir)
-            val exeEsc = psPath(currentExe)
-            val zipEsc = psPath(downloadedFile)
-            val stageEsc = psPath(File(updatesDir, "stage"))
-            buildString {
-                appendLine("\$ErrorActionPreference = 'Stop'")
-                appendLine("for (\$i = 0; \$i -lt 40; \$i++) {")
-                appendLine("  if (-not (Get-Process -Id $currentPid -ErrorAction SilentlyContinue)) { break }")
-                appendLine("  Start-Sleep -Milliseconds 250")
-                appendLine("}")
-                appendLine("Start-Sleep -Milliseconds 600")
-                appendLine("if (Test-Path '$stageEsc') { Remove-Item -Recurse -Force '$stageEsc' }")
-                appendLine("Expand-Archive -Path '$zipEsc' -DestinationPath '$stageEsc' -Force")
-                appendLine("Copy-Item -Path '$stageEsc\\*' -Destination '$appDirEsc' -Recurse -Force")
-                appendLine("Remove-Item -Recurse -Force '$stageEsc' -ErrorAction SilentlyContinue")
-                appendLine("if (Test-Path '$exeEsc') { Start-Process -FilePath '$exeEsc' }")
-            }
-        }
+        val script = buildUpdateScript(
+            downloadedFile = downloadedFile,
+            isMsi = isMsi,
+            sameVersion = sameVersion,
+            updatesDir = updatesDir,
+            currentPid = currentPid,
+            currentExe = currentExe,
+            launchAfter = true
+        )
 
         return runCatching {
-            scriptFile.writeText(script, Charsets.UTF_8)
+            writeScriptWithUtf8Bom(scriptFile, script)
+            // Рабочий каталог = updatesDir (НЕ папка установки, чтобы не блокировать замену файлов),
+            // stdin/stdout/stderr перенаправлены в NUL и файл лога — никаких пайпов к закрывающемуся WarpScout.exe.
             ProcessBuilder(
                 "powershell.exe",
                 "-NoProfile",
+                "-NonInteractive",
                 "-ExecutionPolicy", "Bypass",
                 "-WindowStyle", "Hidden",
                 "-File", scriptFile.absolutePath
-            ).start()
+            )
+                .directory(updatesDir)
+                .redirectInput(ProcessBuilder.Redirect.from(File("NUL")))
+                .redirectErrorStream(true)
+                .redirectOutput(stdoutLog)
+                .start()
             true
         }.getOrDefault(false)
     }

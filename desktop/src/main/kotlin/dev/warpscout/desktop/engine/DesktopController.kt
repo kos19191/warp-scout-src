@@ -185,6 +185,7 @@ class DesktopController(
 
     private val scanCancel = AtomicBoolean(false)
     private val connectInFlight = AtomicBoolean(false)
+    private val shutdownDone = AtomicBoolean(false)
     private var scheduledTune: ScheduledFuture<*>? = null
     private var networkWatchTask: ScheduledFuture<*>? = null
     @Volatile
@@ -263,6 +264,10 @@ class DesktopController(
         }
 
         appendLog("WarpScout Desktop v${BuildInfo.current.version} запущен (каталог данных: ${store.paths.root.absolutePath})")
+        AppUpdater.consumeLastUpdateError(store.paths.updatesDir)?.let { prevErr ->
+            appendLog("Предыдущая попытка обновления не завершилась: $prevErr", LogLevel.WARN)
+            showBanner(prevErr, isError = true)
+        }
         refreshEngineAndPrivileges()
         rescheduleBackgroundTune(loaded)
         startNetworkWatcher()
@@ -1323,6 +1328,7 @@ class DesktopController(
     }
 
     fun shutdown(disconnectTunnel: Boolean = _state.value.settings.disconnectOnExit) {
+        if (!shutdownDone.compareAndSet(false, true)) return
         scheduledTune?.cancel(false)
         networkWatchTask?.cancel(false)
         scanCancel.set(true)

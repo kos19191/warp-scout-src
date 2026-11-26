@@ -1,12 +1,19 @@
 package dev.warpscout.desktop.update
 
+import dev.warpscout.desktop.tunnel.ProcessCommandRunner
+import dev.warpscout.desktop.tunnel.WindowsAutostart
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.io.FileOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 class AppUpdaterTest {
 
@@ -152,5 +159,100 @@ class AppUpdaterTest {
         """.trimIndent()
         val parsed = AppUpdater.parseReleasesJson(json)
         assertEquals("WarpScout-1.10.27-windows-x64.msi", parsed.single().msiAsset?.name)
+    }
+
+    @Test
+    fun `buildUpdateScript writes UTF-8 BOM and quotes MSI paths safely for spaces and Cyrillic`(@TempDir tempDir: File) {
+        val updatesDir = File(tempDir, "Пользователь Тест/updates").apply { mkdirs() }
+        val msiFile = File(updatesDir, "WarpScout-1.10.30-windows-x64.msi")
+        val exeFile = File(tempDir, "Program Files/WarpScout/WarpScout.exe")
+
+        val script = AppUpdater.buildUpdateScript(
+            downloadedFile = msiFile,
+            isMsi = true,
+            sameVersion = false,
+            updatesDir = updatesDir,
+            currentPid = 12345L,
+            currentExe = exeFile,
+            launchAfter = true
+        )
+        assertTrue(script.contains("/i `\"\$msiPath`\" /qb! /norestart /l*v `\"\$msiLog`\""))
+        assertTrue(script.contains("finally {"))
+        assertTrue(script.contains("Start-Process -FilePath \$launchExe -WorkingDirectory \$workDir"))
+
+        val scriptFile = File(updatesDir, "apply-update.ps1")
+        AppUpdater.writeScriptWithUtf8Bom(scriptFile, script)
+        val raw = scriptFile.readBytes()
+        assertTrue(raw.size > 3)
+        assertEquals(0xEF.toByte(), raw[0], "PowerShell 5.1 requires UTF-8 BOM for Cyrillic paths")
+        assertEquals(0xBB.toByte(), raw[1])
+        assertEquals(0xBF.toByte(), raw[2])
+    }
+
+    @Test
+    fun `consumeLastUpdateError reads once and deletes error marker`(@TempDir tempDir: File) {
+        assertNull(AppUpdater.consumeLastUpdateError(tempDir))
+        val marker = File(tempDir, "update-error.txt")
+        marker.writeText("MSI-установщик завершился с кодом 1603", Charsets.UTF_8)
+        assertEquals("MSI-установщик завершился с кодом 1603", AppUpdater.consumeLastUpdateError(tempDir))
+        assertFalse(marker.exists())
+        assertNull(AppUpdater.consumeLastUpdateError(tempDir))
+    }
+
+    @Test
+    fun `portable update script runs end-to-end on real Windows with Cyrillic and spaces in path`(@TempDir tempDir: File) {
+        assumeTrue(WindowsAutostart.isWindows(), "Windows-only PowerShell/robocopy updater verification")
+
+        val appDir = File(tempDir, "Папка Пользователя/WarpScout App").apply { mkdirs() }
+        val updatesDir = File(tempDir, "Данные Пользователя/updates").apply { mkdirs() }
+        val appSub = File(appDir, "app").apply { mkdirs() }
+
+        // Старая версия приложения + личный файл пользователя в корне.
+        val exe = File(appDir, "WarpScout.exe").apply { writeText("old-exe-v1.10.29") }
+        val oldJar = File(appSub, "desktop-1.10.29.jar").apply { writeText("old-jar") }
+        val userNotes = File(appDir, "user-notes.txt").apply { writeText("keep-me") }
+
+        // Новый Portable ZIP.
+        val zipFile = File(updatesDir, "WarpScout-1.10.30-windows-x64-portable.zip")
+        ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
+            zos.putNextEntry(ZipEntry("WarpScout.exe"))
+            zos.write("new-exe-v1.10.30".toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+
+            zos.putNextEntry(ZipEntry("app/desktop-1.10.30.jar"))
+            zos.write("new-jar".toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+        }
+
+        val script = AppUpdater.buildUpdateScript(
+            downloadedFile = zipFile,
+            isMsi = false,
+            sameVersion = false,
+            updatesDir = updatesDir,
+            currentPid = 0L,
+            currentExe = exe,
+            launchAfter = false
+        )
+        val scriptFile = File(updatesDir, "apply-update.ps1")
+        AppUpdater.writeScriptWithUtf8Bom(scriptFile, script)
+
+        val res = ProcessCommandRunner().run(
+            listOf(
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy", "Bypass",
+                "-File", scriptFile.absolutePath
+            ),
+            timeoutMs = 30_000L
+        )
+        val logText = File(updatesDir, "update.log").takeIf { it.isFile }?.readText(Charsets.UTF_8).orEmpty()
+        assertTrue(res.ok, "apply-update.ps1 failed (rc=${res.exitCode}): ${res.combined}\nLOG:\n$logText")
+        assertNull(AppUpdater.consumeLastUpdateError(updatesDir), "Unexpected update error; LOG:\n$logText")
+
+        assertEquals("new-exe-v1.10.30", exe.readText(Charsets.UTF_8), "WarpScout.exe must be replaced")
+        assertTrue(File(appSub, "desktop-1.10.30.jar").isFile, "New jar must be installed")
+        assertFalse(oldJar.exists(), "Stale old jar in app/ must be removed by robocopy /MIR")
+        assertTrue(userNotes.isFile && userNotes.readText() == "keep-me", "User files in root must be preserved")
     }
 }
