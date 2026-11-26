@@ -239,6 +239,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("бета: прокси MTProto для Telegram — найти, проверить до ответа Telegram (1.10.49-beta4)") {
             MtProxyChecks { name, ok, detail -> check(name, ok, detail) }.run()
         }
+        section("бета: смена сети и сим-карты — без зависших соединений, второй выход повторяет сам (1.10.50-beta1)") {
+            ReconnectChecks { name, ok, detail -> check(name, ok, detail) }.run()
+        }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
                 liveNetwork()

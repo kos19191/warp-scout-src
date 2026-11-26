@@ -140,6 +140,21 @@ class PacketQueueIn(private val name: String) : InputStream() {
     /** Очередь закрыта — выход больше не обслуживается (диспетчер тогда вернётся к основному). */
     fun isClosed(): Boolean = closed
 
+    /**
+     * Выход на паузе (с 1.10.50-beta1): его серверы не ответили, и сервис повторит позже. Диспетчер
+     * отправляет пакеты в основной выход, как при закрытой очереди, а читатели очереди не выходят —
+     * следующая попытка читает ту же очередь. Пакеты, что лежали в очереди, выбрасываются.
+     */
+    @Volatile
+    var paused: Boolean = false
+        set(value) {
+            field = value
+            if (value) queue.clear()
+        }
+
+    /** Пакеты можно отдавать этому выходу: очередь открыта и не на паузе. */
+    fun usable(): Boolean = !closed && !paused
+
     override fun read(): Int {
         val buf = ByteArray(1)
         val n = read(buf, 0, 1)
@@ -291,19 +306,51 @@ class TunDispatcher(
         anyPinned = pinned.isNotEmpty()
     }
 
+    /**
+     * То же для любого адреса — IPv4 и IPv6 (с 1.10.50-beta1). Обходу DPI запасной путь «через туннель»
+     * нужен и по IPv6: журнал 26.11 — без закрепления соединение YouTube к адресу Google по IPv6 уходило
+     * по адресу во второй выход, а у сервера Proton IPv6 нет, — «ни напрямую, ни через туннель».
+     */
+    fun pinAddr(localPort: Int, remote: java.net.InetAddress, remotePort: Int, lane: Int) =
+        pin(localPort, addrKey(remote.address), remotePort, lane)
+
+    fun unpinAddr(localPort: Int, remote: java.net.InetAddress, remotePort: Int) =
+        unpin(localPort, addrKey(remote.address), remotePort)
+
     private fun pinKey(localPort: Int, remoteIp: String, remotePort: Int): String = "$localPort|${remoteIp.trim()}|$remotePort"
 
-    /** Выход соединения замера; −1 — пакет не из замера (только TCP по IPv4: замеры ходят так). */
-    private fun pinnedLane(p: ByteArray, len: Int): Int {
-        if (len < 20 || ((p[0].toInt() ushr 4) and 0x0F) != 4) return -1
-        val ihl = (p[0].toInt() and 0x0F) * 4
-        if (ihl < 20 || len < ihl + 4 || (p[9].toInt() and 0xFF) != 6) return -1
-        if ((((p[6].toInt() and 0x1F) shl 8) or (p[7].toInt() and 0xFF)) != 0) return -1
-        val sport = ((p[ihl].toInt() and 0xFF) shl 8) or (p[ihl + 1].toInt() and 0xFF)
-        val dport = ((p[ihl + 2].toInt() and 0xFF) shl 8) or (p[ihl + 3].toInt() and 0xFF)
-        val ip = "${p[16].toInt() and 0xFF}.${p[17].toInt() and 0xFF}.${p[18].toInt() and 0xFF}.${p[19].toInt() and 0xFF}"
-        return pinned[pinKey(sport, ip, dport)] ?: -1
+    /** Выход закреплённого соединения; −1 — пакет не из закреплённых (только TCP: замеры и обход ходят так). */
+    internal fun pinnedLane(p: ByteArray, len: Int): Int {
+        if (len < 20 || len > p.size) return -1
+        return when ((p[0].toInt() ushr 4) and 0x0F) {
+            4 -> {
+                val ihl = (p[0].toInt() and 0x0F) * 4
+                if (ihl < 20 || len < ihl + 4 || (p[9].toInt() and 0xFF) != 6) return -1
+                if ((((p[6].toInt() and 0x1F) shl 8) or (p[7].toInt() and 0xFF)) != 0) return -1
+                val sport = ((p[ihl].toInt() and 0xFF) shl 8) or (p[ihl + 1].toInt() and 0xFF)
+                val dport = ((p[ihl + 2].toInt() and 0xFF) shl 8) or (p[ihl + 3].toInt() and 0xFF)
+                val ip = "${p[16].toInt() and 0xFF}.${p[17].toInt() and 0xFF}.${p[18].toInt() and 0xFF}.${p[19].toInt() and 0xFF}"
+                pinned[pinKey(sport, ip, dport)] ?: -1
+            }
+
+            6 -> {
+                if (len < 44 || (p[6].toInt() and 0xFF) != 6) return -1
+                val sport = ((p[40].toInt() and 0xFF) shl 8) or (p[41].toInt() and 0xFF)
+                val dport = ((p[42].toInt() and 0xFF) shl 8) or (p[43].toInt() and 0xFF)
+                pinned[pinKey(sport, addrKey(p.copyOfRange(24, 40)), dport)] ?: -1
+            }
+
+            else -> -1
+        }
     }
+
+    /** Ключ адреса: IPv4 — «a.b.c.d» (как у замеров), IPv6 — 32 шестнадцатеричные цифры. */
+    private fun addrKey(addr: ByteArray): String =
+        if (addr.size == 4) {
+            "${addr[0].toInt() and 0xFF}.${addr[1].toInt() and 0xFF}.${addr[2].toInt() and 0xFF}.${addr[3].toInt() and 0xFF}"
+        } else {
+            addr.joinToString("") { String.format(java.util.Locale.US, "%02x", it.toInt() and 0xFF) }
+        }
 
     var sentPrimary: Long = 0L
         private set
@@ -369,7 +416,7 @@ class TunDispatcher(
             // WARP, а придерживается (приложение повторит само). Иначе TikTok увидел бы российский адрес
             // московской площадки WARP и снова запомнил бы регион.
             if (pin < 0 && wanted == 1 && table != null && table.lastStrict &&
-                (lanes.size < 2 || lanes[1].isClosed())
+                (lanes.size < 2 || !lanes[1].usable())
             ) {
                 strictHeld++
                 if (!strictSaid) {
@@ -386,7 +433,7 @@ class TunDispatcher(
             // Так же и приложения с «Второй выход» (решил человек 23.11): идут через WARP.
             val lane = when {
                 wanted !in lanes.indices -> 0
-                lanes[wanted].isClosed() -> 0
+                !lanes[wanted].usable() -> 0
                 else -> wanted
             }
             if (lane in lanes.indices) {

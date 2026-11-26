@@ -59,7 +59,13 @@ class DpiRelay(
     private val clock: () -> Long = System::currentTimeMillis,
     private val timing: Timing = Timing(),
     /** Фейк (с 1.10.49-beta4, см. [FakeSender]); null — приёмы с фейком напрямую не открываются. */
-    private val fake: FakeSender? = null
+    private val fake: FakeSender? = null,
+    /**
+     * У сети есть IPv6 напрямую (с 1.10.50-beta1). Нет — соединения по IPv6 не разбираем: напрямую им
+     * не открыться (журнал 26.11, Tele2: «нет маршрута до сервера» к адресам Google по IPv6 — 43 раза за
+     * день), а через туннель они и так идут сами, как до обхода.
+     */
+    directV6: Boolean = true
 ) : PacketTap {
 
     /** Приложение, чьи соединения разбираем: название (для журнала) и сервис ([DpiService.id]). */
@@ -166,6 +172,10 @@ class DpiRelay(
         }
 
     private val planGen = AtomicInteger(0)
+
+    /** Разбирать ли соединения по IPv6 (см. directV6): выключается и сам — при «нет маршрута» по IPv6. */
+    @Volatile
+    private var v6Direct = directV6
 
     private val mss4 = (mtu - 40).coerceIn(536, 1460)
     private val mss6 = (mtu - 60).coerceIn(536, 1440)
@@ -286,6 +296,8 @@ class DpiRelay(
             return clock() - closedAt < LINGER_MS
         }
         if (key.sport in ownPorts) return false
+        // IPv6 напрямую нет — соединение идёт через туннель само, как до обхода (с 1.10.50-beta1).
+        if (!v6Direct && ((packet[0].toInt() ushr 4) and 0x0F) == 6) return false
         val dst = key.dst
         val until = badIp[ipText(dst)]
         if (until != null && clock() < until) return false
@@ -719,10 +731,27 @@ class DpiRelay(
         } catch (e: Exception) {
             runCatching { s?.close() }
             if (stage == 0) lastConnectFailed.set(true)
+            // По IPv6 напрямую нет маршрута — у сети нет IPv6. Это не неудача приёма: сервис за неё не
+            // наказываем, а IPv6 дальше не разбираем (с 1.10.50-beta1).
+            if (f.v6 && stage == 0 && noRoute(e)) {
+                noDirectV6(e)
+                return null
+            }
             // Неудача группы, за которой есть следующая, — не неудача приёма: в журнал и в счёт — только последняя.
             if (last || stage == 0) directFailed(f, fam, trick, stage, e)
             return null
         }
+    }
+
+    private fun noRoute(e: Throwable): Boolean {
+        val msg = (e.message ?: "").lowercase()
+        return e is NoRouteToHostException || "unreachable" in msg || "enetunreach" in msg || "ehostunreach" in msg
+    }
+
+    private fun noDirectV6(e: Throwable) {
+        if (!v6Direct) return
+        v6Direct = false
+        say("обход DPI: у этой сети нет IPv6 напрямую (${shortReason(e)}) — соединения по IPv6 дальше не разбираю, они идут через туннель, как раньше")
     }
 
     private fun directOk(f: Flow, fam: DpiFamily, trick: DpiTrick) {

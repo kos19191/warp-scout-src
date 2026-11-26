@@ -65,6 +65,8 @@ import dev.warpscout.core.tunnel.NatPacketIn
 import dev.warpscout.core.tunnel.NatPacketOut
 import dev.warpscout.core.tunnel.PacketMath
 import dev.warpscout.core.tunnel.TapPacketOut
+import dev.warpscout.core.tunnel.TcpGuard
+import dev.warpscout.core.tunnel.SecondRetry
 import dev.warpscout.core.tunnel.UdpChannel
 import java.io.File
 import java.io.FileInputStream
@@ -494,6 +496,36 @@ class WarpVpnService : VpnService() {
      * (см. dpiSetup); всё, что про второй выход (Telegram, автовыбор, адреса), смотрит только сюда.
      */
     private val secondDispatcher: TunDispatcher? get() = dispatcher?.takeIf { it.multiLane }
+
+    /**
+     * Прежний tun на время переподключения (с 1.10.50-beta1, см. parkTun). Под замком [life].
+     *
+     * Раньше переподключение закрывало tun до того, как откроется новый, и Android на эти 0,2–3 с снимал
+     * VPN: приложения видели «сеть пропала — появилась», и Telegram успевал открыть соединения напрямую
+     * через оператора, которые потом уходили в новый туннель с чужим адресом и молчали (журнал 26.11,
+     * 21:15: tun закрыт в 21:15:44.5, новый — в 21:15:47.9). Теперь прежний tun живёт, пока не открыт новый:
+     * Android передаёт маршруты новому интерфейсу на месте, сеть VPN для приложений не пропадает.
+     */
+    private var parkedTun: ParcelFileDescriptor? = null
+    private var parkedAt = 0L
+
+    /** Номер сессии TcpGuard для этого tun (см. TcpGuard.sessionBegin). Под замком [life]. */
+    private var guardSession = 0L
+
+    /** Ожидание повтора второго выхода (см. waitSecondRetry): включённый экран будит его раньше. */
+    private val secondRetryLock = Object()
+    private var secondRetryKick = false
+
+    /** Площадка за рубежом, для которой Telegram в этой сессии уже сравнивали со вторым выходом (с 1.10.50-beta1). */
+    @Volatile
+    private var tgAbroadComparedSite = ""
+
+    /**
+     * Площадка за рубежом, через которую медиа Telegram в этой сессии было плохо (с 1.10.50-beta1): с неё
+     * Telegram со второго выхода обратно в WARP не возвращаем и вопрос не снимаем (см. applyTelegramRoute).
+     */
+    @Volatile
+    private var tgAbroadPoorSite = ""
     private var tun: ParcelFileDescriptor? = null
     private var worker: Thread? = null
     private var udpSocket: DatagramSocket? = null
@@ -891,7 +923,8 @@ class WarpVpnService : VpnService() {
             // Прошлая попытка кончилась, но её plane и tun остались на месте: освобождаем их сами.
             TunnelDebug.stage("прошлая попытка закончилась, но не освободила туннель — освобождаю")
             epoch.incrementAndGet()
-            closeAll()
+            // Сразу будет новый подъём: tun отложим до нового (с 1.10.50-beta1, см. parkTun).
+            closeAll(handover = true)
         }
         lastConfigText = text
         lastStartId = startId
@@ -1022,7 +1055,7 @@ class WarpVpnService : VpnService() {
         // поднимать второй data plane рядом с первым: в журнале 23:14:01 два переподъёма подряд
         // оставили в одном экземпляре два plane (эпохи 73 и 74), и первый, никому не нужный, ещё
         // долго слал свои rekey на том же ключе.
-        if (plane != null || tun != null || udpSocket != null) closeAll()
+        if (plane != null || tun != null || udpSocket != null) closeAll(handover = true)
         starting = true
         // Экземпляр сервиса переиспользуется: без сброса флага «остановлен» второй подъём после
         // «Отключить» жил бы с чужим состоянием (watchdog и статусы считали бы себя остановленными).
@@ -1142,6 +1175,8 @@ class WarpVpnService : VpnService() {
         probeHosts.clear()
         siteSaid = ""
         tgFarSaid = false
+        tgAbroadComparedSite = ""
+        tgAbroadPoorSite = ""
         // Говорим и про выключенный второй выход: иначе «две цепочки рукопожатий в журнале»
         // невозможно объяснить, не заглядывая в настройки.
         TunnelDebug.stage(if (multiExit) "второй выход включён" else "второй выход выключен")
@@ -1204,6 +1239,9 @@ class WarpVpnService : VpnService() {
             abandon()
             return
         }
+        // Новый tun открыт — Android уже перевёл маршруты на него (на месте, сеть VPN та же): прежний
+        // больше не нужен (с 1.10.50-beta1, см. parkTun).
+        closeParkedTun()
         val routes = SplitRoutes.prefixesOf(cfg.allowedIps)
         TunnelDebug.stage(
             "tun получен: ${routes.size} маршрутов (${if (isFullTunnel(cfg)) "весь трафик" else "раздельные"}), чтение по poll"
@@ -1228,12 +1266,14 @@ class WarpVpnService : VpnService() {
             secondReady -> TunnelStatus.SECOND_STARTING
             else -> TunnelStatus.SECOND_FAILED
         }
-        val rawIn = FileInputStream(pfd.fileDescriptor)
+        // Чтение и запись tun — через TcpGuard (с 1.10.50-beta1): он видит соединения приложений и после
+        // переподключения сбрасывает зависшие (см. resetStaleConnections).
+        val rawIn = tcpGuard.In(FileInputStream(pfd.fileDescriptor))
         // Ожидание данных в tun — poll() по его дескриптору вместо паузы 20 мс между пустыми
         // чтениями (см. DataPlane.tunReady и waitTunReadable).
         val tunFd = pfd.fileDescriptor
         val tunWait: (Long) -> Boolean = { ms -> waitTunReadable(tunFd, ms) }
-        val rawOut = FileOutputStream(pfd.fileDescriptor)
+        val rawOut = tcpGuard.Out(FileOutputStream(pfd.fileDescriptor))
         // Обход DPI в туннеле (с 1.10.49-beta3): YouTube, X и (с beta4) Discord напрямую с приёмом, если
         // «Проверить DPI» на этой сети нашла, что приём помогает, или человек выбрал стратегию сам. Ему нужен диспетчер tun — и без второго выхода (с одним
         // выходом). Обходить нечего — ровно прежний путь.
@@ -1247,6 +1287,21 @@ class WarpVpnService : VpnService() {
         }
         val tunOut: OutputStream = if (lanes.isEmpty()) rawOut else SharedPacketOut(rawOut)
         val tunIn: InputStream = if (lanes.isEmpty()) rawIn else lanes[0]
+        // Новая сессия: всё, что было до неё, — «прежние» соединения. Сбросы — в этот tun; проверочный
+        // подъём подбора только следит.
+        tcpGuard.onReactive = { f -> noteReactiveReset(f) }
+        reactiveSaid.set(0)
+        val guardId = tcpGuard.sessionBegin({ pkt -> tunOut.write(pkt, 0, pkt.size) }, resetting = !quietSession)
+        val guardMine = synchronized(life) {
+            if (tun === pfd) {
+                guardSession = guardId
+                true
+            } else {
+                false
+            }
+        }
+        // Сессию уже закрыли, пока мы её начинали: писать сбросы в её tun нельзя.
+        if (!guardMine) tcpGuard.sessionEnd(guardId)
         // Второй выход внутри WARP: его датаграммы — обычные пакеты основного туннеля (к адресу
         // своего сервера), а ответы сервера основной туннель отдаёт ему, а не в tun.
         val innerChannel = if (secondReady && secondPlan?.inner == true && secondPlan.local4 != null &&
@@ -1287,7 +1342,7 @@ class WarpVpnService : VpnService() {
                 TunnelDebug.stage("выход по приложениям: второго выхода в этой сессии нет — приложения с «Второй выход» идут через WARP")
             }
             if (dpiOn != null) {
-                splitter.tap = runCatching { buildDpiRelay(dpiOn, tunOut, splitter, cfg.mtu) }
+                splitter.tap = runCatching { buildDpiRelay(dpiOn, tunOut, splitter, cfg.mtu, secondV6 = secondPlan?.nat?.v6 == true) }
                     .onFailure { TunnelDebug.problem("обход DPI: не включился (${it.javaClass.simpleName}: ${it.message?.take(80)})") }
                     .getOrNull()
             }
@@ -1499,6 +1554,9 @@ class WarpVpnService : VpnService() {
         if (lane2 != null && secondCfg != null && secondPlan != null && (innerChannel != null || secondSock != null)) {
             val inner = innerChannel != null
 
+            // Повторный круг после «серверы не ответили» (с 1.10.50-beta1, см. SecondRetry); 0 — первый.
+            val retryRound = java.util.concurrent.atomic.AtomicInteger(0)
+
             // Data plane одного сервера. Канал до него — внутри WARP или свой сокет; поверх —
             // AmneziaWG, если в конфиге свои типы пакетов (H1–H4) или добавки (S1–S4).
             fun buildSecond(plan: SecondPlan, candCfg: WarpConfig, label: String, base: UdpChannel): DataPlane {
@@ -1538,6 +1596,12 @@ class WarpVpnService : VpnService() {
                         when {
                             line.contains("туннель поднят") -> {
                                 TunnelDebug.ok("второй выход поднят: $label")
+                                // Повторная попытка удалась — очередь снова принимает пакеты (с 1.10.50-beta1).
+                                lane2.paused = false
+                                val rounds = retryRound.getAndSet(0)
+                                if (rounds > 0) {
+                                    TunnelDebug.stage("второй выход снова работает: $label (с $rounds-го повтора) — его сайты и приложения снова идут через него")
+                                }
                                 if (myEpoch == epoch.get()) TunnelState.second = TunnelStatus.SECOND_UP
                             }
                             line.contains("не прошёл") || line.contains("невозможен") ->
@@ -1665,7 +1729,26 @@ class WarpVpnService : VpnService() {
                         fails++
                         index++
                     }
-                    if (fails >= maxFails) break
+                    if (fails >= maxFails) {
+                        // Все серверы не ответили (с 1.10.50-beta1). Раньше второй выход сдавался до
+                        // переподключения туннеля (журнал 26.11: 72 минуты), хотя виноват бывал минутный сбой
+                        // самого WARP. Теперь повторяем сами — через 1, 2, 5, 10 мин, дальше раз в 15; пока
+                        // ждём, очередь на паузе: сайты второго выхода идут через WARP, «только второй выход» ждёт.
+                        lane2.paused = true
+                        TunnelState.second = TunnelStatus.SECOND_FAILED
+                        val round = retryRound.incrementAndGet()
+                        val delay = SecondRetry.delayMs(round)
+                        TunnelDebug.stage(
+                            if (round == 1) "второй выход: серверы не ответили — ${secondDownNote(exitRules)}; повторю сам через ${SecondRetry.text(delay)}"
+                            else "второй выход: серверы снова не ответили (повтор ${round - 1}) — следующий через ${SecondRetry.text(delay)}"
+                        )
+                        if (!waitSecondRetry(delay) || !alive()) break
+                        fails = 0
+                        val retryWith = secondList[index % secondList.size]
+                        TunnelState.second = TunnelStatus.SECOND_STARTING
+                        TunnelDebug.stage("второй выход: пробую снова (повтор $round) — начинаю с ${retryWith.first.ifBlank { retryWith.second.endpoint.render() }}")
+                        continue
+                    }
                     TunnelState.second = TunnelStatus.SECOND_STARTING
                     val next = secondList[index % secondList.size]
                     val nextLabel = next.first.ifBlank { next.second.endpoint.render() }
@@ -1685,17 +1768,7 @@ class WarpVpnService : VpnService() {
                 // Очередь закрываем: диспетчер увидит это и вернёт подсети в основной туннель.
                 runCatching { lane2.close() }
                 if (alive()) TunnelState.second = TunnelStatus.SECOND_FAILED
-                TunnelDebug.stage(
-                    "второй выход остановлен: прошло $totalUp вверх / $totalDown вниз" +
-                        (if (fails >= maxFails) " — серверы не ответили, сайты второго выхода идут через WARP" else "")
-                )
-                // Приложения с «Второй выход» (с 1.10.39) — тоже через WARP, а не без интернета (решил человек 23.11).
-                if (fails >= maxFails && alive()) {
-                    val secondApps = exitRules.count { it.value == AppExit.SECOND }
-                    if (secondApps > 0) {
-                        TunnelDebug.stage("выход по приложениям: второй выход не поднят — приложения с «Второй выход» ($secondApps) идут через WARP")
-                    }
-                }
+                TunnelDebug.stage("второй выход остановлен: прошло $totalUp вверх / $totalDown вниз")
             }.apply { isDaemon = true; name = "warpscout-vpn-2" }
             val ownsSecond = synchronized(life) {
                 if (alive()) {
@@ -1925,9 +1998,102 @@ class WarpVpnService : VpnService() {
         )
         TunnelState.status = getString(R.string.notif_active, cfg.endpoint.render())
         postNotification(getString(R.string.notif_active, cfg.endpoint.render()))
+        // Прежние соединения приложений: после смены сети — сбросить все, иначе — зависшие (с 1.10.50-beta1).
+        if (!quietSession) resetStaleConnections(myEpoch)
         // Тихая проверка соседних точек: сессию не трогает, очередь держит свежей. Проверке подбора
         // она не нужна — её сессия живёт секунды.
         if (!quietSession) startSentry(cfg, myEpoch)
+    }
+
+    // ------------------------------------------------ зависшие соединения после переподключения (с 1.10.50-beta1)
+
+    /**
+     * Туннель поднялся: прежние соединения приложений сбрасываем (см. TcpGuard), чтобы приложения сразу
+     * открыли новые через новую сессию, а не ждали своего таймаута. Сеть сменилась (другая сим-карта,
+     * Wi-Fi ↔ мобильная) — сбрасываем все, кроме идущих через второй выход (его сервер тот же, и соединения
+     * через него переживают переподключение WARP). Сеть та же — только те, что к подъёму ждали ответа.
+     */
+    private fun resetStaleConnections(myEpoch: Int) {
+        val handle = baselineNetwork?.networkHandle ?: 0L
+        val prev = lastUpNetHandle
+        if (handle != 0L) lastUpNetHandle = handle
+        val netChanged = prev != 0L && handle != 0L && handle != prev
+        Thread({
+            try {
+                val stale = tcpGuard.staleFlows(all = netChanged)
+                if (stale.isEmpty() || myEpoch != epoch.get()) return@Thread
+                // Владельцев узнаём до сброса: после него соединения у системы уже нет.
+                val owners = stale.take(MAX_RESET_LOOKUPS).associateWith { ownerUidOf(it) }
+                val keep = if (netChanged) stale.filter { viaSecondExit(it, owners[it] ?: -1) } else emptyList()
+                val list = if (keep.isEmpty()) stale else stale.filter { it !in keep }
+                if (list.isEmpty()) return@Thread
+                val n = tcpGuard.reset(list)
+                if (n <= 0) return@Thread
+                val who = appCounts(list.mapNotNull { owners[it] })
+                TunnelDebug.stage(
+                    (if (netChanged) "сеть сменилась — сбросил прежние соединения приложений" else "после переподключения сбросил зависшие соединения") +
+                        " ($n${if (who.isNotEmpty()) ": $who" else ""}): приложения сразу откроют новые через новую сессию, а не будут ждать таймаута" +
+                        (if (keep.isNotEmpty()) "; через второй выход — оставил ${keep.size}" else "")
+                )
+            } catch (e: Throwable) {
+                runCatching { TunnelDebug.stage("сброс прежних соединений не удался: ${e.javaClass.simpleName}") }
+            }
+        }, "warpscout-tcp-reset").apply { isDaemon = true }.start()
+    }
+
+    /** Сброшенных по ходу сессии — в журнал первые несколько, дальше только счёт. */
+    private val reactiveSaid = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** Прежнее соединение молчало после переподключения — TcpGuard сейчас его сбросит (зовётся до сброса). */
+    private fun noteReactiveReset(f: TcpGuard.Flow) {
+        val n = reactiveSaid.incrementAndGet()
+        if (n > REACTIVE_SAY_LIMIT) return
+        val uid = ownerUidOf(f)
+        val name = if (uid >= 0) appCounts(listOf(uid)).substringBefore(" ×") else ""
+        TunnelDebug.stage(
+            "соединение ${if (name.isNotEmpty()) "$name " else ""}(${f.describe()}) молчит после переподключения " +
+                "${tcpGuard.staleMs / 1000} с, а туннель работает — сбросил, приложение откроет новое" +
+                (if (n == REACTIVE_SAY_LIMIT) "; дальше такие сбросы не пишу по одному" else "")
+        )
+    }
+
+    /** Чьё соединение (uid); −1 — система не сказала (Android до 10 или соединения уже нет). */
+    private fun ownerUidOf(f: TcpGuard.Flow): Int {
+        if (Build.VERSION.SDK_INT < 29) return -1
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return -1
+        return runCatching { cm.getConnectionOwnerUid(android.system.OsConstants.IPPROTO_TCP, f.appAddress, f.srvAddress) }
+            .getOrDefault(-1)
+    }
+
+    /** «Telegram ×5, Instagram ×2» — по uid владельцев. */
+    private fun appCounts(uids: List<Int>): String {
+        if (uids.isEmpty()) return ""
+        val counts = LinkedHashMap<String, Int>()
+        for (uid in uids) {
+            if (uid < 0) continue
+            val name = runCatching {
+                val pkg = packageManager.getPackagesForUid(uid)?.firstOrNull() ?: return@runCatching null
+                @Suppress("DEPRECATION")
+                packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+            }.getOrNull() ?: continue
+            counts[name] = (counts[name] ?: 0) + 1
+        }
+        return counts.entries.sortedByDescending { it.value }.take(5)
+            .joinToString(", ") { (name, c) -> if (c > 1) "$name ×$c" else name }
+    }
+
+    /**
+     * Соединение идёт через второй выход: приложение с «Второй выход», или адрес из списков второго
+     * выхода у приложения с «Само». Всегда WARP — нет. IPv6 во второй выход не ходит.
+     */
+    private fun viaSecondExit(f: TcpGuard.Flow, uid: Int): Boolean {
+        val d = secondDispatcher ?: return false
+        val rule = if (uid >= 0) d.appExits?.manualRuleOf(uid) ?: AppExit.AUTO else AppExit.AUTO
+        return when (rule) {
+            AppExit.SECOND -> true
+            AppExit.WARP -> false
+            else -> !f.v6 && d.router.route(f.srv) == 1
+        }
     }
 
     /**
@@ -2708,18 +2874,22 @@ class WarpVpnService : VpnService() {
 
     /**
      * После проверки связи: выход WARP оказался за рубежом — Telegram, если шёл через второй выход,
-     * снова напрямую через WARP (там его не режут), а вопрос, если ждал ответа, снимается. Сам на
+     * снова напрямую через WARP (там его обычно не режут), а вопрос, если ждал ответа, снимается. Сам на
      * второй выход не переключает (с 1.10.36): это решает человек, см. checkTelegramMedia.
+     *
+     * Исключение (с 1.10.50-beta1) — площадка за рубежом, через которую медиа в этой сессии уже было плохо
+     * (журнал 26.11, Франкфурт): там Telegram остаётся на втором выходе, а вопрос о нём — в силе.
      */
     private fun applyTelegramRoute(site: String) {
         val abroad = ExitSite.isAbroad(site)
-        if (abroad && TunnelState.tgAskAt > 0L) clearTelegramAsk()
+        val abroadPoor = abroad && site == tgAbroadPoorSite
+        if (abroad && !abroadPoor && TunnelState.tgAskAt > 0L) clearTelegramAsk()
         // Выход Telegram выбран вручную (с 1.10.39): сами его не переключаем.
         if (tgFixed != AppExit.AUTO) return
         if (!tgViaSecond) return
         val back = when {
             !serviceSettings().tgSecond -> "Telegram: второй выход для Telegram выключен в «Автоматике» — снова напрямую через WARP"
-            abroad -> "выход WARP за рубежом (${ExitSite.describe(site)}) — Telegram снова напрямую через WARP"
+            abroad && !abroadPoor -> "выход WARP за рубежом (${ExitSite.describe(site)}) — Telegram снова напрямую через WARP"
             else -> return
         }
         // Путь сменился — медиа проверим заново уже по новому пути.
@@ -2783,6 +2953,22 @@ class WarpVpnService : VpnService() {
             runCatching { compareWithSecond(myEpoch, site, r) }
                 .onFailure { TunnelDebug.stage("Telegram: сравнить со вторым выходом не вышло (${it.javaClass.simpleName})") }
         }
+        // Площадка за рубежом, а медиа не грузится, встаёт или тормозит (с 1.10.50-beta1). Журнал 26.11: через
+        // Франкфурт (МегаФон, домашний Wi-Fi) загрузка «не пошла» оба раза, а через Стокгольм на Tele2 — 4 Мбит/с;
+        // раньше за рубежом второй выход для Telegram не предлагался вовсе. Теперь — как для Москвы: сравнение
+        // и вопрос (ответили на этой сети «Переключить» — сразу), раз за сессию на площадку.
+        if (!tgViaSecond && ExitSite.isAbroad(site)) {
+            if (TelegramChoice.poor(r.verdict)) {
+                tgAbroadPoorSite = site
+                if (site != tgAbroadComparedSite) {
+                    tgAbroadComparedSite = site
+                    runCatching { compareWithSecond(myEpoch, site, r) }
+                        .onFailure { TunnelDebug.stage("Telegram: сравнить со вторым выходом не вышло (${it.javaClass.simpleName})") }
+                }
+            } else if (r.verdict == TelegramMedia.OK && site == tgAbroadPoorSite) {
+                tgAbroadPoorSite = ""
+            }
+        }
     }
 
     /** Строка о проверке медиа в журнал: «тормозит» — ошибкой, с подсказкой, что делать. */
@@ -2793,10 +2979,14 @@ class WarpVpnService : VpnService() {
             TelegramMedia.OK -> TunnelDebug.ok(line)
             TelegramMedia.SLOW, TelegramMedia.STALL -> TunnelDebug.error(line, tgMediaHint(site))
             // «Не грузится» при Telegram, закреплённом за WARP с выходом через Россию (с 1.10.44-beta1), —
-            // тоже ошибка с подсказкой: само приложение Telegram оттуда не уведёт.
+            // тоже ошибка с подсказкой: само приложение Telegram оттуда не уведёт. И через площадку за
+            // рубежом (с 1.10.50-beta1; журнал 26.11 — Франкфурт): раньше это была обычная строка.
             TelegramMedia.FAIL ->
-                if (tgFixed == AppExit.WARP && ExitSite.isRussian(site)) TunnelDebug.error(line, tgMediaHint(site))
-                else TunnelDebug.stage(line)
+                if ((tgFixed == AppExit.WARP && ExitSite.isRussian(site)) || (!tgViaSecond && ExitSite.isAbroad(site))) {
+                    TunnelDebug.error(line, tgMediaHint(site))
+                } else {
+                    TunnelDebug.stage(line)
+                }
             else -> TunnelDebug.stage(line)
         }
     }
@@ -2975,11 +3165,79 @@ class WarpVpnService : VpnService() {
                 return@Thread
             }
             if (!wanted || tgViaSecond) return@Thread
-            // Проверка медиа — при ближайшей проверке связи; сейчас — если туннель тот же и жив.
+            // Проверка медиа — при ближайшей проверке связи; сейчас — если туннель тот же и жив. Площадку за
+            // рубежом сравниваем раз за сессию — повтор её разрешает (с 1.10.50-beta1).
+            tgAbroadComparedSite = ""
             tgMediaCheckedAt = 0L
             val now = epoch.get()
             if (linkAlive(now)) startLinkCheck(now, "повторное сравнение Telegram", 0L, reconnectOnFail = false)
         }.apply { isDaemon = true; name = "warpscout-tg-recheck" }.start()
+    }
+
+    /**
+     * Что идёт куда, пока второй выход не работает (с 1.10.50-beta1): сайты и приложения с «Второй выход» —
+     * через WARP (решил человек 23.11), а «только второй выход» (TikTok) — ждёт, через WARP не идёт.
+     */
+    private fun secondDownNote(rules: Map<String, Int>): String {
+        val second = rules.filter { it.value == AppExit.SECOND }.keys
+        val strict = second.filter { AppServices.strictSecond(it) }.toSet()
+        fun label(pkg: String): String? = runCatching {
+            @Suppress("DEPRECATION")
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+        }.getOrNull()
+        val loose = second.filter { it !in strict }.mapNotNull { label(it) }.distinct().sorted()
+        val waiting = strict.mapNotNull { label(it) }.distinct().sorted()
+        val parts = mutableListOf("сайты второго выхода идут через WARP")
+        if (loose.isNotEmpty()) parts += "${loose.joinToString(", ")} — тоже через WARP"
+        if (waiting.isNotEmpty()) parts += "${waiting.joinToString(", ")} ждёт второй выход (через WARP не пускаю)"
+        return parts.joinToString("; ")
+    }
+
+    /** Поток второго выхода ждёт повтора (см. waitSecondRetry). */
+    @Volatile
+    private var secondWaiting = false
+
+    @Volatile
+    private var secondKickAt = 0L
+
+    /**
+     * Пауза перед повтором второго выхода: [ms] или пока не разбудят (включённый экран). false — поток
+     * прервали (сессия кончилась).
+     */
+    private fun waitSecondRetry(ms: Long): Boolean {
+        val until = System.currentTimeMillis() + ms
+        secondWaiting = true
+        try {
+            synchronized(secondRetryLock) {
+                secondRetryKick = false
+                while (!secondRetryKick) {
+                    val left = until - System.currentTimeMillis()
+                    if (left <= 0L) break
+                    try {
+                        secondRetryLock.wait(left)
+                    } catch (e: InterruptedException) {
+                        return false
+                    }
+                }
+                secondRetryKick = false
+            }
+        } finally {
+            secondWaiting = false
+        }
+        return true
+    }
+
+    /** Повторить второй выход сейчас, если он ждёт (не чаще раза в минуту). */
+    private fun kickSecondRetry(): Boolean {
+        if (!secondWaiting) return false
+        val now = System.currentTimeMillis()
+        if (now - secondKickAt < 60_000L) return false
+        secondKickAt = now
+        synchronized(secondRetryLock) {
+            secondRetryKick = true
+            secondRetryLock.notifyAll()
+        }
+        return true
     }
 
     /** «второй выход (Нидерланды)» — страна по имени сервера Proton; свой сервер — просто «второй выход». */
@@ -3079,10 +3337,12 @@ class WarpVpnService : VpnService() {
             !switch -> TunnelDebug.stage("Telegram: ответ «Оставить» — идёт через выход WARP, сутки на этой сети не спрашиваю")
             !here -> TunnelDebug.stage("Telegram: ответ «Переключить» запомнен на сутки для этой сети — переключу, когда туннель будет на ней")
             else -> {
+                // Площадка — та, через которую медиа проверяли (с 1.10.50-beta1 бывает и зарубежная).
+                val city = ExitSite.cityAcc(tgMediaCheckedSite)
                 val moved = setTelegramViaSecond(
                     true,
                     "Telegram: ответ «Переключить» — Telegram через ${secondLabel()} (на сутки для этой сети; " +
-                        "станет медленнее Москвы — верну через WARP)"
+                        "станет медленнее, чем через ${city.ifBlank { "WARP" }}, — верну через WARP)"
                 )
                 if (!moved && !tgViaSecond) {
                     TunnelDebug.stage("Telegram: ответ «Переключить» запомнен — второго выхода в этой сессии нет, переключу при следующем подключении")
@@ -3105,7 +3365,20 @@ class WarpVpnService : VpnService() {
                 "поставь в строке Telegram «WARP»"
         }
         if (!ExitSite.isRussian(site)) {
-            return "связь с Telegram есть, медиа тормозит, а выход WARP — не в России: попробуй другую точку"
+            // С 1.10.50-beta1 за рубежом тоже сравниваем со вторым выходом (журнал 26.11, Франкфурт).
+            val city = ExitSite.cityAcc(site)
+            val where = if (city.isBlank()) "выход WARP за рубежом" else "выход WARP через $city"
+            val up = secondDispatcher != null && TunnelState.second == TunnelStatus.SECOND_UP
+            return when {
+                tgViaSecond && up -> "$where, Telegram идёт через второй выход — сравню оба пути и, если через WARP станет быстрее, верну"
+                !settings.tgSecond -> "$where, медиа Telegram через него плохо: включи «Telegram: предлагать второй выход» в «Автоматике» — " +
+                    "приложение сравнит и спросит; или выбери другую точку в «Подборе»"
+                secondConfig() == null -> "$where, медиа Telegram через него плохо: включи второй выход — приложение сравнит и предложит " +
+                    "пустить Telegram через него; или выбери другую точку в «Подборе»"
+                !up -> "$where, медиа Telegram через него плохо, а второй выход сейчас не поднят — сравнить не с чем; " +
+                    "попробуй другую точку в «Подборе»"
+                else -> "$where, медиа Telegram через него плохо — сравниваю со вторым выходом; если через него лучше, спрошу, переключить ли"
+            }
         }
         val city = ExitSite.cityAcc(site)
         if (tgViaSecond && TunnelState.second == TunnelStatus.SECOND_UP) {
@@ -3541,6 +3814,8 @@ class WarpVpnService : VpnService() {
         val apps: Map<Int, DpiRelay.App>,
         val network: String,
         val warpUids: Set<Int>,
+        /** У сети есть IPv6 наружу (с 1.10.50-beta1): нет — соединения по IPv6 обход не разбирает. */
+        val directV6: Boolean = true,
     )
 
     /**
@@ -3636,16 +3911,37 @@ class WarpVpnService : VpnService() {
                 packageManager.getApplicationInfo(pkg, 0).uid
             }.getOrNull()?.let { warpUids += it }
         }
+        val directV6 = networkHasIpv6(underlyingNetwork())
         TunnelDebug.stage(
             "обход DPI: сеть «$label» — ${plan.describe()}: напрямую через провайдера, мимо WARP; приложения: " +
                 "${names.joinToString(", ")}. Их QUIC закрываю — перейдут на TCP; другие сайты этих приложений и " +
-                "всё, что напрямую не откроется, — через туннель, как раньше"
+                "всё, что напрямую не откроется, — через туннель, как раньше" +
+                (if (!directV6) ". IPv6 у сети нет — соединения по IPv6 не разбираю, они идут через туннель" else "")
         )
-        return DpiSetup(plan, apps, net, warpUids)
+        return DpiSetup(plan, apps, net, warpUids, directV6)
     }
 
+    /**
+     * У сети есть IPv6 наружу: глобальный адрес и маршрут по умолчанию по IPv6 (с 1.10.50-beta1). Нужно
+     * обходу DPI: без IPv6 соединение по IPv6 напрямую не откроется (журнал 26.11, Tele2: «нет маршрута до
+     * сервера» к адресам Google — 43 раза за день), и разбирать его незачем. Не узнали — считаем, что есть:
+     * обход сам выключит IPv6 при первом «нет маршрута».
+     */
+    private fun networkHasIpv6(net: android.net.Network?): Boolean = runCatching {
+        if (net == null) return@runCatching true
+        val lp = getSystemService(android.net.ConnectivityManager::class.java)?.getLinkProperties(net)
+            ?: return@runCatching true
+        val addr = lp.linkAddresses.any { la ->
+            val a = la.address
+            a is java.net.Inet6Address && !a.isLinkLocalAddress && !a.isLoopbackAddress && !a.isSiteLocalAddress &&
+                (a.address[0].toInt() and 0xFE) != 0xFC
+        }
+        val route = lp.routes.any { r -> r.isDefaultRoute && r.destination.address is java.net.Inet6Address }
+        addr && route
+    }.getOrDefault(true)
+
     /** Свой конец TCP для обхода: сокеты мимо туннеля — с protect(), через туннель — обычные. */
-    private fun buildDpiRelay(setup: DpiSetup, out: OutputStream, splitter: TunDispatcher, mtu: Int): DpiRelay {
+    private fun buildDpiRelay(setup: DpiSetup, out: OutputStream, splitter: TunDispatcher, mtu: Int, secondV6: Boolean = false): DpiRelay {
         val cm = getSystemService(android.net.ConnectivityManager::class.java)
         val direct = object : DpiRelay.Connector {
             override fun connect(address: InetAddress, port: Int, timeoutMs: Int, uid: Int, bound: (Int) -> Unit): Socket {
@@ -3671,9 +3967,16 @@ class WarpVpnService : VpnService() {
                     // выходом соединение закрепляется за выходом приложения («Всегда WARP» — WARP).
                     s.bind(InetSocketAddress(0))
                     bound(s.localPort)
-                    if (splitter.multiLane && address is Inet4Address) {
-                        val lane = if (uid in setup.warpUids) 0 else splitter.router.route(address.address)
-                        splitter.pin(s.localPort, address.hostAddress.orEmpty(), port, lane)
+                    // Закрепляем и IPv6 (с 1.10.50-beta1): без этого соединение YouTube по IPv6 уходило по
+                    // адресу во второй выход, а у Proton IPv6 нет. «Всегда WARP» — WARP; IPv6 при втором
+                    // выходе без IPv6 — тоже WARP.
+                    if (splitter.multiLane) {
+                        val lane = when {
+                            uid in setup.warpUids -> 0
+                            address !is Inet4Address && !secondV6 -> 0
+                            else -> splitter.router.route(address.address)
+                        }
+                        splitter.pinAddr(s.localPort, address, port, lane)
                     }
                     s.connect(InetSocketAddress(address, port), timeoutMs)
                     return s
@@ -3684,7 +3987,7 @@ class WarpVpnService : VpnService() {
             }
 
             override fun release(localPort: Int, address: InetAddress, port: Int) {
-                if (splitter.multiLane && address is Inet4Address) splitter.unpin(localPort, address.hostAddress.orEmpty(), port)
+                if (splitter.multiLane) splitter.unpinAddr(localPort, address, port)
             }
         }
         return DpiRelay(
@@ -3701,6 +4004,7 @@ class WarpVpnService : VpnService() {
             log = { line -> TunnelDebug.stage(line) },
             // Фейк (с 1.10.49-beta4): только если в плане есть приём с фейком и Android 9+.
             fake = dev.warpscout.app.DpiCheck.fakeSender(this),
+            directV6 = setup.directV6,
         )
     }
 
@@ -4315,8 +4619,11 @@ class WarpVpnService : VpnService() {
      *
      * Поля забираем под замком [life] (под ним же startVpn вступает во владение), а закрываем уже
      * вне его: join потоков может занять до полутора секунд, держать замок всё это время незачем.
+     *
+     * [handover] (с 1.10.50-beta1) — сразу будет новая попытка: tun не закрываем, а откладываем до нового
+     * (см. parkTun), чтобы сеть VPN для приложений не пропадала на время переподключения.
      */
-    private fun closeAll() {
+    private fun closeAll(handover: Boolean = false) {
         runCatching { sentryThread?.interrupt() }
         sentryThread = null
         sentryOff = false
@@ -4328,7 +4635,10 @@ class WarpVpnService : VpnService() {
         var w: Thread? = null
         var s: DatagramSocket? = null
         var t: ParcelFileDescriptor? = null
+        var g = 0L
         synchronized(life) {
+            g = guardSession
+            guardSession = 0L
             d = dispatcher
             dispatcher = null
             p2 = plane2
@@ -4368,15 +4678,71 @@ class WarpVpnService : VpnService() {
         }
         runCatching { p2?.stop() }
         runCatching { s2?.close() }
-        if (p2 != null) {
+        if (p2 != null || w2 != null) {
             TunnelState.second = TunnelStatus.SECOND_OFF
             TunnelState.secondPeer = ""
         }
-        w2?.let { if (it !== Thread.currentThread()) runCatching { it.join(500) } }
+        // Поток второго выхода может ждать повтора (см. waitSecondRetry) — будим, чтобы вышел.
+        w2?.let { if (it !== Thread.currentThread()) runCatching { it.interrupt(); it.join(500) } }
         runCatching { p?.stop() }
         // Поток закрыт → читающий его цикл выйдет сам; join только из чужого потока.
         w?.let { if (it !== Thread.currentThread()) runCatching { it.join(1000) } }
         runCatching { s?.close() }
+        // Сбросы соединений писать больше некуда — до следующей сессии (а уже начатую новую не трогаем).
+        if (g != 0L) tcpGuard.sessionEnd(g)
+        val old = t
+        if (handover) {
+            // Отложенный раньше (у прерванной попытки своего tun не было) остаётся ждать нового.
+            if (old != null) parkTun(old)
+        } else {
+            runCatching { old?.close() }
+            closeParkedTun()
+        }
+    }
+
+    /**
+     * Отложить закрытие tun до нового (с 1.10.50-beta1). Новый tun с теми же приложениями Android
+     * принимает «на месте»: сеть VPN та же, маршруты переходят на новый интерфейс, приложения не видят
+     * обрыва и не уходят напрямую. Новый так и не открылся за [PARK_MAX_MS] — закрываем прежний, как
+     * раньше. Ещё более старый отложенный (несколько попыток подряд) закрываем сразу.
+     */
+    private fun parkTun(t: ParcelFileDescriptor) {
+        val now = System.currentTimeMillis()
+        val older = synchronized(life) {
+            val prev = parkedTun
+            parkedTun = t
+            parkedAt = now
+            prev
+        }
+        if (older != null && older !== t) runCatching { older.close() }
+        Thread({
+            try {
+                Thread.sleep(PARK_MAX_MS)
+            } catch (e: InterruptedException) {
+                return@Thread
+            }
+            val stale = synchronized(life) {
+                if (parkedTun === t && parkedAt == now) {
+                    parkedTun = null
+                    t
+                } else {
+                    null
+                }
+            }
+            if (stale != null) {
+                runCatching { stale.close() }
+                runCatching { TunnelDebug.stage("новый tun за ${PARK_MAX_MS / 1000} с не открылся — прежний закрыт, VPN снят до подъёма") }
+            }
+        }, "warpscout-tun-park").apply { isDaemon = true }.start()
+    }
+
+    /** Закрыть отложенный tun: новый уже открыт или туннель выключается насовсем. */
+    private fun closeParkedTun() {
+        val t = synchronized(life) {
+            val prev = parkedTun
+            parkedTun = null
+            prev
+        }
         runCatching { t?.close() }
     }
 
@@ -4588,6 +4954,10 @@ class WarpVpnService : VpnService() {
             abortQuietScan()
             return
         }
+        // Туннель работает, а второй выход ждёт повтора — пробуем сразу (с 1.10.50-beta1).
+        if (!destroyed && wanted && TunnelState.up && kickSecondRetry()) {
+            TunnelDebug.stage("экран включён — второй выход пробую сразу, не дожидаясь паузы")
+        }
         if (destroyed || !wanted || TunnelState.up) return
         // Только когда туннель лежит и ждёт: идущий подъём или переподъём не трогаем.
         val phase = TunnelState.phase
@@ -4733,7 +5103,8 @@ class WarpVpnService : VpnService() {
             TunnelState.up = false
             starting = false
             TunnelState.busy = false
-            closeAll()
+            // tun не закрываем до нового (с 1.10.50-beta1): сеть VPN для приложений не пропадает.
+            closeAll(handover = true)
             // Пауза короткая: маршрут по новой сети обычно уже поднят к моменту события, а лишние
             // 400 мс раньше складывались с другими задержками в те самые «5–8 секунд».
             runCatching { Thread.sleep(120) }
@@ -5012,8 +5383,14 @@ class WarpVpnService : VpnService() {
         postNotification(TunnelState.status)
         TunnelDebug.stage("$why — подбираю новые точки сам, без нажатия (до минуты)")
         Thread({
+            // Туннеля нет — не даём телефону уснуть, пока ищем, но не дольше двух минут (с 1.10.50-beta1):
+            // журнал 26.11, 18:32–18:42 — с погашенным экраном подбор «до минуты» шёл десять: между пробами
+            // телефон засыпал, и каждая проба растягивалась.
+            val wake = acquireRescueWake()
             try {
-                val found = runRescue(cfg, peer, gen)
+                // Первая точка, через которую идут данные, — сразу в работу (с 1.10.50-beta1), а не после трёх:
+                // прежняя очередь остаётся запасной (см. applyRescue, keepOld).
+                val found = runRescue(cfg, peer, gen, firstWins = true)
                 if (gen != waitGen.get() || destroyed || !wanted) {
                     // Подбор прервали. Если телефон перешёл на другую сеть, следующий цикл неудач на
                     // ней вправе подобрать заново, не дожидаясь получаса; на той же сети — нет, иначе
@@ -5024,7 +5401,7 @@ class WarpVpnService : VpnService() {
                 if (found.isEmpty()) {
                     retryLaterAfterFailure("подбор не нашёл точек, через которые идут данные")
                 } else {
-                    applyRescue(found, cfg, text)
+                    applyRescue(found, cfg, text, keepOld = true, quick = true)
                 }
             } catch (e: Throwable) {
                 runCatching {
@@ -5032,6 +5409,7 @@ class WarpVpnService : VpnService() {
                 }
                 if (gen == waitGen.get() && wanted && !destroyed) retryLaterAfterFailure(why)
             } finally {
+                runCatching { if (wake?.isHeld == true) wake.release() }
                 rescueBusy.set(false)
             }
         }, "warpscout-rescue").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }.start()
@@ -5039,11 +5417,29 @@ class WarpVpnService : VpnService() {
     }
 
     /**
+     * Не давать процессору уснуть на время подбора сервиса — не дольше [RESCUE_WAKE_MS] (с 1.10.50-beta1).
+     * Только когда туннель уже лёг (подбор сервиса другого и не бывает): работающий туннель так не держим.
+     */
+    private fun acquireRescueWake(): PowerManager.WakeLock? = runCatching {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WilyScout:rescue").apply {
+            setReferenceCounted(false)
+            acquire(RESCUE_WAKE_MS)
+        }
+    }.onSuccess {
+        if (!isScreenOn()) {
+            TunnelDebug.stage("подбор сервиса: экран погашен — не даю телефону уснуть, пока ищу (не дольше ${RESCUE_WAKE_MS / 60_000} мин)")
+        }
+    }.onFailure {
+        TunnelDebug.stage("подбор сервиса: удержать телефон от сна не вышло (${it.javaClass.simpleName}) — ищу как есть")
+    }.getOrNull()
+
+    /**
      * Подбор точек самим сервисом: рукопожатие по пулу без шума (параллельно), потом лучшие точки —
      * с профилями шума и проверкой данных. Туннеля в это время нет, поэтому проба данных никому не
      * мешает. Итог — до трёх точек с данными, быстрые первыми.
      */
-    private fun runRescue(cfg: WarpConfig, peer: ByteArray, gen: Int, seekAbroad: Boolean = false): List<RescuePoint> {
+    private fun runRescue(cfg: WarpConfig, peer: ByteArray, gen: Int, seekAbroad: Boolean = false, firstWins: Boolean = false): List<RescuePoint> {
         fun live() = gen == waitGen.get() && wanted && !destroyed
         val prober = WgProber(
             NetSettings(
@@ -5089,7 +5485,8 @@ class WarpVpnService : VpnService() {
         fun enough(): Boolean = if (seekAbroad) {
             found.count { ExitSite.isAbroad(it.site) } >= dev.warpscout.core.tune.Shortlist.LIMIT
         } else {
-            found.size >= dev.warpscout.core.tune.Shortlist.LIMIT
+            // Туннель лежит (с 1.10.50-beta1): хватает первой точки с данными — поднимаемся на ней сразу.
+            found.size >= (if (firstWins) 1 else dev.warpscout.core.tune.Shortlist.LIMIT)
         }
         // Поиск выхода за рубежом — не дольше двух минут: туннеля всё это время нет.
         val deadline = if (seekAbroad) started + ABROAD_MAX_MS else Long.MAX_VALUE
@@ -5178,7 +5575,7 @@ class WarpVpnService : VpnService() {
      * Подбор сервиса нашёл точки: записываем их тройкой этой сети (её видно в «Лучших конфигах» и в
      * «Резервной»), ставим в перебор сразу за текущей и поднимаем туннель на лучшей.
      */
-    private fun applyRescue(found: List<RescuePoint>, cfg: WarpConfig, baseText: String, keepOld: Boolean = false) {
+    private fun applyRescue(found: List<RescuePoint>, cfg: WarpConfig, baseText: String, keepOld: Boolean = false, quick: Boolean = false) {
         val kind = memoryNetKind()
         val mobile = dev.warpscout.app.NetIdentity.isMobile(kind)
         val now = System.currentTimeMillis()
@@ -5222,10 +5619,11 @@ class WarpVpnService : VpnService() {
         rescueQueue = ready.map { it.first.endpoint.render() }
         rescueNet = kind
         TunnelDebug.ok(
-            "подбор сервиса нашёл новую очередь: " + ready.joinToString { (pt, _) ->
-                "${pt.endpoint.render()} (шум ${pt.junk.name}, данные ${pt.dataMs.toLong()} мс" +
-                    (pt.site?.let { ", выход ${ExitSite.describe(it)}" } ?: "") + ")"
-            }
+            (if (quick) "подбор сервиса нашёл рабочую точку: " else "подбор сервиса нашёл новую очередь: ") +
+                ready.joinToString { (pt, _) ->
+                    "${pt.endpoint.render()} (шум ${pt.junk.name}, данные ${pt.dataMs.toLong()} мс" +
+                        (pt.site?.let { ", выход ${ExitSite.describe(it)}" } ?: "") + ")"
+                } + (if (quick) " — поднимаю туннель сразу, прежние точки остаются запасными" else "")
         )
         val best = ready.first()
         lastConfigText = best.second
@@ -6095,6 +6493,28 @@ class WarpVpnService : VpnService() {
         /** Живой экземпляр сервиса в этом процессе (см. onCreate). */
         @Volatile
         private var live: WarpVpnService? = null
+
+        /**
+         * Соединения приложений через tun (с 1.10.50-beta1, см. TcpGuard): один на процесс — соединения
+         * переживают и переподключение, и новый экземпляр сервиса.
+         */
+        private val tcpGuard = TcpGuard()
+
+        /** Сеть, на которой туннель последний раз поднялся (Network.networkHandle; 0 — не поднимался). */
+        @Volatile
+        private var lastUpNetHandle = 0L
+
+        /** Сколько держать прежний tun, если новый так и не поднялся (см. parkTun). */
+        private const val PARK_MAX_MS = 20_000L
+
+        /** Подбор сервиса не даёт телефону уснуть не дольше этого (см. startRescue). */
+        private const val RESCUE_WAKE_MS = 120_000L
+
+        /** Сколько соединений за раз спрашиваем у системы, чьи они (по ~1 мс каждое). */
+        private const val MAX_RESET_LOOKUPS = 64
+
+        /** Сбросы по ходу сессии — в журнал не больше стольких. */
+        private const val REACTIVE_SAY_LIMIT = 5
 
         const val ACTION_START = "dev.warpscout.app.tunnel.START"
         const val ACTION_STOP = "dev.warpscout.app.tunnel.STOP"
