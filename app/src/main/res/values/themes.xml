@@ -56,6 +56,58 @@
           отступают от них на высоту панелей — см. SystemBars.kt.
         -->
         <item name="android:windowOptOutEdgeToEdgeEnforcement" tools:targetApi="35">true</item>
+
+        <!-- Облик карточек, нижней панели и заголовков разделов (attrs.xml) — классический. -->
+        <item name="wsCardBg">@color/colorSurfaceContainerLow</item>
+        <item name="wsCardStroke">@color/colorOutlineVariant</item>
+        <item name="wsCardRadius">@dimen/radius_card</item>
+        <item name="wsPanelBg">@color/colorSurfaceContainer</item>
+        <item name="wsPanelStroke">@android:color/transparent</item>
+        <item name="wsPanelStrokeWidth">0dp</item>
+        <item name="wsPanelRadius">@dimen/radius_panel</item>
+        <item name="wsNavBg">@color/colorSurfaceContainerLow</item>
+        <item name="wsSectionHeaderAppearance">@style/TextAppearance.WarpScout.SectionHeader</item>
+    </style>
+
+    <!--
+      Дизайн «Премиум» (с 1.10.49-beta7, по умолчанию; выбор — «Настройки» → «Оформление»). Та же тема,
+      другие цвета: почти чёрный фон с оранжевым свечением, неоновый оранжевый акцент, стеклянные
+      карточки. Светлая и тёмная — как у классического: values / values-night. Фон экрана со свечением
+      и диагоналями рисует PremiumBackdrop, кнопку — PowerOrbView (свой вид для «Премиума»).
+    -->
+    <style name="Theme.WarpScout.Premium" parent="Theme.WarpScout">
+        <item name="colorPrimary">@color/prem_accent</item>
+        <item name="colorOnPrimary">@color/prem_on_accent</item>
+        <item name="colorPrimaryContainer">@color/prem_accent_container</item>
+        <item name="colorOnPrimaryContainer">@color/prem_on_accent_container</item>
+        <item name="colorSecondary">@color/prem_accent_light</item>
+        <item name="colorSecondaryContainer">@color/prem_tonal</item>
+        <item name="colorOnSecondaryContainer">@color/prem_on_tonal</item>
+        <item name="android:colorBackground">@color/prem_bg0</item>
+        <item name="colorSurface">@color/prem_surface</item>
+        <item name="colorOnSurface">@color/prem_on_surface</item>
+        <item name="colorSurfaceVariant">@color/prem_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/prem_on_surface_variant</item>
+        <item name="colorSurfaceContainerLowest">@color/prem_surface_lowest</item>
+        <item name="colorSurfaceContainerLow">@color/prem_surface_low</item>
+        <item name="colorSurfaceContainer">@color/prem_surface_cont</item>
+        <item name="colorSurfaceContainerHigh">@color/prem_surface_high</item>
+        <item name="colorOutline">@color/prem_outline</item>
+        <item name="colorOutlineVariant">@color/prem_outline_variant</item>
+        <item name="colorError">@color/prem_error</item>
+        <item name="android:statusBarColor" tools:targetApi="l">@color/prem_bg1</item>
+        <item name="android:navigationBarColor" tools:targetApi="l">@color/prem_bg1</item>
+        <item name="materialButtonStyle">@style/Widget.WarpScout.Premium.Button</item>
+
+        <item name="wsCardBg">@color/prem_card</item>
+        <item name="wsCardStroke">@color/prem_card_stroke</item>
+        <item name="wsCardRadius">@dimen/radius_card_prem</item>
+        <item name="wsPanelBg">@color/prem_card</item>
+        <item name="wsPanelStroke">@color/prem_card_stroke</item>
+        <item name="wsPanelStrokeWidth">@dimen/stroke_card</item>
+        <item name="wsPanelRadius">@dimen/radius_panel_prem</item>
+        <item name="wsNavBg">@color/prem_nav</item>
+        <item name="wsSectionHeaderAppearance">@style/TextAppearance.WarpScout.SectionHeader.Premium</item>
     </style>
 
     <!--
@@ -66,6 +118,14 @@
     <style name="Theme.WarpScout.Welcome" parent="Theme.WarpScout">
         <item name="android:windowIsFloating">false</item>
         <item name="android:windowBackground">@color/colorSurface</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
+
+    <!-- То же окно во весь экран в дизайне «Премиум» (начальные экраны, с 1.10.49-beta7 — и «Маршрут»). -->
+    <style name="Theme.WarpScout.Premium.Welcome" parent="Theme.WarpScout.Premium">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowBackground">@color/prem_bg0</item>
         <item name="android:windowSoftInputMode">adjustResize</item>
         <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
     </style>

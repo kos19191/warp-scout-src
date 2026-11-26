@@ -604,7 +604,7 @@ class ProtonConnect(
     private fun caption(text: String, top: Int = 0, bottom: Int = 0) = TextView(activity).apply {
         this.text = text
         setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
-        setTextColor(ContextCompat.getColor(activity, R.color.colorOnSurfaceVariant))
+        setTextColor(Design.color(activity, R.color.colorOnSurfaceVariant))
         setPadding(0, dp(top), 0, dp(bottom))
     }
 
@@ -625,12 +625,12 @@ class ProtonConnect(
         addView(TextView(activity).apply {
             setText(title)
             setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall)
-            setTextColor(ContextCompat.getColor(activity, R.color.colorPrimary))
+            setTextColor(Design.color(activity, R.color.colorPrimary))
         })
         addView(TextView(activity).apply {
             setText(note)
             setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
-            setTextColor(ContextCompat.getColor(activity, R.color.colorOnSurfaceVariant))
+            setTextColor(Design.color(activity, R.color.colorOnSurfaceVariant))
         })
         setOnClickListener { onClick() }
     }

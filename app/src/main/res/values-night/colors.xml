@@ -46,4 +46,37 @@
     <color name="orb_ring_off">#4E453D</color>
     <color name="orb_disc_top">#2E2A26</color>
     <color name="orb_disc_bottom">#1C1916</color>
+
+    <!-- Дизайн «Премиум» в тёмной теме — его основной вид: почти чёрный фон, неоновый оранжевый. -->
+    <color name="prem_bg0">#0A0807</color>
+    <color name="prem_bg1">#120E0B</color>
+    <color name="prem_surface">#0F0C0A</color>
+    <color name="prem_surface_lowest">#0A0807</color>
+    <color name="prem_surface_low">#16110E</color>
+    <color name="prem_surface_cont">#1B1511</color>
+    <color name="prem_surface_high">#241C17</color>
+    <color name="prem_surface_variant">#2B221C</color>
+    <color name="prem_on_surface">#F5EFE9</color>
+    <color name="prem_on_surface_variant">#B3A89F</color>
+    <color name="prem_outline">#7A7068</color>
+    <color name="prem_outline_variant">#3A2C22</color>
+    <color name="prem_accent">#FF8A1F</color>
+    <color name="prem_accent_deep">#F25C05</color>
+    <color name="prem_accent_light">#FFB15C</color>
+    <color name="prem_on_accent">#FFFFFF</color>
+    <color name="prem_accent_container">#4A2306</color>
+    <color name="prem_on_accent_container">#FFD2AE</color>
+    <color name="prem_tonal">#2E1C0F</color>
+    <color name="prem_on_tonal">#FFB36B</color>
+    <color name="prem_card">#C21C1511</color>
+    <color name="prem_card_stroke">#38FF8A30</color>
+    <color name="prem_nav">#F20D0A08</color>
+    <color name="prem_error">#FF5A4E</color>
+    <color name="prem_disc_a">#211913</color>
+    <color name="prem_disc_b">#0C0907</color>
+    <color name="prem_ring_off">#3A2E25</color>
+    <color name="prem_core">#FFF1E0</color>
+    <color name="prem_map_bg">#0D0A08</color>
+    <color name="prem_map_road">#38786455</color>
+    <color name="prem_blue">#59C3F0</color>
 </resources>

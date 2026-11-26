@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Фон обычной кнопки в дизайне «Премиум» (с 1.10.49-beta7): выключенная — серая, как у Material. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:alpha="0.12" android:color="@color/prem_on_surface" android:state_enabled="false" />
+    <item android:color="@color/prem_accent_deep" />
+</selector>

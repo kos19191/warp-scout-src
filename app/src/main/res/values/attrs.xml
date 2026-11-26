@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      С 1.10.49-beta7 у приложения два дизайна: «Премиум» (по умолчанию) и «Классический» (прежний вид).
+      Разметка у них общая: карточки, заголовки разделов и нижняя панель берут вид из темы через эти
+      атрибуты (Theme.WarpScout — классический, Theme.WarpScout.Premium — премиум). Так экран один,
+      а меняется только облик — без второй копии разметки, которую пришлось бы держать в согласии.
+    -->
+    <attr name="wsCardBg" format="color|reference" />
+    <attr name="wsCardStroke" format="color|reference" />
+    <attr name="wsCardRadius" format="dimension|reference" />
+    <attr name="wsPanelBg" format="color|reference" />
+    <attr name="wsPanelStroke" format="color|reference" />
+    <attr name="wsPanelStrokeWidth" format="dimension|reference" />
+    <attr name="wsPanelRadius" format="dimension|reference" />
+    <attr name="wsNavBg" format="color|reference" />
+    <attr name="wsSectionHeaderAppearance" format="reference" />
+</resources>

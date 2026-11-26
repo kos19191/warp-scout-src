@@ -19,6 +19,10 @@
     <dimen name="radius_panel">16dp</dimen>
     <dimen name="stroke_card">1dp</dimen>
 
+    <!-- Дизайн «Премиум» (с 1.10.49-beta7): карточки круглее — стекло с мягкими углами. -->
+    <dimen name="radius_card_prem">18dp</dimen>
+    <dimen name="radius_panel_prem">22dp</dimen>
+
     <!-- Высота кнопок: главная крупнее, второстепенные — 48dp, минимальная цель нажатия. -->
     <dimen name="button_primary">56dp</dimen>
     <dimen name="button_secondary">48dp</dimen>

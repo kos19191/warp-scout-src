@@ -86,7 +86,8 @@ class WelcomeScreens(
 
     fun show(startPage: Int, restoredChecked: Collection<String>?) {
         restored = restoredChecked?.toSet()
-        val d = AppCompatDialog(activity, R.style.Theme_WarpScout_Welcome)
+        // Тема — выбранного дизайна (с 1.10.49-beta7): в «Премиуме» начальные экраны тоже тёмно-оранжевые.
+        val d = AppCompatDialog(activity, Design.fullScreenTheme(activity))
         val v = DialogWelcomeBinding.inflate(LayoutInflater.from(d.context))
         dialog = d
         views = v

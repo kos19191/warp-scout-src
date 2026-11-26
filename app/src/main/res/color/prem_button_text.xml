@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Подпись обычной кнопки в дизайне «Премиум»: белая, у выключенной — приглушённая. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:alpha="0.38" android:color="@color/prem_on_surface" android:state_enabled="false" />
+    <item android:color="#FFFFFFFF" />
+</selector>

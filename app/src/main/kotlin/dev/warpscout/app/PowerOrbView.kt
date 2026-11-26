@@ -29,6 +29,12 @@ import androidx.core.content.ContextCompat
  *
  * Значок питания, надпись и таймер лежат поверх — обычными View в разметке: так их проще
  * озвучивать TalkBack и менять текстом, не перерисовывая круг.
+ *
+ * С 1.10.49-beta7 у кнопки два облика: классический (всё сказанное выше) и «Премиум» ([premium],
+ * рисует [PremiumOrbPainter]): неоновое кольцо со щитом, «микросхема» при подборе, бегущий свет при
+ * подключении, вспышка щита при успехе. В «Премиуме» кадры идут, пока идёт подбор, подключение или
+ * вспышка, и только пока кнопка на экране; в покое кадр рисуется один раз. Если в настройках телефона
+ * анимации выключены — кадры неподвижные.
  */
 class PowerOrbView @JvmOverloads constructor(
     context: Context,
@@ -64,11 +70,43 @@ class PowerOrbView @JvmOverloads constructor(
     /** Шейдеры зависят от размера и цвета: пересобираем только когда меняется одно из двух. */
     private var shadersFor = ""
 
+    /** Облик «Премиум» (с 1.10.49-beta7, выбор — «Оформление»). */
+    var premium: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            painter = if (value) PremiumOrbPainter(context) else null
+            shadersFor = ""
+            // У обликов разные аниматоры: старый останавливаем, нужный запустится заново.
+            spinner?.cancel()
+            spinner = null
+            updateSpinner()
+            invalidate()
+        }
+    private var painter: PremiumOrbPainter? = null
+
+    /** Когда началась вспышка «подключено» (uptime, мс); 0 — не было. Только «Премиум». */
+    private var flashStart = 0L
+
+    /** Радиус, внутри которого помещаются надписи кнопки, — для подгонки строки скорости. */
+    fun innerRadius(): Float {
+        val size = minOf(width, height).toFloat()
+        val density = resources.displayMetrics.density
+        return painter?.innerRadius(size, density) ?: (size / 2f * 0.76f - 7f * density)
+    }
+
     /** Сменить состояние; одинаковое повторно не перерисовывает. */
     fun setState(newState: Int) {
         if (newState == state) return
+        val old = state
         state = newState
         shadersFor = ""
+        // «Премиум»: подключились — вспышка щита (подбор и подключение у кнопки — одно состояние).
+        if (premium && newState == STATE_ON && old == STATE_CONNECTING && isShown) {
+            flashStart = android.os.SystemClock.uptimeMillis()
+        } else if (newState != STATE_ON) {
+            flashStart = 0L
+        }
         updateSpinner()
         invalidate()
     }
@@ -121,6 +159,13 @@ class PowerOrbView @JvmOverloads constructor(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        painter?.let { p ->
+            p.draw(
+                canvas, width, height, state, shownProgress, android.os.SystemClock.uptimeMillis(), flashStart,
+                ValueAnimator.areAnimatorsEnabled()
+            )
+            return
+        }
         val size = minOf(width, height).toFloat()
         if (size <= 0f) return
         val cx = width / 2f
@@ -195,10 +240,36 @@ class PowerOrbView @JvmOverloads constructor(
     private fun withAlpha(c: Int, a: Float): Int =
         Color.argb((Color.alpha(c) * a).toInt().coerceIn(0, 255), Color.red(c), Color.green(c), Color.blue(c))
 
-    /** Дуга крутится только пока идёт подключение (не подбор с кольцом-прогрессом) и View видна. */
+    /** «Премиум»: идёт вспышка «подключено». */
+    private fun flashing(): Boolean =
+        flashStart > 0L && android.os.SystemClock.uptimeMillis() - flashStart < PremiumOrbPainter.FLASH_MS
+
+    /**
+     * Дуга крутится только пока идёт подключение (не подбор с кольцом-прогрессом) и View видна. В
+     * «Премиуме» кадры нужны и во время подбора («микросхема») и вспышки — тогда тот же аниматор
+     * просто перерисовывает кнопку каждый кадр.
+     */
     private fun updateSpinner() {
-        val need = state == STATE_CONNECTING && targetProgress < 0f && isAttachedToWindow && isShown
-        if (need && spinner == null) {
+        val visible = isAttachedToWindow && isShown
+        val need = if (premium) {
+            visible && ValueAnimator.areAnimatorsEnabled() &&
+                (state == STATE_CONNECTING || targetProgress >= 0f || flashing())
+        } else {
+            state == STATE_CONNECTING && targetProgress < 0f && visible
+        }
+        if (need && spinner == null && premium) {
+            spinner = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 1_000L
+                repeatCount = ValueAnimator.INFINITE
+                interpolator = LinearInterpolator()
+                addUpdateListener {
+                    invalidate()
+                    // Вспышка кончилась, а подключение уже не идёт — кадры больше не нужны.
+                    if (state == STATE_ON && !flashing() && targetProgress < 0f) post { updateSpinner() }
+                }
+                start()
+            }
+        } else if (need && spinner == null) {
             spinner = ValueAnimator.ofFloat(0f, 360f).apply {
                 duration = 1_400L
                 repeatCount = ValueAnimator.INFINITE

@@ -764,6 +764,14 @@ class Prefs(private val context: Context) {
         set(v) = sp.edit().putInt("themeMode", v.coerceIn(THEME_SYSTEM, THEME_DARK)).apply()
 
     /**
+     * Дизайн (с 1.10.49-beta7): [DESIGN_PREMIUM] — по умолчанию (так решил человек: «по умолчанию новую
+     * поставь»), [DESIGN_CLASSIC] — прежний вид. Тема (светлая/тёмная) — отдельно, [themeMode].
+     */
+    var design: Int
+        get() = sp.getInt("design", DESIGN_PREMIUM).let { if (it == DESIGN_CLASSIC) DESIGN_CLASSIC else DESIGN_PREMIUM }
+        set(v) = sp.edit().putInt("design", if (v == DESIGN_CLASSIC) DESIGN_CLASSIC else DESIGN_PREMIUM).apply()
+
+    /**
      * Какие разделы «Настроек» раскрыты (с 1.10.49-beta5, см. [SettingsAccordion]): ключи через
      * запятую. Пусто — все свёрнуты, видны только заголовки. С 1.10.49-beta6 здесь же ключ
      * `apps_list` — раскрыт ли список приложений в «Маршрутах».
@@ -1224,6 +1232,8 @@ class Prefs(private val context: Context) {
         const val UI_SIMPLE = 1
         const val UI_ADVANCED = 2
 
+        const val DESIGN_CLASSIC = 0
+        const val DESIGN_PREMIUM = 1
         const val THEME_SYSTEM = 0
         const val THEME_LIGHT = 1
         const val THEME_DARK = 2

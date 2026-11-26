@@ -210,10 +210,23 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     /** Пока true — переподключение по настройкам не затевается (идёт заполнение экрана из Prefs). */
     private var suppressSettingsReconnect = false
 
+    /** Экран в дизайне «Премиум» (с 1.10.49-beta7) — решено в onCreate вместе с темой окна. */
+    private var premium = false
+
+    /** Фон со свечением («Премиум»); null — классический дизайн. */
+    private var backdrop: PremiumBackdrop? = null
+
+    /** Открытый экран «Маршрут» (с 1.10.49-beta7). */
+    private var routeScreen: RouteScreen? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // Тема — до super.onCreate: экран сразу создаётся светлым или тёмным, без пересоздания и
         // мигания. Ошибка чтения настроек темы не должна мешать запуску — тогда просто как в системе.
         runCatching { applyThemeMode(Prefs(this).themeMode) }
+        // Дизайн (с 1.10.49-beta7): «Премиум» — своя тема окна, и задать её можно только до создания
+        // экрана. Не прочиталось — классическая тема из манифеста.
+        premium = runCatching { Prefs(this).design == Prefs.DESIGN_PREMIUM }.getOrDefault(false)
+        if (premium) runCatching { setTheme(R.style.Theme_WarpScout_Premium) }.onFailure { premium = false }
         super.onCreate(savedInstanceState)
         // Первым делом: если приложение падало, это должно попасть в журнал, а не исчезнуть.
         CrashLog.install(this)
@@ -288,6 +301,10 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                 TunnelDebug.error("упрощённый экран не настроился: " + SafeMode.describe(t))
             }
             runCatching { setupThemeToggle() }
+            runCatching { setupDesignToggle() }
+            runCatching { applyDesign() }.onFailure { t ->
+                TunnelDebug.error("оформление «Премиум» не настроилось: " + SafeMode.describe(t))
+            }
             applyUiMode()
             shown = this
             // Загрузка обновления живёт дольше экрана (с 1.10.40, см. UpdateFlow): ход и итог — этому экрану.
@@ -322,6 +339,8 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     override fun onDestroy() {
         welcome?.dismiss()
         welcome = null
+        runCatching { routeScreen?.dismiss() }
+        routeScreen = null
         stopTunnelPolling()
         if (shown === this) shown = null
         if (UpdateFlow.ui === this) UpdateFlow.ui = null
@@ -739,12 +758,17 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             navButtons().forEachIndexed { i, button ->
                 val active = i == safe
                 button.isSelected = active
-                button.setTextColor(
-                    ContextCompat.getColor(
-                        this,
-                        if (active) R.color.colorPrimary else R.color.colorOnSurfaceVariant
-                    )
+                val color = ContextCompat.getColor(
+                    this,
+                    when {
+                        premium && active -> R.color.prem_accent
+                        premium -> R.color.prem_on_surface_variant
+                        active -> R.color.colorPrimary
+                        else -> R.color.colorOnSurfaceVariant
+                    }
                 )
+                button.setTextColor(color)
+                if (premium) button.iconTint = android.content.res.ColorStateList.valueOf(color)
             }
             // Открыли «Журнал» — сразу видно, что происходит сейчас. Раньше окно показывало
             // начало списка, и свежую строку приходилось искать листанием.
@@ -2013,7 +2037,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                     text = empty
                     textSize = 13f
                     setPadding(0, 4, 0, 4)
-                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.colorOnSurfaceVariant))
+                    setTextColor(col(R.color.colorOnSurfaceVariant))
                 }
             )
             return
@@ -3217,7 +3241,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         runCatching {
             binding.progressSecond.visibility = View.VISIBLE
             binding.textSecondResult.visibility = View.VISIBLE
-            binding.textSecondResult.setTextColor(ContextCompat.getColor(this, R.color.colorOnSurfaceVariant))
+            binding.textSecondResult.setTextColor(col(R.color.colorOnSurfaceVariant))
             binding.textSecondResult.text = text
         }
     }
@@ -3228,7 +3252,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         runCatching {
             binding.progressSecond.visibility = View.GONE
             binding.textSecondResult.visibility = View.VISIBLE
-            binding.textSecondResult.setTextColor(ContextCompat.getColor(this, R.color.colorOnSurface))
+            binding.textSecondResult.setTextColor(col(R.color.colorOnSurface))
             val color = ContextCompat.getColor(
                 this,
                 when (kind) {
@@ -3818,14 +3842,14 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         fun caption(text: CharSequence, bottom: Int = 4) = android.widget.TextView(this).apply {
             this.text = text
             setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
-            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.colorOnSurfaceVariant))
+            setTextColor(col(R.color.colorOnSurfaceVariant))
             setPadding(0, 0, 0, dp(bottom))
         }
         fun textAction(text: String, onClick: () -> Unit) = android.widget.TextView(this).apply {
             // Простая текстовая кнопка цвета темы — как «Снять отметку» в шторке.
             this.text = text
             setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelLarge)
-            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.colorPrimary))
+            setTextColor(col(R.color.colorPrimary))
             setPadding(0, dp(8), dp(16), dp(8))
             isClickable = true
             isFocusable = true
@@ -5103,7 +5127,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
      */
     private fun animateShield() {
         runCatching {
-            val v = binding.imageShield
+            val v = if (premium) binding.advPower else binding.imageShield
             v.animate().cancel()
             v.alpha = 0f
             v.scaleX = 0.82f
@@ -5326,7 +5350,13 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             } else {
                 tunnelHandler.removeCallbacks(simpleTick)
                 runCatching { renderShortlist() }
+                if (premium) {
+                    runCatching { updateAdvOrb() }
+                    startSimpleTick()
+                }
             }
+            backdrop?.calm = !simple
+            if (simple && premium) binding.root.post { runCatching { placeGlow() } }
         }.onFailure { t ->
             suppressModeListener = false
             TunnelDebug.error("переключение вида экрана: " + SafeMode.describe(t))
@@ -5369,10 +5399,74 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
 
     /** Обновить упрощённый экран по состоянию сервиса. Сбой — строка в журнале, не падение. */
     private fun updateSimple() {
-        if (!simpleShown() || !::prefs.isInitialized) return
+        if (!::prefs.isInitialized) return
+        refreshRouteScreen()
+        if (!simpleShown()) {
+            if (premium) runCatching { updateAdvOrb() }
+            return
+        }
         runCatching { updateSimpleUnsafe() }.onFailure { t ->
             TunnelDebug.error("упрощённый экран: " + SafeMode.describe(t))
         }
+    }
+
+    /** Что на кнопке-кольце: состояние, надпись и строка под ней. */
+    private class OrbFace(val state: Int, val title: String, val sub: String)
+
+    /**
+     * Одно правило для кнопки упрощённого экрана и кольца «Главной» («Премиум», с 1.10.49-beta7): идёт
+     * подбор — проценты, подключение — «нажмите, чтобы отменить», работает — время сессии.
+     */
+    private fun orbFace(snap: TunnelStatus?, up: Boolean, phase: Int, held: Boolean, linkBad: Boolean): OrbFace = when {
+        engine.running -> {
+            // В кнопке — проценты кольца; что именно проверяется — строкой под кнопкой.
+            val pct = (scanFraction * 100f).toInt()
+            OrbFace(
+                PowerOrbView.STATE_CONNECTING, getString(R.string.simple_state_scanning),
+                if (pct > 0) getString(R.string.simple_scan_percent, pct)
+                else scanProgressText.ifBlank { getString(R.string.simple_tap_to_stop_scan) }
+            )
+        }
+        connecting -> OrbFace(
+            PowerOrbView.STATE_CONNECTING,
+            getString(if (connectCancel) R.string.simple_state_cancelling else R.string.simple_state_connecting),
+            getString(R.string.simple_tap_to_cancel)
+        )
+        up && linkBad -> OrbFace(PowerOrbView.STATE_ERROR, getString(R.string.simple_state_no_link), uptimeClock(snap))
+        up -> OrbFace(PowerOrbView.STATE_ON, getString(R.string.simple_state_on), uptimeClock(snap))
+        phase == TunnelStatus.PHASE_NO_NETWORK ->
+            OrbFace(PowerOrbView.STATE_CONNECTING, getString(R.string.simple_state_no_network), getString(R.string.simple_tap_to_stop))
+        held || phase == TunnelStatus.PHASE_STARTING || phase == TunnelStatus.PHASE_RECONNECTING ->
+            OrbFace(PowerOrbView.STATE_CONNECTING, getString(R.string.simple_state_waiting), getString(R.string.simple_tap_to_stop))
+        // С 1.10.31 без подсказки «нажмите, чтобы включить»: кнопка и так одна.
+        else -> OrbFace(PowerOrbView.STATE_OFF, getString(R.string.simple_state_off), "")
+    }
+
+    /** Цвет значка питания на кнопке по состоянию — у каждого дизайна свой. */
+    private fun powerTint(state: Int): Int = ContextCompat.getColor(
+        this,
+        if (premium) {
+            when (state) {
+                PowerOrbView.STATE_ON -> R.color.prem_accent
+                PowerOrbView.STATE_ERROR -> R.color.prem_error
+                PowerOrbView.STATE_CONNECTING -> R.color.prem_accent_light
+                else -> R.color.prem_outline
+            }
+        } else {
+            when (state) {
+                PowerOrbView.STATE_ON -> R.color.orb_accent
+                PowerOrbView.STATE_ERROR -> R.color.orb_error
+                PowerOrbView.STATE_CONNECTING -> R.color.orb_warn
+                else -> R.color.colorOnSurfaceVariant
+            }
+        }
+    )
+
+    /** «Премиум»: время и проценты под надписью — крупно, подсказки «нажмите…» — мелко. */
+    private fun sizeOrbSub(view: android.widget.TextView, sub: String, big: Float, small: Float) {
+        val sp = if (sub.firstOrNull()?.isDigit() == true) big else small
+        val px = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, sp, resources.displayMetrics)
+        if (abs(view.textSize - px) > 0.5f) view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, sp)
     }
 
     private fun updateSimpleUnsafe() {
@@ -5383,54 +5477,15 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         val held = !up && snap?.wanted == true
         val linkFresh = up && snap != null && snap.linkAt > 0L && snap.linkAt >= snap.startedAt
         val linkBad = linkFresh && snap?.linkWeb == TunnelStatus.LINK_FAIL
-        val state: Int
-        val title: String
-        val sub: String
-        when {
-            engine.running -> {
-                state = PowerOrbView.STATE_CONNECTING
-                title = getString(R.string.simple_state_scanning)
-                // В кнопке — проценты кольца; что именно проверяется — строкой под кнопкой.
-                val pct = (scanFraction * 100f).toInt()
-                sub = if (pct > 0) getString(R.string.simple_scan_percent, pct)
-                else scanProgressText.ifBlank { getString(R.string.simple_tap_to_stop_scan) }
-            }
-            connecting -> {
-                state = PowerOrbView.STATE_CONNECTING
-                title = getString(if (connectCancel) R.string.simple_state_cancelling else R.string.simple_state_connecting)
-                sub = getString(R.string.simple_tap_to_cancel)
-            }
-            up && linkBad -> {
-                state = PowerOrbView.STATE_ERROR
-                title = getString(R.string.simple_state_no_link)
-                sub = uptimeClock(snap)
-            }
-            up -> {
-                state = PowerOrbView.STATE_ON
-                title = getString(R.string.simple_state_on)
-                sub = uptimeClock(snap)
-            }
-            phase == TunnelStatus.PHASE_NO_NETWORK -> {
-                state = PowerOrbView.STATE_CONNECTING
-                title = getString(R.string.simple_state_no_network)
-                sub = getString(R.string.simple_tap_to_stop)
-            }
-            held || phase == TunnelStatus.PHASE_STARTING || phase == TunnelStatus.PHASE_RECONNECTING -> {
-                state = PowerOrbView.STATE_CONNECTING
-                title = getString(R.string.simple_state_waiting)
-                sub = getString(R.string.simple_tap_to_stop)
-            }
-            else -> {
-                // С 1.10.31 без подсказки «нажмите, чтобы включить»: кнопка и так одна.
-                state = PowerOrbView.STATE_OFF
-                title = getString(R.string.simple_state_off)
-                sub = ""
-            }
-        }
+        val face = orbFace(snap, up, phase, held, linkBad)
+        val state = face.state
+        val title = face.title
+        val sub = face.sub
         lastOrbState = state
         s.simpleOrbView.setState(state)
         if (s.simpleState.text.toString() != title) s.simpleState.text = title
         if (s.simpleTimer.text.toString() != sub) s.simpleTimer.text = sub
+        if (premium) sizeOrbSub(s.simpleTimer, sub, 20f, 13f)
         // Пустая строка не должна занимать место: надпись «Выключено» стоит ровно по центру кнопки.
         val timerVisibility = if (sub.isBlank()) View.GONE else View.VISIBLE
         if (s.simpleTimer.visibility != timerVisibility) s.simpleTimer.visibility = timerVisibility
@@ -5448,17 +5503,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             if (s.simpleActivity.text.toString() != activity) s.simpleActivity.text = activity
             s.simpleActivity.visibility = if (activity.isBlank()) View.GONE else View.VISIBLE
         }
-        s.simplePowerIcon.imageTintList = android.content.res.ColorStateList.valueOf(
-            ContextCompat.getColor(
-                this,
-                when (state) {
-                    PowerOrbView.STATE_ON -> R.color.orb_accent
-                    PowerOrbView.STATE_ERROR -> R.color.orb_error
-                    PowerOrbView.STATE_CONNECTING -> R.color.orb_warn
-                    else -> R.color.colorOnSurfaceVariant
-                }
-            )
-        )
+        s.simplePowerIcon.imageTintList = android.content.res.ColorStateList.valueOf(powerTint(state))
 
         // Где мы: вид сети, точка входа, страна выхода WARP (если проверка связи прошла) и страна второго
         // выхода (если он поднят): «мобильная · вход 8.35.211.3:864 · выход RU · второй выход NL». Так
@@ -5479,8 +5524,14 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             }
             parts.joinToString(" · ")
         }
-        s.simpleWhere.text = where
-        s.simpleWhere.visibility = if (where.isBlank()) View.INVISIBLE else View.VISIBLE
+        if (premium) {
+            // «Премиум» (с 1.10.49-beta7): то же самое — карточкой маршрута над карточками.
+            if (s.simpleWhere.visibility != View.GONE) s.simpleWhere.visibility = View.GONE
+            runCatching { renderRouteCard(state, net, endpoint, country, secondExitCountry(snap)) }
+        } else {
+            s.simpleWhere.text = where
+            s.simpleWhere.visibility = if (where.isBlank()) View.INVISIBLE else View.VISIBLE
+        }
 
         // Скорость — на самой кнопке (живой поток раз в секунду, см. updateLiveRate); ручного
         // замера больше нет (с 1.10.31). На месте её карточки — «Туннелирование».
@@ -5501,7 +5552,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         if (backup.isBlank()) {
             s.simpleBackupValue.text = getString(R.string.simple_backup_none)
             s.simpleBackupState.text = getString(R.string.simple_backup_hint_none)
-            s.simpleBackupState.setTextColor(ContextCompat.getColor(this, R.color.colorOnSurfaceVariant))
+            s.simpleBackupState.setTextColor(col(R.color.colorOnSurfaceVariant))
         } else {
             s.simpleBackupValue.text = backup
             val text = if (up && backup == endpoint) getString(R.string.mark_current)
@@ -5509,7 +5560,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             val color = if (up && backup == endpoint) ContextCompat.getColor(this, R.color.check_ok)
             else markColor(backup, marks)
             s.simpleBackupState.text = dotLine(text, color)
-            s.simpleBackupState.setTextColor(ContextCompat.getColor(this, R.color.colorOnSurfaceVariant))
+            s.simpleBackupState.setTextColor(col(R.color.colorOnSurfaceVariant))
         }
     }
 
@@ -5548,7 +5599,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         val text = getString(R.string.simple_rate, SpeedTest.human(down), SpeedTest.human(upRate))
         if (s.simpleRate.text.toString() != text) {
             val styled = android.text.SpannableString(text)
-            val accent = ContextCompat.getColor(this, R.color.orb_accent)
+            val accent = ContextCompat.getColor(this, if (premium) R.color.prem_accent else R.color.orb_accent)
             text.forEachIndexed { i, c ->
                 if (c == '↓' || c == '↑') {
                     styled.setSpan(android.text.style.ForegroundColorSpan(accent), i, i + 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
@@ -5587,7 +5638,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         if (rateBasePx <= 0f) rateBasePx = rate.textSize
         val base = rateBasePx
         // Внутреннее кольцо — 0.76 размера кнопки минус 7dp (см. PowerOrbView), и ещё 5dp поля.
-        val radius = minOf(orb.width, orb.height) / 2f * 0.76f - 12f * dm.density
+        val radius = s.simpleOrbView.innerRadius() - 5f * dm.density
         val above = rate.top.toFloat()
         val paint = android.text.TextPaint(rate.paint).apply { textSize = base }
         val fm = paint.fontMetrics
@@ -5625,8 +5676,19 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
      */
     private val simpleTick = object : Runnable {
         override fun run() {
-            if (!screenResumed || !simpleShown()) return
-            if (lastOrbState == PowerOrbView.STATE_ON || lastOrbState == PowerOrbView.STATE_ERROR) {
+            if (!screenResumed) return
+            val ticking = lastOrbState == PowerOrbView.STATE_ON || lastOrbState == PowerOrbView.STATE_ERROR
+            if (!simpleShown()) {
+                // «Премиум» (с 1.10.49-beta7): часы на кольце «Главной» расширенного вида. Туннель не
+                // работает — тик не нужен; его снова запустит [updateAdvOrb], когда подключится.
+                if (!premium || !ticking) return
+                if (selectedTab == TAB_START) runCatching {
+                    binding.advTimer.text = uptimeClock(TunnelStatusBus.snapshot(this@MainActivity))
+                }
+                tunnelHandler.postDelayed(this, 1000L)
+                return
+            }
+            if (ticking) {
                 runCatching {
                     val snap = TunnelStatusBus.snapshot(this@MainActivity)
                     binding.simple.simpleTimer.text = uptimeClock(snap)
@@ -5639,7 +5701,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
 
     private fun startSimpleTick() {
         tunnelHandler.removeCallbacks(simpleTick)
-        if (screenResumed && simpleShown()) tunnelHandler.postDelayed(simpleTick, 1000L)
+        if (screenResumed && (simpleShown() || premium)) tunnelHandler.postDelayed(simpleTick, 1000L)
     }
 
     /** Подпись группы сетей для сообщений: «Wi-Fi» / «мобильная». */
@@ -7284,6 +7346,397 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             ).lowercase())
             applyThemeMode(mode)
         }
+    }
+
+    // ------------------------------------------------ дизайн (с 1.10.49-beta7)
+
+    /**
+     * «Дизайн» в «Оформлении»: «Премиум» или «Классический». Тема окна задаётся до создания экрана,
+     * поэтому выбор пересоздаёт его — как смена светлой и тёмной темы: вкладка, подбор и туннель это
+     * переживают, раздел «Оформление» остаётся раскрытым.
+     */
+    private fun setupDesignToggle() {
+        binding.designGroup.check(if (prefs.design == Prefs.DESIGN_CLASSIC) R.id.btnDesignClassic else R.id.btnDesignPremium)
+        binding.designGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            val design = if (checkedId == R.id.btnDesignClassic) Prefs.DESIGN_CLASSIC else Prefs.DESIGN_PREMIUM
+            if (design == prefs.design) return@addOnButtonCheckedListener
+            prefs.design = design
+            TunnelDebug.stage(
+                "дизайн оформления: " +
+                    getString(if (design == Prefs.DESIGN_CLASSIC) R.string.design_classic else R.string.design_premium).lowercase()
+            )
+            // Чуть позже: чтобы было видно, как выбор переключился, а не мгновенный скачок.
+            tunnelHandler.postDelayed({
+                runCatching { if (!isFinishing && !isDestroyed) recreate() }.onFailure { t ->
+                    TunnelDebug.error("смена дизайна: экран не пересоздался — " + SafeMode.describe(t))
+                }
+            }, MODE_SWITCH_DELAY_MS)
+        }
+    }
+
+    private fun dp(v: Float): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
+
+    /** Цвет классической темы, заданный кодом, — в «Премиуме» его оттенок (см. [Design.premiumOf]). */
+    private fun col(res: Int): Int = ContextCompat.getColor(this, if (premium) Design.premiumOf(res) else res)
+
+    /**
+     * Облик «Премиум» — то, чего тема сама не меняет: фон со свечением, крупнее кнопка и логотип, имя
+     * двумя цветами, карточка маршрута вместо строки «где мы», значки карточек, вкладок и разделов
+     * «Настроек», кольцо на «Главной». Строка «где мы» и «Точка входа» открывают «Маршрут» в обоих
+     * дизайнах; остальное в классическом не трогаем — он остаётся прежним.
+     */
+    private fun applyDesign() {
+        val s = binding.simple
+        val ripple = android.util.TypedValue()
+        theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)
+        s.simpleWhere.setOnClickListener { showRouteScreen() }
+        s.simpleWhere.setBackgroundResource(ripple.resourceId)
+        binding.textEndpointNow.setOnClickListener { showRouteScreen() }
+        binding.textEndpointNow.setBackgroundResource(ripple.resourceId)
+        s.simpleRouteCard.setOnClickListener { showRouteScreen() }
+        if (!premium) return
+
+        val sp = android.util.TypedValue.COMPLEX_UNIT_SP
+        val accent = ContextCompat.getColor(this, R.color.prem_accent)
+        backdrop = PremiumBackdrop(this).also { binding.root.background = it }
+
+        // Упрощённый экран.
+        s.simpleOrbView.premium = true
+        val orb = if (resources.configuration.screenWidthDp >= 380) 300f else 264f
+        s.simpleOrb.layoutParams = s.simpleOrb.layoutParams.apply { width = dp(orb); height = dp(orb) }
+        s.simpleLogo.layoutParams = s.simpleLogo.layoutParams.apply { width = dp(44f); height = dp(44f) }
+        s.simpleBrand.text = brandText()
+        s.simpleBrand.setTextSize(sp, 25f)
+        s.simplePowerIcon.layoutParams = s.simplePowerIcon.layoutParams.apply { width = dp(56f); height = dp(56f) }
+        s.simpleState.setTextSize(sp, 23f)
+        s.simpleRate.setTextSize(sp, 14f)
+        s.simpleWhere.visibility = View.GONE
+        s.simpleRouteCard.visibility = View.VISIBLE
+        s.simpleTunnelIcon.visibility = View.VISIBLE
+        s.simpleBackupIcon.visibility = View.VISIBLE
+        for (title in listOf(s.simpleTunnelTitle, s.simpleBackupTitle)) {
+            title.isAllCaps = false
+            title.setTextSize(sp, 14f)
+        }
+        s.simpleTunnelValue.setTextSize(sp, 18f)
+        s.simpleBackupValue.setTextSize(sp, 18f)
+        s.simpleTunnelChange.setTextSize(sp, 15f)
+        s.simpleBackupChange.setTextSize(sp, 15f)
+        ContextCompat.getDrawable(this, R.drawable.ic_pencil)?.mutate()?.let { pencil ->
+            pencil.setBounds(0, 0, dp(18f), dp(18f))
+            pencil.setTint(accent)
+            s.simpleTunnelChange.setCompoundDrawablesRelative(pencil, null, null, null)
+            s.simpleTunnelChange.compoundDrawablePadding = dp(8f)
+        }
+        s.simpleModeLine.visibility = View.VISIBLE
+        s.simpleModeRow.alpha = 0.85f
+        s.simpleModeSwitch.scaleX = 0.9f
+        s.simpleModeSwitch.scaleY = 0.9f
+        // Свечение фона — за кнопкой, и когда экран чуть прокручен.
+        s.simpleOrb.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> runCatching { placeGlow() } }
+        s.root.setOnScrollChangeListener { _, _, _, _, _ -> runCatching { placeGlow() } }
+
+        // Расширенный вид: знак в строке статуса, кольцо на «Главной», значки вкладок и разделов.
+        binding.connLogo.visibility = View.VISIBLE
+        binding.imageShield.visibility = View.GONE
+        binding.advOrb.visibility = View.VISIBLE
+        binding.advOrbView.premium = true
+        binding.advOrb.setOnClickListener { onSimpleOrbClick() }
+        val route = ContextCompat.getDrawable(this, R.drawable.ic_route)?.mutate()?.apply {
+            setBounds(0, 0, dp(24f), dp(24f))
+            setTint(accent)
+        }
+        val chevron = ContextCompat.getDrawable(this, R.drawable.ic_chevron_right)?.mutate()?.apply {
+            setBounds(0, 0, dp(20f), dp(20f))
+            setTint(accent)
+        }
+        binding.textEndpointNow.setCompoundDrawablesRelative(route, null, chevron, null)
+        binding.textEndpointNow.compoundDrawablePadding = dp(10f)
+        binding.textEndpointNow.gravity = android.view.Gravity.CENTER_VERTICAL
+        binding.textEndpointNow.setPadding(0, dp(6f), 0, dp(6f))
+        runCatching { navIcons() }
+        runCatching { settingsIcons(accent) }
+    }
+
+    /** «Wily» цветом текста, «Scout» — оранжевым, как на макете. */
+    private fun brandText(): CharSequence {
+        val name = getString(R.string.simple_brand)
+        val i = name.indexOf("Scout")
+        if (i <= 0) return name
+        return android.text.SpannableString(name).apply {
+            setSpan(
+                android.text.style.ForegroundColorSpan(ContextCompat.getColor(this@MainActivity, R.color.prem_accent)),
+                i, name.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+    }
+
+    /** Значки над подписями вкладок («Премиум»). Цвет значка меняет [showPage]. */
+    private fun navIcons() {
+        val icons = intArrayOf(
+            R.drawable.ic_nav_home, R.drawable.ic_nav_scan, R.drawable.ic_nav_routes,
+            R.drawable.ic_nav_bypass, R.drawable.ic_nav_settings, R.drawable.ic_nav_log
+        )
+        navButtons().forEachIndexed { i, b ->
+            b.setIconResource(icons[i])
+            b.iconGravity = com.google.android.material.button.MaterialButton.ICON_GRAVITY_TOP
+            b.iconSize = dp(22f)
+            b.iconPadding = dp(3f)
+            b.setPadding(b.paddingLeft, dp(5f), b.paddingRight, dp(3f))
+            b.layoutParams = b.layoutParams.apply { height = dp(62f) }
+        }
+        showPage(selectedTab)
+    }
+
+    /** Значки слева от заголовков разделов «Настроек» («Премиум»). */
+    private fun settingsIcons(tint: Int) {
+        val heads = listOf(
+            binding.groupConnHead to R.drawable.ic_set_conn,
+            binding.groupAutoHead to R.drawable.ic_set_auto,
+            binding.groupExportHead to R.drawable.ic_set_export,
+            binding.groupBackupHead to R.drawable.ic_set_backup,
+            binding.groupUpdatesHead to R.drawable.ic_update,
+            binding.groupThemeHead to R.drawable.ic_set_theme,
+            binding.groupResetHead to R.drawable.ic_set_reset,
+        )
+        for ((head, icon) in heads) {
+            val image = android.widget.ImageView(this)
+            image.setImageResource(icon)
+            image.imageTintList = android.content.res.ColorStateList.valueOf(tint)
+            image.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            val lp = LinearLayout.LayoutParams(dp(22f), dp(22f))
+            lp.marginEnd = dp(14f)
+            head.addView(image, 0, lp)
+        }
+    }
+
+    /** Свечение фона — за центром кнопки упрощённого экрана; в расширенном виде — спокойное, сверху. */
+    private fun placeGlow() {
+        val b = backdrop ?: return
+        if (!simpleShown()) {
+            b.calm = true
+            return
+        }
+        val orb = binding.simple.simpleOrb
+        if (orb.height <= 0) return
+        val at = IntArray(2)
+        val rootAt = IntArray(2)
+        orb.getLocationInWindow(at)
+        binding.root.getLocationInWindow(rootAt)
+        b.calm = false
+        b.glowY = (at[1] - rootAt[1]) + orb.height / 2f
+    }
+
+    /**
+     * Кольцо на «Главной» расширенного вида («Премиум»): то же состояние, что у кнопки упрощённого
+     * экрана, — подбор с заполнением, подключение, вспышка, «нет связи».
+     */
+    private fun updateAdvOrb() {
+        if (!premium || !::binding.isInitialized) return
+        val snap = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
+        val up = tunnel.supported && tunnel.isUp
+        val phase = snap?.phase ?: TunnelStatus.PHASE_IDLE
+        val held = !up && snap?.wanted == true
+        val linkFresh = up && snap != null && snap.linkAt > 0L && snap.linkAt >= snap.startedAt
+        val linkBad = linkFresh && snap?.linkWeb == TunnelStatus.LINK_FAIL
+        val face = orbFace(snap, up, phase, held, linkBad)
+        val wasTicking = lastOrbState == PowerOrbView.STATE_ON || lastOrbState == PowerOrbView.STATE_ERROR
+        lastOrbState = face.state
+        binding.advOrbView.setState(face.state)
+        binding.advOrbView.setProgress(if (engine.running && scanFraction >= 0f) scanFraction else null)
+        binding.advPower.imageTintList = android.content.res.ColorStateList.valueOf(powerTint(face.state))
+        if (binding.advState.text.toString() != face.title) binding.advState.text = face.title
+        if (binding.advTimer.text.toString() != face.sub) binding.advTimer.text = face.sub
+        sizeOrbSub(binding.advTimer, face.sub, 16f, 12f)
+        val timerVisibility = if (face.sub.isBlank()) View.GONE else View.VISIBLE
+        if (binding.advTimer.visibility != timerVisibility) binding.advTimer.visibility = timerVisibility
+        // Работает — часы на кольце идут каждую секунду (опрос сервиса реже — раз в 3 с).
+        val ticking = face.state == PowerOrbView.STATE_ON || face.state == PowerOrbView.STATE_ERROR
+        if (ticking && !wasTicking) startSimpleTick()
+    }
+
+    /** Значения в строке — цветом основного текста и жирным, как на макете («вход **188.114.97.6:890**»). */
+    private fun emphasized(text: String, vararg values: String): CharSequence {
+        val out = android.text.SpannableString(text)
+        val color = ContextCompat.getColor(this, R.color.prem_on_surface)
+        for (v in values) {
+            if (v.isBlank()) continue
+            val i = text.indexOf(v)
+            if (i < 0) continue
+            out.setSpan(android.text.style.ForegroundColorSpan(color), i, i + v.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            out.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), i, i + v.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        return out
+    }
+
+    /** Карточка маршрута упрощённого экрана («Премиум»): то же, что строка «где мы», в две строки. */
+    private fun renderRouteCard(state: Int, net: String, endpoint: String, country: String, second: String?) {
+        val s = binding.simple
+        val line1: CharSequence
+        val line2: CharSequence
+        when {
+            endpoint.isNotBlank() -> {
+                line1 = emphasized(getString(R.string.simple_where, net, endpoint), endpoint)
+                val parts = arrayListOf<String>()
+                val values = arrayListOf<String>()
+                if (country.isNotBlank()) {
+                    parts += getString(R.string.where_exit, country)
+                    values += country
+                }
+                second?.let {
+                    parts += if (it.isBlank()) getString(R.string.where_second_plain) else getString(R.string.where_second, it)
+                    if (it.isNotBlank()) values += it
+                }
+                line2 = if (parts.isEmpty()) getString(R.string.route_exit_pending)
+                else emphasized(parts.joinToString(" · "), *values.toTypedArray())
+            }
+            engine.running -> {
+                line1 = getString(R.string.route_line_scan, net)
+                line2 = scanProgressText
+            }
+            state == PowerOrbView.STATE_CONNECTING -> {
+                line1 = getString(R.string.route_line_connecting, net)
+                line2 = getString(R.string.route_exit_pending)
+            }
+            else -> {
+                line1 = getString(R.string.route_line_off, net)
+                val last = prefs.lastEndpoint
+                line2 = if (last.isBlank()) "" else emphasized(getString(R.string.route_last_point, last), last)
+            }
+        }
+        if (s.simpleRouteLine1.text.toString() != line1.toString()) s.simpleRouteLine1.text = line1
+        if (s.simpleRouteLine2.text.toString() != line2.toString()) s.simpleRouteLine2.text = line2
+        s.simpleRouteLine2.visibility = if (line2.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    /** Открыть экран «Маршрут» (с 1.10.49-beta7). */
+    private fun showRouteScreen() {
+        runCatching {
+            routeScreen?.dismiss()
+            val screen = RouteScreen(this)
+            routeScreen = screen
+            screen.show(routeInfo())
+        }.onFailure { t ->
+            TunnelDebug.error("экран маршрута: " + SafeMode.describe(t))
+            banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+        }
+    }
+
+    /** «Маршрут» открыт — показать свежее состояние (перерисует, только если оно поменялось). */
+    private fun refreshRouteScreen() {
+        val screen = routeScreen ?: return
+        if (!screen.isShowing) return
+        runCatching { screen.update(routeInfo()) }
+    }
+
+    /** Всё, что показывает «Маршрут», — теми же правилами, что строка «где мы» и карточка «Туннелирование». */
+    private fun routeInfo(): RouteScreen.Info {
+        val snap = runCatching { TunnelStatusBus.snapshot(this) }.getOrNull()
+        val up = tunnel.supported && tunnel.isUp
+        val phase = snap?.phase ?: TunnelStatus.PHASE_IDLE
+        val linkFresh = up && snap != null && snap.linkAt > 0L && snap.linkAt >= snap.startedAt
+        val linkOk = linkFresh && snap?.linkWeb == TunnelStatus.LINK_OK
+        val linkBad = linkFresh && snap?.linkWeb == TunnelStatus.LINK_FAIL
+        val waiting = !up && (snap?.wanted == true || phase == TunnelStatus.PHASE_STARTING ||
+            phase == TunnelStatus.PHASE_RECONNECTING || phase == TunnelStatus.PHASE_NO_NETWORK)
+        val mode = when {
+            up -> RouteMapView.MODE_ON
+            engine.running || connecting || waiting -> RouteMapView.MODE_CONNECTING
+            else -> RouteMapView.MODE_OFF
+        }
+        val pal = Design.palette(this, premium)
+        val stateText: String
+        val stateColor: Int
+        when {
+            engine.running -> { stateText = getString(R.string.simple_state_scanning); stateColor = pal.warn }
+            up && linkBad -> { stateText = getString(R.string.simple_state_no_link); stateColor = pal.error }
+            up -> { stateText = getString(R.string.simple_state_on); stateColor = ContextCompat.getColor(this, R.color.check_ok) }
+            connecting -> { stateText = getString(R.string.simple_state_connecting); stateColor = pal.warn }
+            waiting -> { stateText = getString(R.string.simple_state_waiting); stateColor = pal.warn }
+            else -> { stateText = getString(R.string.simple_state_off); stateColor = pal.outline }
+        }
+        val kind = netKindNow()
+        val net = when (kind) {
+            "" -> "сеть"
+            "мобильная" -> "мобильная сеть"
+            else -> kind
+        }
+        val endpoint = if (up) TunnelDebug.endpoint.trim().ifBlank { snap?.endpoint.orEmpty() } else prefs.lastEndpoint
+        val exitSummary = snap?.takeIf { linkOk }?.linkExit
+        val place = if (linkOk) exitPlace(exitSummary) else ""
+        val second = if (up) secondExitCountry(snap) else null
+        val peer = snap?.secondPeer.orEmpty()
+        val via = getString(if (prefs.secondViaWarp) R.string.route_second_note else R.string.route_second_direct)
+        val secondDetail = listOf(peer, via).filter { it.isNotBlank() }.joinToString(" · ")
+        val groups = routeGroups()
+        val labels = HashMap<String, String>()
+        groups.forEach { g -> g.pkgs.forEach { labels[it] = labelOfPackage(it) } }
+        return RouteScreen.Info(
+            mode = mode, stateText = stateText, stateColor = stateColor, net = net,
+            endpoint = endpoint, entryNote = getString(R.string.route_entry_note), exitPlace = place,
+            exitDetail = exitSummary.orEmpty(), secondConfigured = prefs.secondExitOn,
+            second = second, secondDetail = secondDetail, groups = groups, labels = labels,
+        )
+    }
+
+    /** Подписи приложений списком: пять первых и «ещё N». */
+    private fun appNames(pkgs: List<String>): String {
+        val head = pkgs.take(5).joinToString(", ") { labelOfPackage(it) }
+        return if (pkgs.size > 5) getString(R.string.route_apps_more, head, pkgs.size - 5) else head
+    }
+
+    /** Что идёт к сайтам — как во второй строке карточки «Туннелирование». */
+    private fun sitesNote(): String {
+        val sitesCount = SiteList.parse(prefs.tunnelSites).total
+        val browserSites = runCatching { prefs.browserSitesActive() }.getOrDefault(false)
+        return if (browserSites) getString(R.string.simple_tun_sites_browser) else when (prefs.routesMode) {
+            1 -> getString(R.string.simple_tun_sites_preset)
+            2 -> getString(R.string.simple_tun_sites_lists)
+            3 -> if (sitesCount > 0) getString(R.string.simple_tun_sites_mine, sitesCount) else getString(R.string.simple_tun_sites_all)
+            else -> getString(R.string.simple_tun_sites_all)
+        }
+    }
+
+    /** Кто каким путём идёт: второй выход, WARP, напрямую — по режиму приложений и выходам в строках. */
+    private fun routeGroups(): List<RouteScreen.Group> {
+        val byLabel = compareBy<String> { labelOfPackage(it).lowercase() }
+        val exits = prefs.appExitsActive()
+        val second = exits.filterValues { it == AppExit.SECOND }.keys.sortedWith(byLabel)
+        val selected = prefs.appsSelected
+        val out = ArrayList<RouteScreen.Group>()
+        val sites = " · " + sitesNote()
+        if (second.isNotEmpty()) {
+            out += RouteScreen.Group(RouteScreen.KIND_SECOND, appNames(second), getString(R.string.route_sub_second, ""), second)
+        }
+        when (prefs.appsMode) {
+            Prefs.APPS_ONLY -> {
+                val warp = selected.filter { it !in second }.sortedWith(byLabel)
+                if (warp.isNotEmpty()) {
+                    out += RouteScreen.Group(RouteScreen.KIND_WARP, appNames(warp), getString(R.string.route_sub_warp, sites), warp)
+                }
+                out += RouteScreen.Group(RouteScreen.KIND_DIRECT, getString(R.string.route_apps_rest), getString(R.string.route_apps_rest_sub), emptyList())
+            }
+            Prefs.APPS_EXCEPT -> {
+                val except = selected.sortedWith(byLabel)
+                val warp = exits.filterValues { it == AppExit.WARP }.keys.filter { it !in selected }.sortedWith(byLabel)
+                val title = when {
+                    except.isEmpty() && second.isEmpty() -> getString(R.string.route_apps_all)
+                    except.isEmpty() -> getString(R.string.route_apps_all_rest)
+                    else -> getString(R.string.route_apps_except, appNames(except))
+                }
+                out += RouteScreen.Group(RouteScreen.KIND_WARP, title, getString(R.string.route_sub_warp, sites), warp)
+                if (except.isNotEmpty()) {
+                    out += RouteScreen.Group(RouteScreen.KIND_DIRECT, appNames(except), getString(R.string.route_apps_rest_sub), except)
+                }
+            }
+            else -> {
+                val warp = exits.filterValues { it == AppExit.WARP }.keys.sortedWith(byLabel)
+                val title = getString(if (second.isEmpty()) R.string.route_apps_all else R.string.route_apps_all_rest)
+                out += RouteScreen.Group(RouteScreen.KIND_WARP, title, getString(R.string.route_sub_warp, sites), warp)
+            }
+        }
+        return out
     }
 
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()

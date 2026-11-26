@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>WilyScout — макет нового дизайна</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3.2v8"/><path d="M6.3 6.6a8 8 0 1 0 11.4 0"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3.5v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20.5h14"/></symbol>
+  <symbol id="i-route" viewBox="0 0 40 40">
+    <path d="M11 34s-7-7.4-7-12.2a7 7 0 0 1 14 0C18 26.6 11 34 11 34z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+    <circle cx="11" cy="21.8" r="2.5" fill="currentColor"/>
+    <path d="M29.5 19.5s-5.5-5.7-5.5-9.5a5.5 5.5 0 0 1 11 0c0 3.8-5.5 9.5-5.5 9.5z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+    <circle cx="29.5" cy="10" r="2" fill="currentColor"/>
+    <path d="M16 33c6 .5 6-5 10-6.5s3.5-3.5 3.5-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="0.1 3.6"/>
+  </symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="2.2" fill="currentColor"/><rect x="13" y="3" width="8" height="8" rx="2.2" fill="currentColor"/><rect x="3" y="13" width="8" height="8" rx="2.2" fill="currentColor"/><rect x="13" y="13" width="8" height="8" rx="2.2" fill="currentColor"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="7" rx="2.2"/><rect x="3" y="13" width="18" height="7" rx="2.2"/><path d="M11 7.5h6M11 16.5h6"/></g><circle cx="7" cy="7.5" r="1.2" fill="currentColor"/><circle cx="7" cy="16.5" r="1.2" fill="currentColor"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="m13.5 6.5 4 4"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 5.5 6.5 6.5L9 18.5"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5.5 8.5 12l6.5 6.5"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3.5 11 12 4l8.5 7"/><path d="M6 9.5V20h12V9.5"/><path d="M10 20v-5h4v5"/></symbol>
+  <symbol id="i-radar" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><path d="M12 12 18 6"/><circle cx="12" cy="12" r="1" fill="currentColor"/></symbol>
+  <symbol id="i-routes" viewBox="0 0 24 24"><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M8.5 18H15a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h6.5"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.3 7.5 9.5 4.3-1.2 7.5-4.9 7.5-9.5V6L12 3z"/><path d="m9 12 2.2 2.2L15.5 10"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></symbol>
+  <symbol id="i-doc" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2.5"/><path d="M9 8h6M9 12h6M9 16h3.5"/></symbol>
+  <symbol id="i-apps" viewBox="0 0 24 24"><rect x="4" y="4" width="6.5" height="6.5" rx="1.8"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.8"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.8"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.8"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.5 2.6 3.6 5.4 3.6 8.5s-1.1 5.9-3.6 8.5c-2.5-2.6-3.6-5.4-3.6-8.5s1.1-5.9 3.6-8.5z"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r="1.2" fill="currentColor"/><circle cx="4.8" cy="12" r="1.2" fill="currentColor"/><circle cx="4.8" cy="17.5" r="1.2" fill="currentColor"/></symbol>
+  <symbol id="i-arr-down" viewBox="0 0 24 24"><path d="M12 4.5v14"/><path d="m6.5 13 5.5 5.5 5.5-5.5"/></symbol>
+  <symbol id="i-arr-up" viewBox="0 0 24 24"><path d="M12 19.5v-14"/><path d="m6.5 11 5.5-5.5 5.5 5.5"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v5M15 3v5"/><path d="M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0z"/><path d="M12 17v4"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/></symbol>
+  <symbol id="i-share" viewBox="0 0 24 24"><path d="M12 15V3.5"/><path d="m7.5 8 4.5-4.5L16.5 8"/><path d="M5 12.5V19a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19v-6.5"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="5" rx="1.5"/><path d="M5.5 9v9.5A1.5 1.5 0 0 0 7 20h10a1.5 1.5 0 0 0 1.5-1.5V9"/><path d="M10 13h4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10z"/></symbol>
+  <symbol id="i-reset" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.6-5.9"/><path d="M4 4v5h5"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></symbol>
+</svg>
+
+<div class="page">
+  <aside class="panel" id="panel">
+    <h1>Wily<span>Scout</span> · макет</h1>
+    <p class="lead">Новый стиль для беты 7. Данные выдуманы. В телефоне всё нажимается: круглая кнопка включает и выключает, стрелка-круг в шапке запускает подбор, карточка маршрута открывает схему, карточки внизу — шторки, тумблер — расширенный режим.</p>
+    <h2>Тема</h2>
+    <div class="seg" id="ctlTheme"><button data-v="system">Как в системе</button><button data-v="dark">Тёмная</button><button data-v="light">Светлая</button></div>
+    <h2>Экран</h2>
+    <div class="seg" id="ctlScreen"><button data-v="simple">Упрощённый</button><button data-v="route">Маршрут</button><button data-v="adv">Расширенный</button></div>
+    <h2>Состояние</h2>
+    <div class="seg" id="ctlState"><button data-v="off">Выключено</button><button data-v="scan">Подбор</button><button data-v="connecting">Подключение</button><button data-v="on">Подключено</button><button data-v="error">Нет связи</button></div>
+    <button class="play" id="ctlPlay">Сценарий: подбор, подключение, вспышка щита</button>
+    <div class="note">
+      <b>Подбор.</b> Вокруг кнопки крутится кольцо-«микросхема», по дорожкам бегут импульсы, шкала и кольцо заполняются по ходу подбора.<br>
+      <b>Подключение.</b> По кольцу бежит свет, ореол дышит.<br>
+      <b>Подключено.</b> Вспыхивает щит и расходится волна — дальше всё замирает: в покое анимаций нет, батарея не тратится.<br>
+      <b>Маршрут.</b> Линия прорисовывается от вас через вход и выход WARP до второго выхода; пунктир — приложения, которые идут через каждый выход.<br>
+      <b>Расширенный режим.</b> Те же цвета и карточки, шапка с лого, вкладки с иконками, на «Главной» та же кнопка-кольцо.
+    </div>
+  </aside>
+
+  <main class="stage" id="stage">
+    <div class="phone-scale" id="phoneScale">
+      <div class="phone">
+        <div class="app" id="app" data-theme="dark">
+          <canvas class="bgc" id="bg"></canvas>
+          <div class="sbar"><span id="clock">13:36</span>
+            <span class="icons">
+              <svg viewBox="0 0 24 24"><path d="M2 20h3v-4H2zm5 0h3v-7H7zm5 0h3V9h-3zm5 0h3V4h-3z"/></svg>
+              <svg viewBox="0 0 24 24"><path d="M12 18.5 9.6 16a3.4 3.4 0 0 1 4.8 0zM6.2 12.6a8.2 8.2 0 0 1 11.6 0l-1.7 1.7a5.8 5.8 0 0 0-8.2 0zM2.8 9.2a13 13 0 0 1 18.4 0l-1.7 1.7a10.6 10.6 0 0 0-15 0z"/></svg>
+              <svg viewBox="0 0 24 24"><path d="M3 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zm17 2h1.5v4H20z"/></svg>
+            </span>
+          </div>
+
+          <!-- ═════ упрощённый экран ═════ -->
+          <section class="screen simple" id="scrSimple">
+            <div class="top">
+              <img class="logo" src="fox.png" alt="">
+              <div class="brand"><span class="w">Wily</span><span class="s">Scout</span></div>
+              <button class="icon-btn" id="sRescan" title="Подобрать точку заново"><svg class="ico" viewBox="0 0 24 24"><use href="#i-refresh"/></svg></button>
+              <button class="icon-btn" id="sUpdate" title="Проверить обновления"><svg class="ico" viewBox="0 0 24 24"><use href="#i-download"/></svg></button>
+            </div>
+            <div class="orb-wrap">
+              <div class="orb" id="orbS" data-state="on">
+                <canvas></canvas>
+                <div class="orb-content">
+                  <svg class="power" viewBox="0 0 24 24"><use href="#i-power"/></svg>
+                  <div class="state">Подключено</div>
+                  <div class="sub">00:17:01</div>
+                  <div class="rate"><div class="div"></div><div><svg class="ico ra" viewBox="0 0 24 24"><use href="#i-arr-down"/></svg><span class="dn">118 Кбит/с</span></div><div><svg class="ico ra" viewBox="0 0 24 24"><use href="#i-arr-up"/></svg><span class="up">115 Кбит/с</span></div></div>
+                </div>
+              </div>
+              <div class="activity" id="sAct"></div>
+            </div>
+            <button class="card route-card" id="sRoute">
+              <svg class="ri" viewBox="0 0 40 40" style="color:var(--accent)"><use href="#i-route"/></svg>
+              <div class="rt"><div class="l1"></div><div class="l2"></div></div>
+              <div class="sep"></div>
+              <svg class="chev ico" viewBox="0 0 24 24"><use href="#i-chev"/></svg>
+            </button>
+            <div class="cards2">
+              <button class="card mini" id="sTunnel">
+                <div class="mh"><svg viewBox="0 0 24 24"><use href="#i-grid"/></svg>Туннелирование</div>
+                <div class="mv">Приложений: 16</div>
+                <div class="ms">браузер — только к нужным сайтам · свой выход: 5</div>
+                <div class="ma"><svg class="ico" viewBox="0 0 24 24"><use href="#i-pencil"/></svg>Изменить ›</div>
+              </button>
+              <button class="card mini" id="sBackup">
+                <div class="mh"><svg viewBox="0 0 24 24"><use href="#i-server"/></svg>Резервная</div>
+                <div class="mv">8.39.214.2:988</div>
+                <div class="ms"><span class="dot"></span>отвечает, проверено в 13:36</div>
+                <div class="ma">Сменить ›</div>
+              </button>
+            </div>
+            <div class="mode-row"><span>Расширенный режим · выключено</span><button class="switch" id="sMode" aria-label="Расширенный режим"></button></div>
+            <div class="version">1.10.49-beta7 · макет</div>
+          </section>
+
+          <!-- ═════ экран «Маршрут» ═════ -->
+          <section class="screen route hidden" id="scrRoute">
+            <div class="rtop">
+              <button class="icon-btn" id="rBack" title="Назад"><svg class="ico" viewBox="0 0 24 24"><use href="#i-back"/></svg></button>
+              <div class="title">Маршрут</div>
+              <span class="pill" id="rPill"><span class="dot"></span>Подключено</span>
+            </div>
+            <div class="map-wrap"><canvas id="map"></canvas><button class="btn tonal small replay" id="rReplay"><svg viewBox="0 0 24 24" width="18" height="18"><use href="#i-play"/></svg>Ещё раз</button></div>
+            <div class="card steps" id="rSteps">
+              <div class="step"><div class="si you"></div><div><div class="sl">Вы</div><div class="sv">мобильная сеть · Tele2</div></div></div>
+              <div class="step"><div class="si"></div><div><div class="sl">Вход</div><div class="sv">188.114.97.6:890</div><div class="sd">Cloudflare WARP · AmneziaWG · шум Q3</div></div></div>
+              <div class="step"><div class="si"></div><div><div class="sl">Выход WARP</div><div class="sv">Стокгольм</div><div class="sd">площадка ARN · адрес 104.28.244.74</div></div></div>
+              <div class="step"><div class="si ring"></div><div><div class="sl">Второй выход</div><div class="sv">Нидерланды</div><div class="sd">Proton VPN Free · сервер NL-FREE#12 · через WARP</div></div></div>
+            </div>
+            <div class="card apps-route">
+              <div class="ar"><span class="tag second">второй выход</span><div class="names">ChatGPT, Claude, Gemini, Grok, TikTok<small>целиком через Нидерланды</small></div></div>
+              <div class="ar"><span class="tag warp">WARP</span><div class="names">Instagram, YouTube, Chrome, Facebook, X и ещё 6<small>через Стокгольм</small></div></div>
+              <div class="ar"><span class="tag direct">напрямую</span><div class="names">остальные приложения<small>как без VPN</small></div></div>
+            </div>
+          </section>
+
+          <!-- ═════ расширенный режим ═════ -->
+          <section class="screen adv hidden" id="scrAdv">
+            <div class="adv-top">
+              <img class="logo" src="fox.png" alt="">
+              <div class="brand"><span class="w">Wily</span><span class="s">Scout</span></div>
+              <span class="pill" id="aPill"><span class="dot"></span>Подключено</span>
+            </div>
+            <div class="adv-body" id="advBody">
+
+              <!-- Главная -->
+              <div class="tab on" data-tab="0">
+                <div class="card hero">
+                  <div class="orb small" id="orbA" data-state="on">
+                    <canvas></canvas>
+                    <div class="orb-content">
+                      <svg class="power" viewBox="0 0 24 24"><use href="#i-power"/></svg>
+                      <div class="state">Подключено</div>
+                      <div class="sub">00:17:01</div>
+                      <div class="rate"><div class="div"></div><div><svg class="ico ra" viewBox="0 0 24 24"><use href="#i-arr-down"/></svg><span class="dn">118 Кбит/с</span></div><div><svg class="ico ra" viewBox="0 0 24 24"><use href="#i-arr-up"/></svg><span class="up">115 Кбит/с</span></div></div>
+                    </div>
+                  </div>
+                  <div class="activity" id="aAct"></div>
+                </div>
+                <button class="card route-card" id="aRoute">
+                  <svg class="ri" viewBox="0 0 40 40" style="color:var(--accent)"><use href="#i-route"/></svg>
+                  <div class="rt"><div class="l1"></div><div class="l2"></div></div>
+                  <div class="sep"></div>
+                  <svg class="chev ico" viewBox="0 0 24 24"><use href="#i-chev"/></svg>
+                </button>
+                <button class="btn primary" id="aScan" style="margin-top:12px"><svg class="ico" viewBox="0 0 24 24" width="22" height="22"><use href="#i-radar"/></svg>Сканировать и подобрать</button>
+                <div class="sh">Последний подбор</div>
+                <div class="card">
+                  <div class="row"><div class="rl"><div class="rt1">сегодня в 13:20 · мобильная</div><div class="rt2">проверено 96 точек, ответили 41</div></div><span class="pill">12 мин</span></div>
+                  <div class="row"><div class="rl"><div class="rt1">Лучшая — 188.114.97.6:890</div><div class="rt2">38 мс · шум Q3 · выход Стокгольм</div></div></div>
+                </div>
+                <div class="sh">Лучшие точки</div>
+                <div class="card">
+                  <div class="row" style="padding-bottom:4px"><div class="rt2">мобильная</div></div>
+                  <div class="top-row"><span class="n">1</span><span class="ep">188.114.97.6:890</span><span class="ms">38 мс</span><span class="nz">Q3</span></div>
+                  <div class="top-row"><span class="n">2</span><span class="ep">8.39.214.2:988</span><span class="ms">44 мс</span><span class="nz">Q1</span></div>
+                  <div class="top-row"><span class="n">3</span><span class="ep">162.159.195.4:2408</span><span class="ms">51 мс</span><span class="nz">R2</span></div>
+                  <div class="row" style="padding-bottom:4px;border-top:1px solid var(--line-soft)"><div class="rt2">Wi-Fi</div></div>
+                  <div class="top-row"><span class="n">1</span><span class="ep">188.114.96.11:4500</span><span class="ms">22 мс</span><span class="nz">Q2</span></div>
+                </div>
+                <div class="mode-row"><span>Расширенный режим · включено</span><button class="switch on" id="aMode" aria-label="Расширенный режим"></button></div>
+              </div>
+
+              <!-- Подбор -->
+              <div class="tab" data-tab="1">
+                <div class="sh">Эндпоинты</div>
+                <div class="card pad">
+                  <div class="chips"><span class="chip">162.159.192.*</span><span class="chip">188.114.96.*</span><span class="chip">8.39.214.*</span><span class="chip">8.6.112.*</span></div>
+                  <div class="muted" style="margin:14px 0 8px">Пул портов и шумов</div>
+                  <div class="segc js-seg"><button>Быстро</button><button class="on">Обычно</button><button>Полно</button></div>
+                </div>
+                <div class="sh">Что проверять</div>
+                <div class="card">
+                  <div class="row js-check"><div class="rl"><div class="rt1">YouTube</div></div><span class="check on"></span></div>
+                  <div class="row js-check"><div class="rl"><div class="rt1">Instagram</div></div><span class="check on"></span></div>
+                  <div class="row js-check"><div class="rl"><div class="rt1">ChatGPT</div><div class="rt2">по стране, которую видит сайт</div></div><span class="check on"></span></div>
+                  <div class="row js-check"><div class="rl"><div class="rt1">Telegram</div></div><span class="check on"></span></div>
+                  <div class="row js-check"><div class="rl"><div class="rt1">Discord</div></div><span class="check"></span></div>
+                </div>
+                <div class="sh">Фоновый подбор</div>
+                <div class="card">
+                  <div class="row"><div class="rl"><div class="rt1">Расписание</div><div class="rt2">ищет лучшую точку сам</div></div><span class="pill">каждые 6 ч</span></div>
+                  <div class="row"><div class="rl"><div class="rt1">Искать выход за рубежом</div><div class="rt2">если выход в России — на зарядке, экран погашен</div></div><button class="switch on js-sw"></button></div>
+                </div>
+                <button class="btn primary" style="margin-top:14px">Сохранить</button>
+              </div>
+
+              <!-- Маршруты -->
+              <div class="tab" data-tab="2">
+                <div class="sh">Что идёт через туннель</div>
+                <div class="card pad">
+                  <div class="segc js-seg"><button class="on">Приложения</button><button>Сайты</button><button>Списки</button></div>
+                  <div class="muted" style="margin-top:10px">Сейчас через туннель: выбранные приложения (16), браузер — только к нужным сайтам.</div>
+                </div>
+                <div class="card">
+                  <div class="radio js-radio"><i></i>Все приложения — через туннель</div>
+                  <div class="radio js-radio on"><i></i>Только выбранные — через туннель</div>
+                  <div class="radio js-radio"><i></i>Все, кроме выбранных — мимо туннеля</div>
+                  <div class="row" style="border-top:1px solid var(--line-soft)"><div class="rl"><div class="rt1">Браузер — только к нужным сайтам</div></div><button class="switch on js-sw"></button></div>
+                </div>
+                <div class="card fold" id="foldApps">
+                  <div class="fold-h"><svg class="ico" viewBox="0 0 24 24" width="22" height="22" style="color:var(--accent)"><use href="#i-apps"/></svg><div><div class="ft">Список приложений</div><div class="fs">Отмечено: 16 · свой выход: 5</div></div><svg class="arr ico" viewBox="0 0 24 24"><use href="#i-down"/></svg></div>
+                  <div class="fold-b" id="appsList"></div>
+                </div>
+                <div class="card"><div class="row"><div class="rl"><div class="rt1">DNS через туннель</div><div class="rt2">при раздельных маршрутах</div></div><button class="switch on js-sw"></button></div></div>
+                <button class="btn primary" style="margin-top:14px">Сохранить и применить</button>
+              </div>
+
+              <!-- Обход -->
+              <div class="tab" data-tab="3">
+                <div class="sh">Доступность</div>
+                <div class="card">
+                  <div class="avail"><span class="dot"></span>YouTube<span class="av">открывается · 120 мс</span></div>
+                  <div class="avail"><span class="dot"></span>Instagram<span class="av">открывается</span></div>
+                  <div class="avail"><span class="dot"></span>ChatGPT<span class="av">через второй выход · NL</span></div>
+                  <div class="avail"><span class="dot warn"></span>Discord<span class="av">медленно</span></div>
+                  <div class="avail"><span class="dot err"></span>rutracker.org<span class="av">закрыт напрямую</span></div>
+                  <div class="pad" style="padding-top:4px"><button class="btn tonal small">Проверить сейчас</button></div>
+                </div>
+                <div class="sh">Режут DPI или адрес?</div>
+                <div class="card">
+                  <div class="pad"><div class="muted">Проверка напрямую через провайдера: YouTube, X, Discord — как есть и с приёмами обхода.</div><button class="btn tonal small" style="margin-top:10px">Проверить DPI и подобрать</button></div>
+                  <div class="row" style="border-top:1px solid var(--line-soft)"><div class="rl"><div class="rt1">Обход DPI в туннеле</div><div class="rt2">YouTube и X напрямую с приёмом «tlsrec 1+s»</div></div><button class="switch on js-sw"></button></div>
+                </div>
+                <div class="sh">Прокси для Telegram</div>
+                <div class="card">
+                  <div class="row"><div class="rl"><div class="rt1">proxy.example.net:443</div><div class="rt2">Fake-TLS · ответил Telegram · 84 мс</div></div><button class="btn tonal small">Добавить</button></div>
+                  <div class="row"><div class="rl"><div class="rt1">mt.example.org:8443</div><div class="rt2">ответил Telegram · 131 мс</div></div><button class="btn tonal small">Добавить</button></div>
+                </div>
+                <div class="sh">Второй выход</div>
+                <div class="card">
+                  <div class="pad"><button class="btn primary">Подключить второй выход (Proton)</button>
+                    <div class="muted" style="margin-top:12px"><span class="dot"></span>Работает: выход — Нидерланды, ответ за 61 мс</div></div>
+                  <div class="row" style="border-top:1px solid var(--line-soft)"><div class="rl"><div class="rt1">Включить второй выход</div></div><button class="switch on js-sw"></button></div>
+                  <div class="row"><div class="rl"><div class="rt1">Через второй выход идут</div><div class="rt2">закрытые для России · ChatGPT · Claude · Gemini</div></div></div>
+                </div>
+                <button class="btn primary" style="margin-top:14px">Сохранить и применить</button>
+              </div>
+
+              <!-- Настройки -->
+              <div class="tab" data-tab="4" id="tabSettings">
+                <div class="card fold"><div class="fold-h"><svg class="ico fi" viewBox="0 0 24 24"><use href="#i-plug"/></svg><div><div class="ft">Подключение</div><div class="fs">DNS, keepalive и MTU, IPv6, шум AWG</div></div><svg class="arr ico" viewBox="0 0 24 24"><use href="#i-down"/></svg></div>
+                  <div class="fold-b"><div class="row"><div class="rl"><div class="rt1">DNS</div><div class="rt2">1.1.1.1, 1.0.0.1</div></div></div><div class="row"><div class="rl"><div class="rt1">MTU</div></div><span class="pill">1280</span></div><div class="row"><div class="rl"><div class="rt1">IPv6</div></div><button class="switch js-sw"></button></div></div></div>
+                <div class="card fold"><div class="fold-h"><svg class="ico fi" viewBox="0 0 24 24"><use href="#i-bolt"/></svg><div><div class="ft">Автоматика</div><div class="fs">Автозапуск, переподключение, проверка и смена точки</div></div><svg class="arr ico" viewBox="0 0 24 24"><use href="#i-down"/></svg></div>
+                  <div class="fold-b"><div class="row"><div class="rl"><div class="rt1">Включать при запуске телефона</div></div><button class="switch on js-sw"></button></div><div class="row"><div class="rl"><div class="rt1">Переподключать при смене сети</div></div><button class="switch on js-sw"></button></div></div></div>
+                <div class="card fold"><div class="fold-h"><svg class="ico fi" viewBox="0 0 24 24"><use href="#i-share"/></svg><div><div class="ft">Экспорт конфига</div><div class="fs">AmneziaWG, WireGuard, Clash: показать, сохранить</div></div><svg class="arr ico" viewBox="0 0 24 24"><use href="#i-down"/></svg></div>
+                  <div class="fold-b pad"><button class="btn tonal small">Показать конфиг</button></div></div>
+                <div class="card fold"><div class="fold-h"><svg class="ico fi" viewBox="0 0 24 24"><use href="#i-archive"/></svg><div><div class="ft">Резервная копия</div><div class="fs">Копия настроек в «Загрузки» и восстановление</div></div><svg class="arr ico" viewBox="0 0 24 24"><use href="#i-down"/></svg></div>
+                  <div class="fold-b pad"><div class="btn-row" style="margin:0"><button class="btn ghost">Сохранить</button><button class="btn ghost">Восстановить</button></div></div></div>
+                <div class="card fold"><div class="fold-h"><svg class="ico fi" viewBox="0 0 24 24"><use href="#i-download"/></svg><div><div class="ft">Обновления и версия</div><div class="fs">1.10.49-beta7 · проверить новую</div></div><svg class="arr ico" viewBox="0 0 24 24"><use href="#i-down"/></svg></div>
+                  <div class="fold-b pad"><button class="btn tonal small">Проверить обновления</button></div></div>
+                <div class="card fold open"><div class="fold-h"><svg class="ico fi" viewBox="0 0 24 24"><use href="#i-moon"/></svg><div><div class="ft">Оформление</div><div class="fs">Тема: как в системе, светлая или тёмная</div></div><svg class="arr ico" viewBox="0 0 24 24"><use href="#i-down"/></svg></div>
+                  <div class="fold-b" id="themeRadios">
+                    <div class="radio" data-v="system"><i></i>Как в системе</div>
+                    <div class="radio" data-v="light"><i></i>Светлая</div>
+                    <div class="radio" data-v="dark"><i></i>Тёмная</div>
+                  </div></div>
+                <div class="card fold"><div class="fold-h"><svg class="ico fi" viewBox="0 0 24 24"><use href="#i-reset"/></svg><div><div class="ft">Сброс</div><div class="fs">Вернуть всё как после установки</div></div><svg class="arr ico" viewBox="0 0 24 24"><use href="#i-down"/></svg></div>
+                  <div class="fold-b pad"><button class="btn ghost" style="color:var(--err)">Сбросить настройки</button></div></div>
+              </div>
+
+              <!-- Журнал -->
+              <div class="tab" data-tab="5">
+                <div class="sh">Журнал</div>
+                <div class="card log"><span class="tm">13:20:04</span> подбор: мобильная, 96 точек
+<span class="tm">13:20:41</span> <span class="ok">✓</span> 188.114.97.6:890 — handshake 38 мс, шум Q3
+<span class="tm">13:20:58</span> <span class="ok">✓</span> данные идут: 2,4 Мбит/с за 6 с
+<span class="tm">13:21:02</span> подключено · выход <span class="ac">Стокгольм</span> (ARN)
+<span class="tm">13:21:05</span> второй выход: Proton NL-FREE#12 — <span class="ok">работает</span>
+<span class="tm">13:36:10</span> <span class="wr">⚠</span> Discord: медленно через Стокгольм</div>
+                <div class="btn-row"><button class="btn ghost">Скопировать</button><button class="btn tonal">Отправить</button></div>
+                <div class="sh">Диагностика туннеля</div>
+                <div class="card">
+                  <div class="row"><div class="rl"><div class="rt1">Последний handshake</div></div><span class="pill">12 с назад</span></div>
+                  <div class="row"><div class="rl"><div class="rt1">Передано</div></div><span class="pill">↓ 84 МБ · ↑ 9 МБ</span></div>
+                  <div class="row"><div class="rl"><div class="rt1">Сеть</div></div><span class="pill">Tele2 · 25020</span></div>
+                </div>
+              </div>
+            </div>
+            <nav class="navbar" id="nav">
+              <button data-tab="0" class="on"><svg class="ico" viewBox="0 0 24 24"><use href="#i-home"/></svg><span>Главная</span></button>
+              <button data-tab="1"><svg class="ico" viewBox="0 0 24 24"><use href="#i-radar"/></svg><span>Подбор</span></button>
+              <button data-tab="2"><svg class="ico" viewBox="0 0 24 24"><use href="#i-routes"/></svg><span>Маршруты</span></button>
+              <button data-tab="3"><svg class="ico" viewBox="0 0 24 24"><use href="#i-shield"/></svg><span>Обход</span></button>
+              <button data-tab="4"><svg class="ico" viewBox="0 0 24 24"><use href="#i-sliders"/></svg><span>Настройки</span></button>
+              <button data-tab="5"><svg class="ico" viewBox="0 0 24 24"><use href="#i-doc"/></svg><span>Журнал</span></button>
+            </nav>
+          </section>
+
+          <div class="sysnav"><svg viewBox="0 0 24 24"><path d="M7 6v12M12 6v12M17 6v12"/></svg><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="7"/></svg><svg viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></svg></div>
+          <div class="scrim" id="scrim"></div>
+          <div class="sheet" id="sheet"></div>
+          <div class="toast" id="toast"></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<button class="fab" id="fab">Макет</button>
+<script src="ring.js"></script>
+<script src="map.js"></script>
+<script src="bg.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

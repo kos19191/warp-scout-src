@@ -16,13 +16,31 @@
         android:layout_marginTop="@dimen/space_s"
         android:layout_marginEnd="@dimen/screen_pad">
 
-        <TextView
-            android:id="@+id/textConnStatus"
+        <!-- С 1.10.49-beta7 слева знак — только в дизайне «Премиум» (шапка расширенного вида). -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:padding="10dp"
-            android:text="@string/conn_off"
-            android:textAppearance="?attr/textAppearanceTitleSmall" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <ImageView
+                android:id="@+id/connLogo"
+                android:layout_width="30dp"
+                android:layout_height="30dp"
+                android:layout_marginStart="10dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_fox_logo"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/textConnStatus"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:padding="10dp"
+                android:text="@string/conn_off"
+                android:textAppearance="?attr/textAppearanceTitleSmall" />
+        </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
     <FrameLayout
@@ -78,6 +96,69 @@
                             android:layout_marginBottom="@dimen/space_s"
                             android:contentDescription="@string/shield_desc"
                             android:src="@drawable/ic_fox_shield" />
+
+                        <!--
+                          Дизайн «Премиум» (с 1.10.49-beta7): вместо щита — та же кнопка-кольцо, что на
+                          упрощённом экране, поменьше: значок питания, состояние и время. Подбор,
+                          подключение и вспышка щита видны и здесь. Нажатие — как у кнопки упрощённого
+                          экрана (включить, отключить, остановить подбор).
+                        -->
+                        <FrameLayout
+                            android:id="@+id/advOrb"
+                            android:layout_width="216dp"
+                            android:layout_height="216dp"
+                            android:layout_gravity="center_horizontal"
+                            android:layout_marginBottom="@dimen/space_s"
+                            android:clickable="true"
+                            android:contentDescription="@string/simple_orb_desc"
+                            android:focusable="true"
+                            android:foreground="@drawable/bg_orb_ripple"
+                            android:visibility="gone">
+
+                            <dev.warpscout.app.PowerOrbView
+                                android:id="@+id/advOrbView"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent" />
+
+                            <LinearLayout
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="center"
+                                android:gravity="center_horizontal"
+                                android:orientation="vertical">
+
+                                <ImageView
+                                    android:id="@+id/advPower"
+                                    android:layout_width="44dp"
+                                    android:layout_height="44dp"
+                                    android:importantForAccessibility="no"
+                                    android:src="@drawable/ic_power" />
+
+                                <TextView
+                                    android:id="@+id/advState"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginTop="6dp"
+                                    android:text="@string/simple_state_off"
+                                    android:textAppearance="?attr/textAppearanceTitleMedium"
+                                    android:textSize="19sp"
+                                    android:textStyle="bold" />
+
+                                <TextView
+                                    android:id="@+id/advTimer"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginTop="2dp"
+                                    android:fontFamily="sans-serif-medium"
+                                    android:fontFeatureSettings="tnum"
+                                    android:gravity="center"
+                                    android:letterSpacing="0.06"
+                                    android:maxWidth="150dp"
+                                    android:textAppearance="?attr/textAppearanceBodyMedium"
+                                    android:textColor="?attr/colorOnSurfaceVariant"
+                                    android:visibility="gone" />
+                            </LinearLayout>
+                        </FrameLayout>
 
                         <TextView
                             android:id="@+id/textStatus"
@@ -2028,6 +2109,44 @@
                     android:id="@+id/groupThemeBody"
                     style="@style/SettingsGroupBody">
 
+                    <!-- Дизайн (с 1.10.49-beta7): «Премиум» по умолчанию или прежний «Классический». -->
+                    <TextView
+                        style="@style/SettingsSubHeader"
+                        android:layout_marginTop="@dimen/space_xs"
+                        android:text="@string/design_label" />
+
+                    <com.google.android.material.button.MaterialButtonToggleGroup
+                        android:id="@+id/designGroup"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        app:selectionRequired="true"
+                        app:singleSelection="true">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnDesignPremium"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/design_premium" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnDesignClassic"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/design_classic" />
+                    </com.google.android.material.button.MaterialButtonToggleGroup>
+
+                    <TextView
+                        style="@style/Text.Caption"
+                        android:text="@string/design_note" />
+
+                    <TextView
+                        style="@style/SettingsSubHeader"
+                        android:text="@string/theme_label" />
+
                     <com.google.android.material.button.MaterialButtonToggleGroup
                         android:id="@+id/themeGroup"
                         android:layout_width="match_parent"
@@ -2307,7 +2426,7 @@
         android:id="@+id/navBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="?attr/colorSurfaceContainerLow"
+        android:background="?attr/wsNavBg"
         android:orientation="horizontal"
         android:paddingStart="4dp"
         android:paddingEnd="4dp">
