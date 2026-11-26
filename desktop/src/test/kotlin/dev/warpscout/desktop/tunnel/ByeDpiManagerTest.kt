@@ -138,9 +138,11 @@ class ByeDpiManagerTest {
         assertEquals("", NetworkIdentityDetector.parseNetshWifiSsid(disconnectedOut))
 
         val fakeRunner = object : CommandRunner {
-            override fun run(command: List<String>, timeoutMs: Long, workingDir: File?): CommandResult =
+            override fun run(command: List<String>, timeoutMs: Long): CommandResult =
                 CommandResult(0, enOut, "")
             override fun isElevated(): Boolean = true
+            override fun runElevated(executable: String, args: List<String>, timeoutMs: Long): CommandResult =
+                CommandResult(0, "", "")
         }
         val homeNet = NetworkIdentityDetector.detect(
             PhysicalGateway("192.168.1.1", 15, 0L, "192.168.1.42"),
