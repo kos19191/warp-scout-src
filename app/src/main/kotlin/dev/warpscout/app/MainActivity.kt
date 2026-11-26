@@ -1628,7 +1628,131 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         runCatching { renderAvailabilityUnsafe() }.onFailure { t ->
             TunnelDebug.error("список доступности: " + SafeMode.describe(t))
         }
+        runCatching { renderDpi() }.onFailure { t ->
+            TunnelDebug.problem("итог проверки DPI: " + SafeMode.describe(t))
+        }
     }
+
+    /** Идёт «Проверить DPI» — второй раз не запускаем. */
+    @Volatile
+    private var dpiChecking = false
+
+    /**
+     * «Проверить DPI» (с 1.10.49-beta2, бета): YouTube, Discord и др. напрямую через провайдера — как
+     * есть и с приёмами обхода (см. [DpiCheck]). Туннель не трогается: проверка идёт мимо него.
+     */
+    private fun checkDpiNow() {
+        if (dpiChecking) return
+        // Подбор привязывает процесс к сети и гасит туннель — проверять в это время незачем.
+        if (engine.running || Availability.processBound(this)) {
+            banner(getString(R.string.dpi_busy_scan))
+            return
+        }
+        val ownUp = tunnel.supported && (tunnel.isUp || tunnel.active)
+        // Чужой VPN обойти нельзя (Android пускает мимо, только если тот сам разрешил): проверка
+        // показала бы его, а не провайдера.
+        val foreign = ForeignVpn.find(this, ownUp = ownUp)
+        if (foreign != null) {
+            TunnelDebug.stage("DPI: проверка не запущена — работает другой VPN ($foreign)")
+            banner(getString(R.string.dpi_foreign_vpn, foreign), error = true)
+            return
+        }
+        dpiChecking = true
+        binding.btnDpiCheck.isEnabled = false
+        binding.btnDpiCheck.setText(R.string.dpi_checking)
+        binding.textDpiProgress.visibility = View.VISIBLE
+        binding.textDpiProgress.text = getString(R.string.dpi_running)
+        val app = applicationContext
+        Thread({
+            val result = runCatching {
+                DpiCheck.run(app, ownUp, progress = { line ->
+                    runOnUiThread {
+                        if (::binding.isInitialized && dpiChecking) {
+                            binding.textDpiProgress.text = getString(R.string.dpi_progress, line)
+                        }
+                    }
+                }, cancelled = { false })
+            }
+            runOnUiThread {
+                dpiChecking = false
+                if (!::binding.isInitialized || isFinishing || isDestroyed) return@runOnUiThread
+                runCatching {
+                    binding.btnDpiCheck.isEnabled = true
+                    binding.btnDpiCheck.setText(R.string.dpi_check_now)
+                    binding.textDpiProgress.visibility = View.GONE
+                    renderDpi()
+                    result.onSuccess { done ->
+                        banner(getString(R.string.dpi_done, done.second.label))
+                    }.onFailure { t ->
+                        if (t is DpiCheck.NoBypass) {
+                            banner(getString(R.string.dpi_no_bypass), error = true)
+                        } else {
+                            TunnelDebug.problem("DPI: проверка не удалась: " + SafeMode.describe(t))
+                            banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+                        }
+                    }
+                }
+            }
+        }, "warpscout-dpi").apply { isDaemon = true }.start()
+    }
+
+    /** Итоги «Проверить DPI»: подробно — по текущей сети, по остальным — строкой. */
+    private fun renderDpi() {
+        val all = DpiCheck.load(this)
+        val key = NetIdentity.currentKey(this)
+        val current = all.firstOrNull { it.network == key } ?: all.firstOrNull()
+        val box = binding.dpiResultsBox
+        box.removeAllViews()
+        if (current == null) {
+            binding.textDpiHead.visibility = View.GONE
+            binding.textDpiSummary.visibility = View.GONE
+            binding.textDpiOther.visibility = View.GONE
+            return
+        }
+        binding.textDpiHead.visibility = View.VISIBLE
+        binding.textDpiHead.text = getString(R.string.dpi_head, current.label, dpiWhen(current.at)) +
+            (if (current.network != key) "\n" + getString(R.string.dpi_other_network_note) else "")
+        current.rows.forEach { r -> box.addView(dpiRow(r)) }
+        binding.textDpiSummary.visibility = View.VISIBLE
+        binding.textDpiSummary.text = current.summary +
+            (if (current.byedpi.isNotBlank()) "\n" + getString(R.string.dpi_byedpi, current.byedpi) else "")
+        val others = all.filter { it !== current }
+        binding.textDpiOther.visibility = if (others.isEmpty()) View.GONE else View.VISIBLE
+        binding.textDpiOther.text = others.joinToString("\n\n") { o ->
+            getString(R.string.dpi_head, o.label, dpiWhen(o.at)) + ": " + o.summary
+        }
+    }
+
+    /** «14:05» сегодня, «24.11 14:05» раньше. */
+    private fun dpiWhen(at: Long): String {
+        val d = java.util.Date(at)
+        val sameDay = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US).let {
+            it.format(d) == it.format(java.util.Date())
+        }
+        return java.text.SimpleDateFormat(if (sameDay) "HH:mm" else "dd.MM HH:mm", java.util.Locale.getDefault()).format(d)
+    }
+
+    /** Строка итога DPI: зелёная — открыт, коричневая — только с обходом, красная — не открывается. */
+    private fun dpiRow(r: DpiCheck.Row): android.widget.TextView =
+        android.widget.TextView(this).apply {
+            text = r.text
+            textSize = 13f
+            setPadding(0, 4, 0, 4)
+            setTextColor(
+                ContextCompat.getColor(
+                    this@MainActivity,
+                    when (r.kind) {
+                        0 -> R.color.check_ok
+                        1 -> R.color.state_warn
+                        else -> R.color.check_fail
+                    }
+                )
+            )
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
 
     private fun renderAvailabilityUnsafe() {
         val viaTunnel = Availability.load(this, Availability.VIA_TUNNEL)
@@ -2203,6 +2327,15 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                 toast(getString(R.string.schedule_on, periodLabel(hours)))
             }
             updateScheduleNote()
+        }
+
+        // «Проверить DPI» в Журнале (с 1.10.49-beta2): режут сайты по имени (поможет обход) или по адресу.
+        binding.btnDpiCheck.setOnClickListener {
+            runCatching { checkDpiNow() }.onFailure { t ->
+                dpiChecking = false
+                TunnelDebug.problem("DPI: " + SafeMode.describe(t))
+                banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+            }
         }
 
         // «Проверить сейчас» в Журнале: доступность через работающий туннель (с 1.10.30).

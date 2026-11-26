@@ -89,6 +89,9 @@ object CleanNetwork {
         bound = false
     }
 
+    /** Найденная сеть без VPN (после [prepare]); null — не нашли. */
+    fun network(): Network? = clean
+
     /** Сокеты проб через найденную сеть; null — если обошли нечего и ходим как обычно. */
     fun factories(): Pair<UdpSocketFactory, TcpSocketFactory>? {
         val net = clean ?: return null

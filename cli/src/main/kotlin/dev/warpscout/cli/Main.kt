@@ -34,6 +34,7 @@ import kotlin.system.exitProcess
  *   warp-scout scan --endpoints my-endpoints.txt [--out out]
  *   warp-scout gen --priv <base64> --endpoint 1.2.3.4:943 --junk quic --sni ivi.ru [--out conf]
  *   warp-scout parse file.conf
+ *   warp-scout dpi [--hosts www.youtube.com,discord.com/api/v9/gateway] [--speed]
  */
 fun main(args: Array<String>) {
     val cmd = args.firstOrNull() ?: "help"
@@ -45,6 +46,7 @@ fun main(args: Array<String>) {
             "scan" -> scan(opts)
             "gen" -> gen(opts)
             "parse" -> parse(opts)
+            "dpi" -> dpi(opts)
             else -> help()
         }
     } catch (e: Exception) {
@@ -63,9 +65,11 @@ private fun parseOpts(args: List<String>): Map<String, String?> {
             a.startsWith("--") -> {
                 val name = a.removePrefix("--")
                 val next = args.getOrNull(i + 1)
+                // Значение — следующий аргумент; общий шаг ниже. Раньше здесь шагали ещё раз, и
+                // второй параметр команды терялся («dpi --hosts a,b --speed» без --speed).
                 if (next != null && !next.startsWith("--")) {
-                    out[name] = next; i += 2
-                } else { out[name] = "true"; i++ }
+                    out[name] = next; i++
+                } else out[name] = "true"
             }
             else -> out[positionKey(i)] = a
         }
@@ -75,6 +79,22 @@ private fun parseOpts(args: List<String>): Map<String, String?> {
 }
 
 private fun positionKey(i: Int) = "#$i"
+
+/**
+ * «Режут DPI или адрес» (как кнопка в приложении с 1.10.49-beta2): каждый сайт как есть и с приёмами
+ * ByeDPI. На компьютере — без «перестановки» (TTL из JVM не поменять).
+ */
+private fun dpi(opts: Map<String, String?>) {
+    val hosts = opts["hosts"]?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }
+    val speed = opts.containsKey("speed")
+    val targets = hosts?.map { h ->
+        val host = h.substringBefore('/')
+        val path = if (h.contains('/')) "/" + h.substringAfter('/') else "/"
+        dev.warpscout.core.dpi.DpiTarget(host, host, host, path, speed = speed)
+    } ?: dev.warpscout.core.dpi.DpiTargets.DEFAULT
+    val report = dev.warpscout.core.dpi.DpiProbe().run(targets, network = "компьютер", progress = { System.err.println("  … $it") })
+    report.journalLines().forEach { println(it) }
+}
 
 private fun help() {
     println(
@@ -96,6 +116,8 @@ WARP Scout CLI — подбор доступной WARP/AmneziaWG конфигу
       --full            перебор всех 255 октетов вместо 1..10 (долго!)
       --json            только JSON-отчёт
   scan                  только скан доступности (без генератора отчётов)
+  dpi                   режут DPI или адрес: YouTube, Discord и др. как есть и с приёмами ByeDPI
+      --hosts a,b/путь  свои сайты (иначе — набор приложения); --speed — сравнивать и скорость
   gen                   сгенерировать один конфиг
       --priv B64        приватный ключ (или --from file.conf, или --fetch — со свежими ключами)
       --endpoint h:p    конечная точка

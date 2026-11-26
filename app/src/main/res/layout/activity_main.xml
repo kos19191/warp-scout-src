@@ -1731,6 +1731,69 @@
                     android:text="@string/services_hint"
                     android:textAppearance="?attr/textAppearanceBodySmall" />
 
+                <!--
+                  ── режут DPI или адрес (с 1.10.49-beta2, бета) ──
+                  YouTube, Discord и др. напрямую через провайдера: как есть и с приёмами обхода DPI
+                  (как у ByeDPI). Итог — по каждой сети: подробно по текущей, по остальным строкой.
+                -->
+                <TextView
+                    style="@style/SectionHeader"
+                    android:text="@string/section_dpi" />
+
+                <TextView
+                    android:id="@+id/textDpiHint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/dpi_hint"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDpiCheck"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/dpi_check_now" />
+
+                <TextView
+                    android:id="@+id/textDpiProgress"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/textDpiHead"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:textAppearance="?attr/textAppearanceLabelLarge"
+                    android:visibility="gone" />
+
+                <LinearLayout
+                    android:id="@+id/dpiResultsBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+
+                <TextView
+                    android:id="@+id/textDpiSummary"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textAppearance="?attr/textAppearanceBodyMedium"
+                    android:textIsSelectable="true"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/textDpiOther"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:visibility="gone" />
+
                 <!-- ── отчёт ──────────────────────────────────────────────── -->
                 <TextView
                     style="@style/SectionHeader"

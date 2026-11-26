@@ -162,6 +162,12 @@ object TunnelDebug {
         add("✓ $message")
     }
 
+    /** Строка-подробность без значка и без отсчёта времени (с 1.10.49-beta2: итоги проверки DPI). */
+    fun note(message: String) {
+        touched = true
+        add("  $message")
+    }
+
     private fun add(line: String) {
         lastStageMs = System.currentTimeMillis()
         val full = "${stamp.get()!!.format(Date())} $line"

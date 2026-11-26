@@ -122,6 +122,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("топ-3 конфига для переключения") {
             shortlistPick()
         }
+        section("бета: подбор — точки из разных семейств адресов, против выхода через Москву (1.10.49-beta2)") {
+            pointMixChecks()
+        }
         section("скорость через туннель, DNS и две тройки (1.10.28)") {
             speedAndDns()
         }
@@ -223,6 +226,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         }
         section("бета: начальные экраны — что отмечено сразу и что сохраняется (1.10.44-beta6)") {
             welcomeChecks()
+        }
+        section("бета: режут DPI или адрес — приёмы ByeDPI в самом приложении (1.10.49-beta2)") {
+            DpiChecks { name, ok, detail -> check(name, ok, detail) }.run()
         }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
@@ -2347,7 +2353,13 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         check("быстрый старт: без ответа сервера не подтверждается", !c.confirmed(0, 0, 0))
         check("быстрый старт: ответ есть, проверок не было — подтверждается", c.confirmed(1, 0, 0))
         check("быстрый старт: ответ есть, но изнутри ничего не открылось", !c.confirmed(3, 9, 0))
-        check("быстрый старт: открылся хотя бы один ресурс", c.confirmed(3, 9, 1))
+        // С 1.10.49-beta2 при пяти и больше проверках нужно ≥75% (как в версии для компьютера):
+        // «открылся хоть один» подтверждал и точку через Москву без YouTube и Telegram.
+        check("быстрый старт: из 9 открылся один — мало, полный подбор", !c.confirmed(3, 9, 1))
+        check("быстрый старт: 5 из 8 (как через DME без YouTube и Telegram) — не подтверждается", !c.confirmed(3, 8, 5))
+        check("быстрый старт: 6 из 8 (75%) — подтверждается", c.confirmed(3, 8, 6))
+        check("быстрый старт: 6 из 9 (67%) — не подтверждается", !c.confirmed(3, 9, 6))
+        check("быстрый старт: проверок меньше пяти — хватает одного открывшегося", c.confirmed(3, 4, 1))
         check("быстрый старт: все ресурсы открылись", c.confirmed(3, 9, 9))
         check("быстрый старт: отрицательные числа не считаются успехом", !c.confirmed(-1, 9, 9))
     }
@@ -2396,6 +2408,75 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         expect("топ-3: проверенный изнутри выше более «балльного»", ordered.single().resourcesOk, 7)
 
         check("топ-3: пустой отчёт не ломает отбор", Shortlist.pick(emptyList()).isEmpty())
+    }
+
+    /**
+     * 1.10.49-beta2 (из версии для компьютера): подробно и изнутри туннеля проверяются точки из разных
+     * семейств адресов (8.*, 162.*, 188.*) и подсетей, а не самые быстрые — те почти всегда московские.
+     */
+    private fun pointMixChecks() {
+        val mix = dev.warpscout.core.tune.PointMix
+        expect("семейство: 8.39.125.1 → 8", mix.familyOf("8.39.125.1"), "8")
+        expect("семейство: 162.159.192.1 → 162", mix.familyOf("162.159.192.1"), "162")
+        expect("семейство: имя — само имя", mix.familyOf("Engage.CloudflareClient.com"), "engage.cloudflareclient.com")
+        expect("подсеть: 8.34.70.3 → 8.34.70", mix.subnetOf("8.34.70.3"), "8.34.70")
+
+        fun st(host: String, port: Int = 500, replies: Int = 1) =
+            EndpointStats(Endpoint(host, port), emptyList(), if (replies > 0) Verdict.HANDSHAKE_OK else Verdict.UDP_SILENT, replies, 1)
+        // Самые быстрые — московские 8.*: так их ранжирует скан по пингу.
+        val ranked = listOf(
+            st("8.6.112.2"), st("8.6.112.7"), st("8.39.214.10"), st("8.39.214.6"), st("8.39.125.1"),
+            st("8.34.70.3"), st("162.159.192.1"), st("162.159.192.9"), st("188.114.97.1")
+        )
+        val refine = mix.pickRefine(emptyList(), ranked, 4).map { it.endpoint.host }
+        check(
+            "подробно: из четырёх мест — по точке от 8.*, 162.* и 188.*",
+            refine.map { mix.familyOf(it) }.toSet() == setOf("8", "162", "188"), refine.joinToString()
+        )
+        expect("подробно: первым — самый быстрый адрес", refine.first(), "8.6.112.2")
+        expect("подробно: четвёртое место — новая подсеть, а не сосед первого", refine.getOrNull(3), "8.39.214.10")
+        val withPrior = mix.pickRefine(listOf(st("8.39.125.1")), ranked, 3).map { it.endpoint.host }
+        expect("подробно: прежняя точка — первой, дальше недостающие семейства", withPrior, listOf("8.39.125.1", "162.159.192.1", "188.114.97.1"))
+        val all = mix.pickRefine(listOf(st("8.6.112.2")), ranked, 50)
+        check("подробно: без повторов и всех", all.size == ranked.size && all.map { it.endpoint.render() }.distinct().size == ranked.size)
+        check("подробно: ноль мест — пусто", mix.pickRefine(emptyList(), ranked, 0).isEmpty())
+
+        fun cand(host: String, junk: String, replies: Int = 1): Candidate {
+            val cfg = WarpConfig(
+                name = "тест",
+                account = WarpAccount("a=", "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=", "172.16.0.2", "2606::1"),
+                endpoint = Endpoint(host, 500),
+                junk = if (junk == "none") JunkLibrary.none() else JunkLibrary.tlsFixed(),
+                allowedIps = "0.0.0.0/0, ::/0"
+            )
+            val s0 = EndpointStats(cfg.endpoint, emptyList(), if (replies > 0) Verdict.HANDSHAKE_OK else Verdict.UDP_SILENT, replies, 1)
+            return Candidate(cfg, s0, Scoring.evaluate(s0, replies > 0, 0, 0))
+        }
+        val a1 = cand("8.39.214.10", "tls")
+        val a2 = cand("8.39.214.10", "none")
+        val a3 = cand("8.6.112.2", "tls")
+        val b1 = cand("188.114.97.1", "tls")
+        val c1 = cand("162.159.192.5", "none")
+        val dead = cand("162.159.193.1", "tls", replies = 0)
+        val ordered = listOf(a1, a2, a3, dead, b1, c1) // по баллу: московские впереди
+        fun names(l: List<Candidate>) = l.map { it.config.endpoint.host + "/" + it.junk.name }
+        val v = mix.forVerification(ordered, 4)
+        expect(
+            "изнутри: 8.*, 188.*, 162.*, затем новая подсеть 8.* — а не три московских подряд",
+            names(v), names(listOf(a1, b1, c1, a3))
+        )
+        check("изнутри: молчащая точка не проверяется, когда есть годные", dead !in v)
+        expect("изнутри: быстрый старт — три, по семейству каждая", names(mix.forVerification(ordered, 3)), names(listOf(a1, b1, c1)))
+        val deadOnly = listOf(cand("8.6.112.2", "tls", 0), cand("8.6.112.3", "tls", 0), cand("8.6.112.4", "tls", 0), cand("8.6.112.5", "tls", 0))
+        expect("изнутри: годных нет — как раньше, три лучших", mix.forVerification(deadOnly, 4).size, 3)
+        val oneGood = mix.forVerification(listOf(a1, dead, cand("8.6.112.9", "tls", 0)), 4)
+        check("изнутри: одна годная — первой, до трёх добираются остальные", oneGood.size == 3 && oneGood.first() == a1, names(oneGood).joinToString())
+        check("изнутри: пустой список — пусто", mix.forVerification(emptyList(), 4).isEmpty())
+
+        check("изнутри: две сильные (7 из 8) из трёх — хватит", mix.enough(listOf(7, 6, 7), 8))
+        check("изнутри: 6, 6, 6 из 8 (так выходит через DME) — проверяю дальше", !mix.enough(listOf(6, 6, 6), 8))
+        check("изнутри: две сильные, но проверено две — проверяю третью", !mix.enough(listOf(8, 8), 8))
+        check("изнутри: без сайтов правило не срабатывает", !mix.enough(listOf(0, 0, 0), 0))
     }
 
     /**

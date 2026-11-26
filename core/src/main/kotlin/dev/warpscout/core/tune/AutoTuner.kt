@@ -125,7 +125,13 @@ data class TuningSpec(
      * было больше суток. Быстрый старт тогда не принимается, если сохранённые точки выходят через
      * Россию, — иначе подбор раз за разом подтверждал бы московские точки и не смотрел остальные.
      */
-    val seekAbroad: Boolean = false
+    val seekAbroad: Boolean = false,
+    /**
+     * Сколько кандидатов проверить изнутри туннеля (с 1.10.49-beta2 — из разных семейств адресов,
+     * см. [PointMix.forVerification]); после трёх проверка останавливается, если две точки уже
+     * открыли не меньше 80% сайтов.
+     */
+    val verifyTop: Int = PointMix.VERIFY_MAX
 )
 
 /**
@@ -289,7 +295,8 @@ class AutoTuner(
             priority = emptyList(),
             // Быстрый старт должен остаться быстрым: долгой пробой — две лучшие точки (плюс лучшие
             // варианты с шумом и без), а не четыре.
-            sustainTop = spec.sustainTop.coerceAtMost(2)
+            sustainTop = spec.sustainTop.coerceAtMost(2),
+            verifyTop = spec.verifyTop.coerceAtMost(PointMix.STOP_AFTER)
         )
     }
 
@@ -346,13 +353,14 @@ class AutoTuner(
     val prior = spec.priority.mapTo(HashSet()) { it.render() }
     val pool = if (alive.size >= 2) alive else ranked
     val refineLimit = maxOf(3, spec.refineTop)
-    // С 1.10.34 половина мест — лучшему адресу каждой подсети: площадка выхода зависит от подсети
-    // (журнал 22.11 на Wi-Fi: 162.159.192.x — HEL, 188.114.97.1 — FRA), а десять самых быстрых
-    // адресов часто оказывались из двух-трёх подсетей с одним и тем же выходом через Москву.
-    val bySubnet = pool.distinctBy { subnetOf(it.endpoint) }.take(refineLimit / 2)
-    val refineCandidates = (alive.filter { it.endpoint.render() in prior } + bySubnet + pool)
-        .distinctBy { it.endpoint.render() }
-        .take(refineLimit)
+    // Площадка выхода зависит от адреса (журнал 22.11 на Wi-Fi: 162.159.192.x — HEL, 188.114.97.1 —
+    // FRA, а 8.* — Москва), а самые быстрые адреса — как раз московские. Поэтому с 1.10.49-beta2 после
+    // прежней очереди — лучший адрес от каждого семейства (8.*, 162.*, 188.*), потом от каждой
+    // подсети /24 и только потом остальные по рангу (как в версии для компьютера; см. [PointMix]).
+    val refineCandidates = PointMix.pickRefine(alive.filter { it.endpoint.render() in prior }, pool, refineLimit)
+    val families = refineCandidates.map { PointMix.familyOf(it.endpoint) }.distinct()
+    if (families.size > 1) notes += "Подробно проверяю ${refineCandidates.size} точек из семейств адресов: " +
+        families.joinToString(", ") { if (it.all { ch -> ch.isDigit() }) "$it.*" else it }
 
     // --- фаза 2: подробно, по профилям шума ---------------------------------------
     // Шум, который на этой сети замерзает (знает приложение по прошлым подборам и подключениям),
@@ -476,11 +484,19 @@ class AutoTuner(
 
     var finalList = ordered
     if (!progress.isCancelled() && spec.verifyThroughTunnel && tunnel != null && ordered.isNotEmpty() && spec.resources.isNotEmpty()) {
-        progress.log("Проверяю топ-${minOf(3, ordered.size)} кандидатов внутри туннеля…")
+        // С 1.10.49-beta2 — не «три лучших по баллу» (это часто три московские точки одного
+        // семейства), а лучший от каждого семейства адресов, затем новые подсети (см. [PointMix]).
+        val toVerify = PointMix.forVerification(ordered, spec.verifyTop.coerceAtLeast(1))
+        progress.log(
+            "Проверяю внутри туннеля до ${toVerify.size} кандидатов: " +
+                toVerify.joinToString(", ") { it.config.endpoint.render() } + "…"
+        )
         val verified = ArrayList<Candidate>()
         val tv: TunnelVerifier = tunnel
-        for (cand in ordered.take(minOf(3, ordered.size))) {
+        for (cand in toVerify) {
             if (progress.isCancelled()) break
+            // Две «сильные» точки (≥80% сайтов) среди трёх проверенных — дальше не проверяем.
+            if (PointMix.enough(verified.map { it.resourcesOk }, spec.resources.size)) break
             val results = runCatching {
                 tv.verify(cand.config, spec.resources, spec.tunnelSettleMs) { progress.isCancelled() }
             }
@@ -514,8 +530,10 @@ class AutoTuner(
         // сетевой балл — только догадка. Раньше списки перемешивались по баллу, и победить
         // мог кандидат, который отвечал на handshake, но не пускал трафик. Среди одинаково
         // открывшихся выше тот, через кого быстрее качается (ступенями, см. SpeedTest.bucket).
+        // Проверенные — уже не первые N по баллу, поэтому остаток — по ключу, а не drop(N).
+        val verifiedKeys = verified.mapTo(HashSet()) { it.config.endpoint.render() + "|" + it.junk.name }
         finalList = verified.sortedWith(verifiedOrder()) +
-            ordered.drop(verified.size).sortedByDescending { it.score }
+            ordered.filter { (it.config.endpoint.render() + "|" + it.junk.name) !in verifiedKeys }.sortedByDescending { it.score }
     } else if (tunnel == null && spec.verifyThroughTunnel) {
         notes += "Сборка без встроенного туннеля: проверка «изнутри» пропущена, отранжировано по сетевым пробам."
     }
@@ -751,13 +769,6 @@ class AutoTuner(
         }
         return TuningResult(report, best?.config, text, account.source)
     }
-}
-
-/** Подсеть адреса для разнообразия подбора: «8.34.70.3» → «8.34.70»; не IPv4 — сам адрес. */
-private fun subnetOf(endpoint: Endpoint): String {
-    val host = endpoint.host
-    val parts = host.split('.')
-    return if (parts.size == 4 && parts.all { p -> p.isNotEmpty() && p.all { it.isDigit() } }) parts.take(3).joinToString(".") else host
 }
 
 private fun EndpointSpec.name(): String =

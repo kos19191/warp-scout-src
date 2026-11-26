@@ -519,6 +519,20 @@
     <string name="avail_tunnel_none">Через туннель ещё не проверяли. Подключи туннель и нажми «Проверить сейчас» — или подбор проверит сам.</string>
     <string name="avail_direct_none">Без VPN ещё не проверяли: эта проверка идёт при подборе, если включена в «Что проверять».</string>
     <string name="avail_check_now">Проверить сейчас</string>
+    <!-- Режут DPI или адрес (с 1.10.49-beta2, бета) -->
+    <string name="section_dpi">Режут DPI или адрес? (бета)</string>
+    <string name="dpi_hint">Проверка напрямую через провайдера, мимо туннеля: YouTube (страница, видео, картинки), Discord, Instagram, X и сайты за Cloudflare — сначала как есть, потом с приёмами обхода DPI, как у ByeDPI (разрез, две записи TLS, перестановка, лишний байт). Видно, что режет фильтр по имени сайта (тогда поможет обход), а что закрыто по адресу (поможет только VPN). Итог хранится по каждой сети отдельно — проверь на Wi-Fi и на мобильной. Обычно до минуты.</string>
+    <string name="dpi_check_now">Проверить DPI</string>
+    <string name="dpi_checking">Проверяю…</string>
+    <string name="dpi_running">Идёт проверка — обычно до минуты. Туннель не трогаю.</string>
+    <string name="dpi_progress">Проверяю: %1$s</string>
+    <string name="dpi_busy_scan">Идёт подбор — проверь DPI после него.</string>
+    <string name="dpi_foreign_vpn">Работает VPN другого приложения (%1$s) — проверка показала бы его, а не провайдера. Выключи его и повтори.</string>
+    <string name="dpi_no_bypass">Не нашлось сети мимо туннеля — выключи туннель и повтори проверку.</string>
+    <string name="dpi_done">Проверка DPI готова: %1$s. Итог — в «Журнале», раздел «Режут DPI или адрес?».</string>
+    <string name="dpi_head">%1$s · %2$s</string>
+    <string name="dpi_other_network_note">(это другая сеть — на текущей проверки ещё не было)</string>
+    <string name="dpi_byedpi">Для ByeDPI на этой сети: %1$s</string>
     <string name="avail_checking">Проверяю…</string>
     <string name="avail_need_tunnel">Проверка идёт через туннель — сначала подключи его.</string>
     <string name="avail_busy_scan">Идёт подбор — он сам проверит доступность через туннель.</string>
