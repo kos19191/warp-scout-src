@@ -62,6 +62,7 @@ import dev.warpscout.desktop.tunnel.WindowsNetConfigurator
 import dev.warpscout.desktop.tunnel.WindowsTunnelManager
 import dev.warpscout.desktop.tunnel.WintunLoader
 import dev.warpscout.desktop.update.AppUpdater
+import dev.warpscout.desktop.tunnel.TelegramOpener
 import dev.warpscout.desktop.tunnel.TelegramProxyEntry
 import dev.warpscout.desktop.tunnel.TelegramProxyFinder
 import dev.warpscout.desktop.update.BuildInfo
@@ -947,6 +948,53 @@ class DesktopController(
                 val msg = "Ошибка подбора MTProto-прокси: ${e.message}"
                 appendLog(msg, LogLevel.ERROR)
                 _state.update { it.copy(tgProxyBusy = false, tgProxyStatus = msg) }
+            }
+        }
+    }
+
+    /** Передаёт выбранный MTProto-прокси напрямую в Telegram Desktop (без открытия браузера). */
+    fun openTelegramProxy(entry: TelegramProxyEntry, onFallbackCopy: (String) -> Unit = {}) {
+        auxWorker.execute {
+            val res = TelegramOpener.openTgLink(entry.tgLink)
+            if (res.opened) {
+                appendLog("MTProto → Telegram (${entry.server}:${entry.port}): ${res.message}", LogLevel.OK)
+                showBanner(res.message)
+            } else {
+                onFallbackCopy(entry.tmeLink)
+                appendLog("MTProto → Telegram: ${res.message}", LogLevel.WARN)
+                showBanner(res.message, isError = true)
+            }
+        }
+    }
+
+    /** Включает встроенный ByeDPI (если выключен) и передаёт SOCKS5 127.0.0.1:<port> напрямую в Telegram Desktop. */
+    fun openByeDpiInTelegram(onFallbackCopy: (String) -> Unit = {}) {
+        auxWorker.execute {
+            val s = _state.value.settings
+            if (!byeDpiManager.snapshot.running && byeDpiManager.snapshot.available) {
+                val snap = byeDpiManager.start(
+                    presetId = s.byeDpiPresetId,
+                    port = s.byeDpiPort,
+                    customArgs = s.byeDpiCustomArgs,
+                    enableSystemProxy = s.byeDpiSystemProxy,
+                    bypassTunnel = s.byeDpiBypassTunnel,
+                    pacDomainsText = s.byeDpiPacDomains
+                )
+                _state.update { it.copy(byeDpi = snap) }
+            }
+            val port = _state.value.byeDpi.port.takeIf { it in 1024..65535 } ?: s.byeDpiPort
+            val tgLink = TelegramProxyEntry.socksTgLink("127.0.0.1", port)
+            val res = TelegramOpener.openTgLink(tgLink)
+            if (res.opened) {
+                appendLog("ByeDPI SOCKS5 (127.0.0.1:$port) → Telegram: ${res.message}", LogLevel.OK)
+                showBanner(res.message)
+            } else {
+                onFallbackCopy("127.0.0.1:$port")
+                appendLog("ByeDPI → Telegram: ${res.message}", LogLevel.WARN)
+                showBanner(
+                    "Telegram Desktop не найден — добавьте вручную: SOCKS5 127.0.0.1:$port (скопировано в буфер)",
+                    isError = true
+                )
             }
         }
     }

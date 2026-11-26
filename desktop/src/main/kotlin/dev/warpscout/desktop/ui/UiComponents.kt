@@ -111,16 +111,13 @@ object DesktopPlatform {
     }
 
     fun openUrl(url: String) {
-        val opened = runCatching {
+        if (url.startsWith("tg://", ignoreCase = true)) {
+            dev.warpscout.desktop.tunnel.TelegramOpener.openTgLink(url)
+            return
+        }
+        runCatching {
             if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
                 Desktop.getDesktop().browse(URI(url))
-                true
-            } else false
-        }.getOrDefault(false)
-        if (!opened && "win" in System.getProperty("os.name").orEmpty().lowercase()) {
-            // Запасной путь для Windows URI-схем вроде tg://proxy?... и tg://socks?...
-            runCatching {
-                ProcessBuilder("cmd.exe", "/c", "start", "", url).start()
             }
         }
     }

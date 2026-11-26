@@ -115,4 +115,56 @@ class TelegramProxyFinderTest {
         assertEquals("""{"theme":"LIGHT"}""", target.settingsFile.readText())
         assertFalse(File(target.root, "nonexistent.json").exists())
     }
+
+    @Test
+    fun `TelegramOpener parses registry command with Cyrillic paths and workdir`() {
+        val regCmd = """"C:\Users\Администратор\AppData\Roaming\Telegram Desktop\Telegram.exe" -workdir "C:/Users/Администратор/AppData/Roaming/Telegram Desktop/" -- "%1""""
+        val spec = TelegramOpener.parseRegistryCommand(regCmd)
+        assertEquals("""C:\Users\Администратор\AppData\Roaming\Telegram Desktop\Telegram.exe""", spec?.exePath)
+        assertEquals("""C:/Users/Администратор/AppData/Roaming/Telegram Desktop/""", spec?.workDir)
+
+        val tgUrl = "tg://proxy?server=1.2.3.4&port=443&secret=ee123456"
+        val args = TelegramOpener.buildLaunchArgs(spec!!, tgUrl)
+        assertEquals(
+            listOf(
+                """C:\Users\Администратор\AppData\Roaming\Telegram Desktop\Telegram.exe""",
+                "-workdir",
+                """C:/Users/Администратор/AppData/Roaming/Telegram Desktop/""",
+                "--",
+                tgUrl
+            ),
+            args
+        )
+    }
+
+    @Test
+    fun `TelegramOpener prefers running portable Telegram over registry path`() {
+        val portableExe = """D:\Portable\Telegram\Telegram.exe"""
+        val regCmd = """"C:\Users\User\AppData\Roaming\Telegram Desktop\Telegram.exe" -workdir "C:/Users/User/TD/" -- "%1""""
+        val spec = TelegramOpener.findTelegramClient(
+            runningExePaths = listOf(portableExe),
+            registryCommand = regCmd,
+            standardCandidates = emptyList(),
+            fileExists = { true }
+        )
+        assertEquals(portableExe, spec?.exePath)
+        assertNull(spec?.workDir, "Портативный процесс не должен получать чужой -workdir из реестра")
+        assertEquals("running", spec?.source)
+    }
+
+    @Test
+    fun `TelegramOpener rejects non-tg urls and does not launch browser when client missing`() {
+        val bad = TelegramOpener.openTgLink("https://t.me/proxy?server=1.2.3.4")
+        assertFalse(bad.opened)
+
+        if (TelegramOpener.isWindows()) {
+            val missing = TelegramOpener.openTgLink(
+                tgUrl = "tg://socks?server=127.0.0.1&port=1080",
+                specOverride = null,
+                processStarter = { _, _ -> false },
+                shellFallback = { false }
+            )
+            assertFalse(missing.opened)
+        }
+    }
 }

@@ -1,6 +1,5 @@
 package dev.warpscout.desktop.ui
 
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,6 +31,7 @@ import dev.warpscout.desktop.tunnel.TelegramProxyEntry
  * Вкладка «Подбор»: настройка пула точек и профилей шума AWG, запуск автоподбора,
  * проверка реальной доступности сайтов, сверка DNS с DoH и замер скорости.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
     val warp = LocalWarpColors.current
@@ -118,9 +118,10 @@ fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
 
             Text("Профили шума (AmneziaWG)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-            Row(
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 FilterChip(
                     selected = s.includeNoneJunk,
@@ -442,12 +443,11 @@ fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
                 }
             }
 
-            // Выбор Windows-стратегии
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            // Выбор Windows-стратегии (FlowRow переносит чипы на новые строки, не выходя за рамки окна)
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 ByeDpiPresets.BUILTIN.forEach { preset ->
                     FilterChip(
@@ -679,10 +679,9 @@ fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
 
                 FilledTonalButton(
                     onClick = {
-                        if (!dpi.running && dpi.available) {
-                            controller.toggleByeDpi()
-                        }
-                        DesktopPlatform.openUrl(TelegramProxyEntry.socksTgLink("127.0.0.1", s.byeDpiPort))
+                        controller.openByeDpiInTelegram(
+                            onFallbackCopy = { text -> DesktopPlatform.copyToClipboard(text) }
+                        )
                     },
                     enabled = dpi.available,
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)
@@ -730,7 +729,12 @@ fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
                                 }
                                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                     FilledTonalButton(
-                                        onClick = { DesktopPlatform.openUrl(entry.tgLink) },
+                                        onClick = {
+                                            controller.openTelegramProxy(
+                                                entry = entry,
+                                                onFallbackCopy = { link -> DesktopPlatform.copyToClipboard(link) }
+                                            )
+                                        },
                                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                                     ) {
                                         Text("В Telegram", style = MaterialTheme.typography.labelSmall)
