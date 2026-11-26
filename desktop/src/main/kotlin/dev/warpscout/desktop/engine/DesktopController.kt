@@ -62,6 +62,8 @@ import dev.warpscout.desktop.tunnel.WindowsNetConfigurator
 import dev.warpscout.desktop.tunnel.WindowsTunnelManager
 import dev.warpscout.desktop.tunnel.WintunLoader
 import dev.warpscout.desktop.update.AppUpdater
+import dev.warpscout.desktop.tunnel.ProtonVpnHelper
+import dev.warpscout.desktop.tunnel.SecondExitPreset
 import dev.warpscout.desktop.tunnel.TelegramOpener
 import dev.warpscout.desktop.tunnel.TelegramProxyEntry
 import dev.warpscout.desktop.tunnel.TelegramProxyFinder
@@ -1173,22 +1175,24 @@ class DesktopController(
 
     fun renderExportText(target: ConfTarget = _state.value.settings.exportTarget): String? {
         val raw = _state.value.activeConfText ?: return null
-        val parsed = WgConf.toWarpConfig("WarpScout", raw) ?: return null
+        val parsed = WgConf.toWarpConfig("WilyScout", raw) ?: return null
         val applied = applyCurrentNetworkSettings(parsed, _state.value.settings)
         return WgConf.render(applied, target)
     }
 
-    fun importConfigText(text: String): Boolean {
-        val parsed = WgConf.toWarpConfig("Imported", text)
-        if (parsed == null) {
-            showBanner("Не удалось прочитать конфиг: нужны [Interface] PrivateKey и [Peer] PublicKey", isError = true)
+    fun importConfigText(text: String, connectNow: Boolean = false): Boolean {
+        val info = ProtonVpnHelper.inspectConf(text)
+        if (info == null) {
+            showBanner("Не удалось прочитать конфиг: нужны [Interface] PrivateKey и [Peer] PublicKey + Endpoint", isError = true)
             return false
         }
+        val parsed = info.config
+        val label = if (info.isProton) "ProtonVPN · ${info.serverLabel}" else parsed.junk.name
         val rendered = WgConf.render(parsed)
         store.saveActiveConfigText(rendered)
         val entry = ShortlistEntry(
             endpoint = parsed.endpoint.render(),
-            junkName = parsed.junk.name,
+            junkName = label,
             score = 0,
             checkedAtMs = System.currentTimeMillis(),
             confText = rendered
@@ -1197,9 +1201,74 @@ class DesktopController(
         store.saveShortlist(updatedList)
         updateSettings { it.copy(activeShortlistIndex = 0) }
         _state.update { it.copy(activeConfText = rendered, shortlist = updatedList) }
-        appendLog("Импортирован конфиг: ${parsed.endpoint.render()} (${parsed.junk.name})", LogLevel.OK)
-        showBanner("Конфиг импортирован: ${parsed.endpoint.render()}")
+        appendLog("Импортирован конфиг: ${parsed.endpoint.render()} ($label)", LogLevel.OK)
+        showBanner(
+            if (info.isProton) "Добавлен $label (${parsed.endpoint.render()})"
+            else "Конфиг импортирован: ${parsed.endpoint.render()}"
+        )
+        if (connectNow) {
+            if (currentTunnelUp) applySettingsAndReconnect() else connectActive()
+        }
         return true
+    }
+
+    /**
+     * Загружает WireGuard `.conf` (например, скачанный из ProtonVPN) во «Второй выход»,
+     * включает его и при необходимости сразу заполняет маршруты (для Telegram — мгновенно без DoH).
+     */
+    fun importSecondExitConf(confText: String, preset: SecondExitPreset? = null, applyNow: Boolean = false): Boolean {
+        val info = ProtonVpnHelper.inspectConf(confText)
+        if (info == null) {
+            showBanner("Не удалось прочитать конфиг: нужны [Interface] PrivateKey и [Peer] PublicKey + Endpoint", isError = true)
+            return false
+        }
+        val cur = _state.value.settings
+        val chosenPreset = preset ?: if (cur.secondExitCidrs.isBlank() && cur.secondExitDomains.isBlank()) SecondExitPreset.TELEGRAM else null
+        updateSettings { s ->
+            val nextDomains = chosenPreset?.domains ?: s.secondExitDomains
+            val nextCidrs = when {
+                chosenPreset != null && chosenPreset.builtInCidrs.isNotBlank() -> chosenPreset.builtInCidrs
+                else -> s.secondExitCidrs
+            }
+            s.copy(
+                secondExitEnabled = true,
+                secondExitConf = confText.trim(),
+                secondExitDomains = nextDomains,
+                secondExitCidrs = nextCidrs
+            )
+        }
+        val tag = if (info.isProton) "ProtonVPN (${info.serverLabel})" else info.endpoint
+        val msg = "Второй выход загружен: $tag · ${info.endpoint} (IP ${info.clientIpv4})"
+        appendLog(msg, LogLevel.OK)
+        _state.update { it.copy(secondExitStatus = msg) }
+        showBanner(msg)
+
+        if (chosenPreset != null && chosenPreset.builtInCidrs.isBlank()) {
+            resolveSecondExitDomains()
+        } else if (applyNow && currentTunnelUp) {
+            applySettingsAndReconnect()
+        }
+        return true
+    }
+
+    /** Применяет готовый пресет доменов/подсетей для Второго выхода (Telegram, ChatGPT/AI, YouTube/Discord). */
+    fun applySecondExitPreset(preset: SecondExitPreset) {
+        updateSettings { s ->
+            s.copy(
+                secondExitEnabled = true,
+                secondExitDomains = preset.domains,
+                secondExitCidrs = if (preset.builtInCidrs.isNotBlank()) preset.builtInCidrs else s.secondExitCidrs
+            )
+        }
+        if (preset.builtInCidrs.isNotBlank()) {
+            val count = SplitRoutes.prefixesOf(preset.builtInCidrs).size
+            val msg = "Пресет «${preset.title}»: добавлено $count готовых официальных подсетей — можно нажимать «Применить»"
+            appendLog(msg, LogLevel.OK)
+            _state.update { it.copy(secondExitStatus = msg) }
+            showBanner(msg)
+        } else {
+            resolveSecondExitDomains()
+        }
     }
 
     fun saveBackup(file: File): Boolean = try {

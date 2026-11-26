@@ -2,6 +2,7 @@ package dev.warpscout.desktop.ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
@@ -10,6 +11,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.warpscout.core.config.SplitRoutes
@@ -18,15 +20,19 @@ import dev.warpscout.core.lists.ListSide
 import dev.warpscout.desktop.engine.DesktopController
 import dev.warpscout.desktop.engine.DesktopUiState
 import dev.warpscout.desktop.storage.RouteMode
+import dev.warpscout.desktop.tunnel.ProtonVpnHelper
+import dev.warpscout.desktop.tunnel.SecondExitPreset
 
 /**
  * Вкладка «Маршруты»: раздельное туннелирование (Весь трафик / Пресет обхода РФ / Списки allow-domains /
- * Вручную CIDR) и «Второй выход» (свой WireGuard/AmneziaWG сервер для выбранных доменов).
+ * Вручную CIDR), быстрое добавление ProtonVPN (WireGuard) и «Второй выход» (свой сервер для выбранных доменов).
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun RoutesScreen(state: DesktopUiState, controller: DesktopController) {
     val warp = LocalWarpColors.current
     val s = state.settings
+    val clipboard = LocalClipboardManager.current
 
     Column(
         modifier = Modifier
@@ -150,7 +156,69 @@ fun RoutesScreen(state: DesktopUiState, controller: DesktopController) {
             }
         }
 
-        // --- 2. Второй выход (свой сервер в нужной стране) ---
+        // --- 2. Быстрое добавление ProtonVPN (WireGuard .conf) ---
+        WarpCard {
+            SectionHeader(
+                title = "ProtonVPN (WireGuard)",
+                subtitle = "Бесплатные и платные .conf из кабинета ProtonVPN — можно подключить как основной туннель или как 2-й выход поверх WARP (с обходом РФ)."
+            )
+
+            Text(
+                "1. Откройте кабинет ProtonVPN → Downloads → WireGuard → выберите Free-сервер (NL/RO/PL/JP/US) и нажмите Create → Download.\n" +
+                    "2. Загрузите скачанный файл .conf ниже — WilyScout сам подхватит сервер, ключи и 1:1 NAT для адреса 10.2.0.2.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            OutlinedButton(
+                onClick = { DesktopPlatform.openUrl(ProtonVpnHelper.PROTON_WG_DOWNLOADS_URL) },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Открыть страницу WireGuard-конфигов ProtonVPN", style = MaterialTheme.typography.labelMedium)
+            }
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        val file = DesktopPlatform.chooseOpenFile("Выберите файл ProtonVPN (.conf)")
+                        if (file != null && file.isFile) {
+                            runCatching { file.readText(Charsets.UTF_8) }
+                                .onSuccess { controller.importSecondExitConf(it, preset = SecondExitPreset.TELEGRAM, applyNow = true) }
+                                .onFailure { controller.showBanner("Не удалось прочитать файл: ${it.message}", isError = true) }
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = warp.accentOrange, contentColor = Color.White)
+                ) {
+                    Icon(Icons.Rounded.FileOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("Как 2-й выход", style = MaterialTheme.typography.labelMedium)
+                }
+
+                FilledTonalButton(
+                    onClick = {
+                        val file = DesktopPlatform.chooseOpenFile("Выберите файл ProtonVPN (.conf)")
+                        if (file != null && file.isFile) {
+                            runCatching { file.readText(Charsets.UTF_8) }
+                                .onSuccess { controller.importConfigText(it, connectNow = true) }
+                                .onFailure { controller.showBanner("Не удалось прочитать файл: ${it.message}", isError = true) }
+                        }
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Rounded.VpnKey, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("Вместо WARP", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+
+        // --- 3. Второй выход (свой сервер в нужной стране / ProtonVPN) ---
+        val parsedSecond = remember(s.secondExitConf) {
+            if (s.secondExitConf.isBlank()) null else ProtonVpnHelper.inspectConf(s.secondExitConf)
+        }
         WarpCard {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -158,9 +226,9 @@ fun RoutesScreen(state: DesktopUiState, controller: DesktopController) {
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Второй выход (свой регион)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text("Второй выход (свой регион / ProtonVPN)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "Отдельные сайты идут через ваш WireGuard/AmneziaWG VPS, всё остальное — через WARP.",
+                        "Отдельные сайты (Telegram, ChatGPT…) идут через ваш WireGuard/ProtonVPN, всё остальное — через WARP.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -172,16 +240,84 @@ fun RoutesScreen(state: DesktopUiState, controller: DesktopController) {
             }
 
             if (s.secondExitEnabled) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            val file = DesktopPlatform.chooseOpenFile("Выберите .conf второго выхода")
+                            if (file != null && file.isFile) {
+                                runCatching { file.readText(Charsets.UTF_8) }
+                                    .onSuccess { controller.importSecondExitConf(it) }
+                                    .onFailure { controller.showBanner("Не удалось прочитать файл: ${it.message}", isError = true) }
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Rounded.FileOpen, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("Загрузить .conf", style = MaterialTheme.typography.labelSmall)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            val txt = clipboard.getText()?.text.orEmpty()
+                            if (txt.isBlank()) {
+                                controller.showBanner("Буфер обмена пуст", isError = true)
+                            } else {
+                                controller.importSecondExitConf(txt)
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Rounded.ContentPaste, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("Вставить из буфера", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+
+                if (parsedSecond != null) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = warp.surfaceHigh.copy(alpha = 0.7f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = (if (parsedSecond.isProton) "✓ ProtonVPN · ${parsedSecond.serverLabel}" else "✓ WireGuard") +
+                                " · ${parsedSecond.endpoint} · IP ${parsedSecond.clientIpv4}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = warp.ok,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+
                 OutlinedTextField(
                     value = s.secondExitConf,
                     onValueChange = { v -> controller.updateSettings { it.copy(secondExitConf = v) } },
                     label = { Text("Клиентский конфиг второго сервера ([Interface]/[Peer])") },
-                    placeholder = { Text("[Interface]\nPrivateKey = ...\nAddress = 10.0.0.2/32\n\n[Peer]\nPublicKey = ...\nEndpoint = 1.2.3.4:51820") },
+                    placeholder = { Text("[Interface]\nPrivateKey = ...\nAddress = 10.2.0.2/32\n\n[Peer]\nPublicKey = ...\nEndpoint = 185.107.56.138:51820") },
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 4,
                     maxLines = 7,
                     textStyle = MaterialTheme.typography.bodySmall
                 )
+
+                Text("Быстрые пресеты для 2-го выхода:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium)
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    SecondExitPreset.entries.forEach { preset ->
+                        AssistChip(
+                            onClick = { controller.applySecondExitPreset(preset) },
+                            label = {
+                                Text(
+                                    if (preset.builtInCidrs.isNotBlank()) "${preset.title} (готовые IP)" else preset.title,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        )
+                    }
+                }
 
                 OutlinedTextField(
                     value = s.secondExitDomains,
@@ -222,8 +358,8 @@ fun RoutesScreen(state: DesktopUiState, controller: DesktopController) {
 
                 val cidrCount = SplitRoutes.prefixesOf(s.secondExitCidrs).size
                 Text(
-                    if (cidrCount > 0) "Собрано подсетей для второго выхода: $cidrCount. При падении сервера трафик вернётся в WARP."
-                    else "Адреса ещё не собраны — нажмите «Собрать IP через DoH».",
+                    if (cidrCount > 0) "Собрано подсетей для второго выхода: $cidrCount. Если сервер не ответит (например, порт 51820 режется провайдером), трафик автоматически вернётся в WARP."
+                    else "Адреса ещё не собраны — нажмите «Telegram (готовые IP)» или «Собрать IP через DoH».",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

@@ -512,10 +512,18 @@ class NativeWintunTunnelManager(
                 val secondLatch = CountDownLatch(1)
                 val udp2 = runCatching { udpFactory(secondParsed.endpoint) }.getOrNull()
                 if (udp2 != null) {
+                    val primaryIpBytes = Ipv4Nat.ipv4Bytes(cfg.account.ipv4)
+                    val secondaryIpBytes = Ipv4Nat.ipv4Bytes(secondParsed.account.ipv4)
+                    val needNat = primaryIpBytes != null && secondaryIpBytes != null && !primaryIpBytes.contentEquals(secondaryIpBytes)
+                    val secondIn = if (needNat) NatRewriteInputStream(lane1, primaryIpBytes!!, secondaryIpBytes!!) else lane1
+                    val secondOut = if (needNat) NatRewriteOutputStream(tunOutShared, primaryIpBytes!!, secondaryIpBytes!!) else tunOutShared
+                    if (needNat) {
+                        onLog("[Второй выход] 1:1 IPv4 NAT активен (${cfg.account.ipv4} ↔ ${secondParsed.account.ipv4})")
+                    }
                     val plane2 = DataPlane(
                         udp = udp2,
-                        tunInput = lane1,
-                        tunOutput = tunOutShared,
+                        tunInput = secondIn,
+                        tunOutput = secondOut,
                         config = secondParsed,
                         settings = NetSettings(attempts = 3, timeoutMs = 1500),
                         onTunnelUp = { secondLatch.countDown() },
