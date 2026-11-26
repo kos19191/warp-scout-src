@@ -794,6 +794,10 @@ class WarpVpnService : VpnService() {
             handleCheckRequest(startId)
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_WIFI_DIAGNOSTIC) {
+            handleWifiDiagnostic(startId)
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_SPEED) {
             handleSpeedRequest(startId)
             return START_NOT_STICKY
@@ -969,6 +973,7 @@ class WarpVpnService : VpnService() {
         // повтор, ожидание сети), увидит его и остановится, а не поднимет туннель «без хозяина».
         destroyed = true
         wanted = false
+        cancelWifiDiagnostic()
         shutdown()
         if (live === this) live = null
         super.onDestroy()
@@ -1998,6 +2003,7 @@ class WarpVpnService : VpnService() {
         )
         TunnelState.status = getString(R.string.notif_active, cfg.endpoint.render())
         postNotification(getString(R.string.notif_active, cfg.endpoint.render()))
+        if (!quietSession) scheduleWifiDiagnostic(WIFI_DIAGNOSTIC_FIRST_MS)
         // Прежние соединения приложений: после смены сети — сбросить все, иначе — зависшие (с 1.10.50-beta1).
         if (!quietSession) resetStaleConnections(myEpoch)
         // Тихая проверка соседних точек: сессию не трогает, очередь держит свежей. Проверке подбора
@@ -3407,8 +3413,64 @@ class WarpVpnService : VpnService() {
      * как ходит сам Telegram, с проверкой, что сервер — в сетях Telegram. Сокет обычный, без protect:
      * идёт через туннель, а подсети Telegram — через второй выход, если они сейчас там.
      */
-    private fun runTelegramMedia(): TelegramMedia.Fetch = TelegramMedia.fetch(
-        resolve = { host -> java.net.InetAddress.getAllByName(host).mapNotNull { it.hostAddress } }
+    private fun runTelegramMedia(maxBytes: Int = TelegramMedia.PROBE_BYTES): TelegramMedia.Fetch = TelegramMedia.fetch(
+        resolve = { host -> java.net.InetAddress.getAllByName(host).mapNotNull { it.hostAddress } },
+        maxBytes = maxBytes
+    )
+
+    /** Cloudflare trace напрямую по выбранной физической сети: показывает, использует ли WARP сам роутер. */
+    private fun cloudflareTraceOnNetwork(network: android.net.Network): dev.warpscout.core.net.CfTrace? = runCatching {
+        val connection = network.openConnection(java.net.URL("https://www.cloudflare.com/cdn-cgi/trace"))
+            as? javax.net.ssl.HttpsURLConnection ?: return@runCatching null
+        connection.connectTimeout = 5_000
+        connection.readTimeout = 5_000
+        connection.useCaches = false
+        try {
+            val body = connection.inputStream.bufferedReader().use { reader ->
+                val out = StringBuilder()
+                val buf = CharArray(1024)
+                while (out.length < 8_192) {
+                    val n = reader.read(buf, 0, minOf(buf.size, 8_192 - out.length))
+                    if (n <= 0) break
+                    out.append(buf, 0, n)
+                }
+                out.toString()
+            }
+            dev.warpscout.core.net.CfTrace.parse(body)
+        } finally {
+            connection.disconnect()
+        }
+    }.getOrNull()
+
+    /** Та же медиа-проба, но через физическую сеть Wi-Fi, мимо VPN-интерфейса WilyScout. */
+    private fun runTelegramMediaOnNetwork(
+        network: android.net.Network,
+        maxBytes: Int
+    ): TelegramMedia.Fetch = TelegramMedia.fetch(
+        resolve = { host -> network.getAllByName(host).mapNotNull { it.hostAddress } },
+        connector = TelegramMedia.Connector { ip, host, port, timeoutMs ->
+            val raw = network.socketFactory.createSocket()
+            try {
+                raw.connect(InetSocketAddress(ip, port), timeoutMs)
+                raw.soTimeout = timeoutMs
+                val ssl = (javax.net.ssl.SSLSocketFactory.getDefault() as javax.net.ssl.SSLSocketFactory)
+                    .createSocket(raw, host, port, true) as javax.net.ssl.SSLSocket
+                val params = ssl.sslParameters
+                params.serverNames = listOf(javax.net.ssl.SNIHostName(host))
+                params.endpointIdentificationAlgorithm = "HTTPS"
+                ssl.sslParameters = params
+                ssl.startHandshake()
+                if (!TelegramMedia.certMatches(ssl.session, host)) {
+                    ssl.close()
+                    throw javax.net.ssl.SSLPeerUnverifiedException("сертификат не для $host")
+                }
+                ssl
+            } catch (e: Exception) {
+                runCatching { raw.close() }
+                throw e
+            }
+        },
+        maxBytes = maxBytes
     )
 
     /**
@@ -3417,8 +3479,11 @@ class WarpVpnService : VpnService() {
      * отдельно (/32 или вырезом из подсетей Telegram); остальной Telegram остаётся, где был. Без
      * второго выхода в этой сессии или если Telegram и так идёт этим путём — обычная загрузка.
      */
-    private fun probeTelegram(viaSecond: Boolean): TelegramMedia.Fetch {
-        if (secondDispatcher == null || viaSecond == tgViaSecond) return runTelegramMedia()
+    private fun probeTelegram(
+        viaSecond: Boolean,
+        maxBytes: Int = TelegramMedia.PROBE_BYTES
+    ): TelegramMedia.Fetch {
+        if (secondDispatcher == null || viaSecond == tgViaSecond) return runTelegramMedia(maxBytes)
         try {
             return TelegramMedia.fetch(resolve = { host ->
                 val all = java.net.InetAddress.getAllByName(host).mapNotNull { it.hostAddress }
@@ -3433,7 +3498,7 @@ class WarpVpnService : VpnService() {
                     }
                     listOf(ip)
                 }
-            })
+            }, maxBytes = maxBytes)
         } finally {
             synchronized(routerLock) {
                 if (probeHosts.isNotEmpty()) {
@@ -3469,6 +3534,127 @@ class WarpVpnService : VpnService() {
         } finally {
             runCatching { conn.disconnect() }
         }
+    }
+
+    /**
+     * В бете 1.10.50-beta2 — ночной снимок только на Wi-Fi. Android не может увидеть из телефона,
+     * какой VPN или правила стоят в роутере; фиксируем доступный факт: сеть/шлюз, WARP-выход
+     * Cloudflare и загрузку медиа Telegram отдельно через WARP и второй выход. Пробы не меняют
+     * выбранный маршрут Telegram и ограничены 128 КБ на каждый путь.
+     */
+    private val wifiDiagnosticBusy = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private fun wifiDiagnosticAllowed(): Boolean =
+        dev.warpscout.app.BuildConfig.BETA && !quietSession &&
+            dev.warpscout.app.NetIdentity.kindPart(memoryNetKind()) == dev.warpscout.app.NetIdentity.WIFI
+
+    private fun wifiDiagnosticPendingIntent(): android.app.PendingIntent? = runCatching {
+        android.app.PendingIntent.getService(
+            this,
+            WIFI_DIAGNOSTIC_REQUEST,
+            Intent(this, WarpVpnService::class.java).apply { action = ACTION_WIFI_DIAGNOSTIC },
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+    }.getOrNull()
+
+    private fun cancelWifiDiagnostic() {
+        val alarm = getSystemService(android.content.Context.ALARM_SERVICE) as? android.app.AlarmManager ?: return
+        wifiDiagnosticPendingIntent()?.let { runCatching { alarm.cancel(it) } }
+    }
+
+    private fun scheduleWifiDiagnostic(delayMs: Long = WIFI_DIAGNOSTIC_INTERVAL_MS) {
+        if (!wifiDiagnosticAllowed() || !wanted || !TunnelState.up) {
+            cancelWifiDiagnostic()
+            return
+        }
+        val alarm = getSystemService(android.content.Context.ALARM_SERVICE) as? android.app.AlarmManager ?: return
+        val pending = wifiDiagnosticPendingIntent() ?: return
+        runCatching {
+            alarm.setAndAllowWhileIdle(
+                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                android.os.SystemClock.elapsedRealtime() + delayMs,
+                pending
+            )
+        }.onFailure { TunnelDebug.stage("диагностика Wi-Fi: не удалось поставить ночную проверку (${it.javaClass.simpleName})") }
+    }
+
+    private fun handleWifiDiagnostic(startId: Int) {
+        if (plane == null || worker?.isAlive != true || !TunnelState.up || !wanted || !wifiDiagnosticAllowed()) {
+            cancelWifiDiagnostic()
+            idleStop(startId)
+            return
+        }
+        // Пока человек пользуется телефоном, достаточно штатных проверок при открытии экрана.
+        if (isScreenOn() || linkCheckBusy.get() || !wifiDiagnosticBusy.compareAndSet(false, true)) {
+            scheduleWifiDiagnostic()
+            return
+        }
+        val wake = runCatching {
+            (getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager)
+                .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "WilyScout:WifiDiagnostic")
+                .apply { setReferenceCounted(false); acquire(WIFI_DIAGNOSTIC_WAKE_MS) }
+        }.getOrNull()
+        val myEpoch = epoch.get()
+        Thread({
+            try {
+                if (!linkAlive(myEpoch)) return@Thread
+                val network = memoryNetKind()
+                TunnelDebug.stage(
+                    "ночная диагностика Wi-Fi: сеть «$network», экран выключен, WARP-точка ${TunnelState.endpoint.ifBlank { "?" }}; " +
+                        "роутерный VPN с телефона не виден напрямую"
+                )
+                val link = runLinkCheck()
+                if (!linkAlive(myEpoch)) return@Thread
+                val cloudflare = when (link.web) {
+                    TunnelStatus.LINK_OK -> "Cloudflare: warp=on${if (link.exit.isNotBlank()) ", ${link.exit}" else ""}"
+                    TunnelStatus.LINK_BYPASS -> "Cloudflare: warp=off${if (link.exit.isNotBlank()) ", ${link.exit}" else ""}"
+                    else -> "Cloudflare trace: нет ответа (${link.webNote})"
+                }
+                val telegramTcp = when (link.tg) {
+                    TunnelStatus.LINK_OK -> "Telegram TCP ✓ ${link.tgMs} мс"
+                    TunnelStatus.LINK_BYPASS -> "Telegram TCP — вне маршрутов WilyScout"
+                    else -> "Telegram TCP ✗ не отвечает"
+                }
+                TunnelDebug.stage("ночная диагностика пути: $cloudflare; $telegramTcp")
+                // Сначала проверяем сам путь роутера, привязав сокет к физической Wi-Fi-сети и
+                // обойдя VPN WilyScout. Это отделяет неисправность Podkop/роутера от проблем WARP.
+                val underlay = baselineNetwork
+                if (underlay != null) {
+                    val routerTrace = cloudflareTraceOnNetwork(underlay)
+                    val routerWarp = when {
+                        routerTrace == null -> "роутерный Cloudflare trace: не ответил или ответ не распознан"
+                        else -> "роутерный Cloudflare trace: warp=${routerTrace.warp.ifBlank { "неизвестно" }}" +
+                            (if (routerTrace.summary().isNotBlank()) ", ${routerTrace.summary()}" else "")
+                    }
+                    TunnelDebug.stage(routerWarp)
+                    val router = runTelegramMediaOnNetwork(underlay, WIFI_DIAGNOSTIC_BYTES)
+                    if (!linkAlive(myEpoch)) return@Thread
+                    reportCompare(router, "Wi-Fi-роутер (в обход VPN WilyScout)")
+                } else {
+                    TunnelDebug.stage("ночная диагностика Telegram: физическая Wi-Fi-сеть недоступна для отдельной пробы")
+                }
+                // Даже если Telegram исключён из маршрутов WilyScout, проба полезна: покажет,
+                // что отвечает на обычном пути этой Wi-Fi. Сравнение не меняет настройки.
+                val warp = probeTelegram(viaSecond = false, maxBytes = WIFI_DIAGNOSTIC_BYTES)
+                if (!linkAlive(myEpoch)) return@Thread
+                reportCompare(warp, "WARP (ночная диагностика; маршрут не меняю)")
+                if (secondDispatcher != null && TunnelState.second == TunnelStatus.SECOND_UP) {
+                    val second = probeTelegram(viaSecond = true, maxBytes = WIFI_DIAGNOSTIC_BYTES)
+                    if (!linkAlive(myEpoch)) return@Thread
+                    reportCompare(second, "${secondLabel()} (ночная диагностика; маршрут не меняю)")
+                } else {
+                    TunnelDebug.stage("ночная диагностика Telegram: второй выход не поднят — сравнение пропущено")
+                }
+            } catch (e: InterruptedException) {
+                // Сервис завершён.
+            } catch (e: Throwable) {
+                TunnelDebug.stage("ночная диагностика Wi-Fi не удалась: ${e.javaClass.simpleName} ${e.message.orEmpty().take(80)}")
+            } finally {
+                runCatching { if (wake?.isHeld == true) wake.release() }
+                wifiDiagnosticBusy.set(false)
+                scheduleWifiDiagnostic()
+            }
+        }, "warpscout-wifi-diagnostic").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }.start()
     }
 
     /** Строка в журнал: что проверили и что из этого следует. */
@@ -6525,6 +6711,9 @@ class WarpVpnService : VpnService() {
         /** Проверить связь через туннель (см. handleCheckRequest). */
         const val ACTION_CHECK = "dev.warpscout.app.tunnel.CHECK"
 
+        /** Тихая ночная диагностика Wi-Fi в beta 1.10.50-beta2. */
+        const val ACTION_WIFI_DIAGNOSTIC = "dev.warpscout.app.tunnel.WIFI_DIAGNOSTIC"
+
         /** Поднять последнюю рабочую конфигурацию: после загрузки и обновления (см. TunnelAutoStart). */
         const val ACTION_AUTOSTART = "dev.warpscout.app.tunnel.AUTOSTART"
 
@@ -6580,6 +6769,13 @@ class WarpVpnService : VpnService() {
 
         /** Пометка проверки связи «ответ пришёл, но не через WARP» — по ней узнаём «трафик мимо туннеля». */
         private const val BYPASS_WARP_NOTE = "ответ пришёл мимо WARP"
+
+        /** Ночная диагностика: первые 10 минут после подъёма, затем раз в полчаса. */
+        private const val WIFI_DIAGNOSTIC_FIRST_MS = 10 * 60_000L
+        private const val WIFI_DIAGNOSTIC_INTERVAL_MS = 30 * 60_000L
+        private const val WIFI_DIAGNOSTIC_WAKE_MS = 45_000L
+        private const val WIFI_DIAGNOSTIC_BYTES = 128 * 1024
+        private const val WIFI_DIAGNOSTIC_REQUEST = 4203
 
         /** «Трафик мимо туннеля» переподнимаем не чаще раза в 15 минут (с 1.10.44-beta1). */
         private const val BYPASS_HEAL_GAP_MS = 15 * 60_000L
