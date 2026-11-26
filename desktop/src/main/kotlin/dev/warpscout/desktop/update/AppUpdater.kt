@@ -167,22 +167,45 @@ object AppUpdater {
     fun currentExeFile(): File? =
         System.getProperty("jpackage.app-path")?.takeIf { it.isNotBlank() }?.let { File(it) }?.takeIf { it.isFile }
 
+    private const val PREVIEW_RELEASE_TAG = "desktop-windows-preview"
+
     fun checkForUpdate(
         current: BuildInfo = BuildInfo.current,
         includePrereleases: Boolean = true,
         fetcher: (String) -> String? = ::httpGetText
     ): UpdateCheckResult {
-        val apiUrl = "https://api.github.com/repos/${current.githubRepo}/releases?per_page=10"
-        val body = fetcher(apiUrl)
-            ?: return UpdateCheckResult(
+        // 1. Всегда напрямую запрашиваем выделенный Windows-тег `desktop-windows-preview`:
+        //    Android-релизы в том же репозитории не смогут вытеснить его со страницы /releases.
+        // 2. Дополнительно читаем /releases?per_page=30 на случай будущих стабильных Windows-тегов.
+        val tagUrl = "https://api.github.com/repos/${current.githubRepo}/releases/tags/$PREVIEW_RELEASE_TAG"
+        val listUrl = "https://api.github.com/repos/${current.githubRepo}/releases?per_page=30"
+
+        val bodies = buildList {
+            if (includePrereleases) {
+                fetcher(tagUrl)?.let { add(it) }
+            }
+            fetcher(listUrl)?.let { add(it) }
+        }
+        if (bodies.isEmpty()) {
+            return UpdateCheckResult(
                 ok = false,
                 updateAvailable = false,
                 error = "Не удалось связаться с GitHub Releases (проверьте интернет или включите туннель)"
             )
+        }
 
-        val releases = parseReleasesJson(body)
-            .filter { it.msiAsset != null || it.portableAsset != null }
-            .filter { includePrereleases || !it.prerelease }
+        val byTag = LinkedHashMap<String, ReleaseInfo>()
+        for (body in bodies) {
+            for (rel in parseReleasesJson(body)) {
+                if (rel.msiAsset == null && rel.portableAsset == null) continue
+                if (!includePrereleases && rel.prerelease) continue
+                val existing = byTag[rel.tagName]
+                if (existing == null || rel.primaryAssetEpochMs > existing.primaryAssetEpochMs) {
+                    byTag[rel.tagName] = rel
+                }
+            }
+        }
+        val releases = byTag.values.toList()
 
         if (releases.isEmpty()) {
             return UpdateCheckResult(

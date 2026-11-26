@@ -288,13 +288,9 @@ jobs:
           } > notes.md
 
           if gh release view "$TAG" > /dev/null 2>&1; then
-            # Удаляем устаревшие .msi/.zip от прошлых версий (включая старые WarpScout-*), чтобы в релизе была только актуальная сборка.
-            OLD_ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' | grep -E '\.(msi|zip)$' | grep -v "WilyScout-$VERSION-" || true)
-            for asset in $OLD_ASSETS; do
-              gh release delete-asset "$TAG" "$asset" --yes || true
-            done
-            gh release edit "$TAG" --title "WilyScout Desktop $VERSION (Windows)" --notes-file notes.md --prerelease
-            gh release upload "$TAG" out-win/* --clobber
-          else
-            gh release create "$TAG" out-win/* --title "WilyScout Desktop $VERSION (Windows)" --notes-file notes.md --target "$GITHUB_SHA" --prerelease
+            # Пересоздаём релиз с тем же тегом, чтобы обновился published_at:
+            # иначе Android-релизы в том же репозитории вытесняют desktop-windows-preview
+            # за пределы первых 10 релизов в GitHub API (и старые версии <= 1.10.34 перестают его видеть).
+            gh release delete "$TAG" --cleanup-tag --yes || true
           fi
+          gh release create "$TAG" out-win/* --title "WilyScout Desktop $VERSION (Windows)" --notes-file notes.md --target "$GITHUB_SHA" --prerelease

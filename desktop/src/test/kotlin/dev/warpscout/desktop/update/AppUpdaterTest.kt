@@ -255,4 +255,60 @@ class AppUpdaterTest {
         assertFalse(oldJar.exists(), "Stale old jar in app/ must be removed by robocopy /MIR")
         assertTrue(userNotes.isFile && userNotes.readText() == "keep-me", "User files in root must be preserved")
     }
+
+    @Test
+    fun `checkForUpdate finds desktop-windows-preview even when releases list has only Android APKs`() {
+        val androidOnlyList = """
+            [
+              {
+                "tag_name": "v1.10.49-beta7",
+                "name": "WilyScout 1.10.49-beta7",
+                "prerelease": true,
+                "draft": false,
+                "published_at": "2026-11-26T09:24:14Z",
+                "assets": [
+                  {
+                    "name": "WilyScout-1.10.49-beta7.apk",
+                    "browser_download_url": "https://example/app.apk",
+                    "size": 12000000
+                  }
+                ]
+              }
+            ]
+        """.trimIndent()
+        val desktopTagObj = """
+            {
+              "tag_name": "desktop-windows-preview",
+              "name": "WilyScout Desktop 1.10.35 (Windows)",
+              "prerelease": true,
+              "draft": false,
+              "published_at": "2026-11-26T09:30:00Z",
+              "assets": [
+                {
+                  "name": "WilyScout-1.10.35-windows-x64.msi",
+                  "browser_download_url": "https://example/WilyScout-1.10.35-windows-x64.msi",
+                  "size": 109000000,
+                  "updated_at": "2026-11-26T09:30:00Z"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val cur = BuildInfo("1.10.33", "2026-11-26T03:00:00Z", "abc", "kos19191/warp-scout-src")
+        val check = AppUpdater.checkForUpdate(
+            current = cur,
+            includePrereleases = true,
+            fetcher = { url ->
+                when {
+                    "/releases/tags/desktop-windows-preview" in url -> desktopTagObj
+                    "/releases?" in url -> androidOnlyList
+                    else -> null
+                }
+            }
+        )
+        assertTrue(check.ok)
+        assertTrue(check.updateAvailable)
+        assertEquals("1.10.35", check.release?.version)
+        assertEquals("WilyScout-1.10.35-windows-x64.msi", check.release?.msiAsset?.name)
+    }
 }

@@ -8,7 +8,7 @@ plugins {
     id("org.jetbrains.compose")
 }
 
-val appVersion = "1.10.34"
+val appVersion = "1.10.35"
 val githubRepo = "kos19191/warp-scout-src"
 
 val generatedBuildInfoDir = layout.buildDirectory.dir("generated/resources/buildinfo")
