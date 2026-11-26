@@ -148,6 +148,8 @@ data class DesktopUiState(
     // Подбор бесплатных MTProto-прокси (Fake-TLS) для Telegram
     val tgProxyBusy: Boolean = false,
     val tgProxyStatus: String = "",
+    val tgActionStatus: String = "",
+    val tgActionIsError: Boolean = false,
     val tgProxies: List<TelegramProxyEntry> = emptyList(),
 
     // Обновления из GitHub Releases
@@ -952,49 +954,86 @@ class DesktopController(
         }
     }
 
+    /** Сохраняет выбранный пользователем путь к Telegram.exe. */
+    fun setTelegramExePath(path: String) {
+        val clean = path.trim()
+        updateSettings { it.copy(telegramExePath = clean) }
+        val msg = if (clean.isBlank()) "Путь к Telegram.exe сброшен на автопоиск" else "Указан клиент Telegram: $clean"
+        appendLog(msg)
+        _state.update { it.copy(tgActionStatus = msg, tgActionIsError = false) }
+        showBanner(msg)
+    }
+
     /** Передаёт выбранный MTProto-прокси напрямую в Telegram Desktop (без открытия браузера). */
     fun openTelegramProxy(entry: TelegramProxyEntry, onFallbackCopy: (String) -> Unit = {}) {
+        _state.update { it.copy(tgActionStatus = "Открываю ${entry.server}:${entry.port} в Telegram…", tgActionIsError = false) }
         auxWorker.execute {
-            val res = TelegramOpener.openTgLink(entry.tgLink)
-            if (res.opened) {
-                appendLog("MTProto → Telegram (${entry.server}:${entry.port}): ${res.message}", LogLevel.OK)
-                showBanner(res.message)
-            } else {
+            try {
+                val res = TelegramOpener.openTgLink(
+                    tgUrl = entry.tgLink,
+                    customExePath = _state.value.settings.telegramExePath
+                )
+                if (res.opened) {
+                    appendLog("MTProto → Telegram (${entry.server}:${entry.port}): ${res.message} [${res.detail}]", LogLevel.OK)
+                    _state.update { it.copy(tgActionStatus = res.message, tgActionIsError = false) }
+                    showBanner(res.message)
+                } else {
+                    onFallbackCopy(entry.tmeLink)
+                    appendLog("MTProto → Telegram: ${res.message} [${res.detail}]", LogLevel.WARN)
+                    _state.update { it.copy(tgActionStatus = res.message, tgActionIsError = true) }
+                    showBanner(res.message, isError = true)
+                }
+            } catch (t: Throwable) {
                 onFallbackCopy(entry.tmeLink)
-                appendLog("MTProto → Telegram: ${res.message}", LogLevel.WARN)
-                showBanner(res.message, isError = true)
+                val msg = "Ошибка передачи в Telegram (${t.javaClass.simpleName}: ${t.message}) — ссылка скопирована в буфер"
+                appendLog(msg, LogLevel.ERROR)
+                _state.update { it.copy(tgActionStatus = msg, tgActionIsError = true) }
+                showBanner(msg, isError = true)
             }
         }
     }
 
     /** Включает встроенный ByeDPI (если выключен) и передаёт SOCKS5 127.0.0.1:<port> напрямую в Telegram Desktop. */
     fun openByeDpiInTelegram(onFallbackCopy: (String) -> Unit = {}) {
+        _state.update { it.copy(tgActionStatus = "Запускаю ByeDPI и передаю SOCKS5 в Telegram…", tgActionIsError = false) }
         auxWorker.execute {
             val s = _state.value.settings
-            if (!byeDpiManager.snapshot.running && byeDpiManager.snapshot.available) {
-                byeDpiManager.start(
-                    presetId = s.byeDpiPresetId,
-                    port = s.byeDpiPort,
-                    customArgs = s.byeDpiCustomArgs,
-                    enableSystemProxy = s.byeDpiSystemProxy,
-                    bypassTunnel = s.byeDpiBypassTunnel,
-                    pacDomainsText = s.byeDpiPacDomains
-                )
-                _state.update { it.copy(byeDpi = byeDpiManager.snapshot) }
-            }
             val port = _state.value.byeDpi.port.takeIf { it in 1024..65535 } ?: s.byeDpiPort
-            val tgLink = TelegramProxyEntry.socksTgLink("127.0.0.1", port)
-            val res = TelegramOpener.openTgLink(tgLink)
-            if (res.opened) {
-                appendLog("ByeDPI SOCKS5 (127.0.0.1:$port) → Telegram: ${res.message}", LogLevel.OK)
-                showBanner(res.message)
-            } else {
-                onFallbackCopy("127.0.0.1:$port")
-                appendLog("ByeDPI → Telegram: ${res.message}", LogLevel.WARN)
-                showBanner(
-                    "Telegram Desktop не найден — добавьте вручную: SOCKS5 127.0.0.1:$port (скопировано в буфер)",
-                    isError = true
+            try {
+                if (!byeDpiManager.snapshot.running && byeDpiManager.snapshot.available) {
+                    byeDpiManager.start(
+                        presetId = s.byeDpiPresetId,
+                        port = s.byeDpiPort,
+                        customArgs = s.byeDpiCustomArgs,
+                        enableSystemProxy = s.byeDpiSystemProxy,
+                        bypassTunnel = s.byeDpiBypassTunnel,
+                        pacDomainsText = s.byeDpiPacDomains
+                    )
+                    _state.update { it.copy(byeDpi = byeDpiManager.snapshot) }
+                }
+                val activePort = _state.value.byeDpi.port.takeIf { it in 1024..65535 } ?: port
+                val tgLink = TelegramProxyEntry.socksTgLink("127.0.0.1", activePort)
+                val res = TelegramOpener.openTgLink(
+                    tgUrl = tgLink,
+                    customExePath = s.telegramExePath
                 )
+                if (res.opened) {
+                    appendLog("ByeDPI SOCKS5 (127.0.0.1:$activePort) → Telegram: ${res.message} [${res.detail}]", LogLevel.OK)
+                    _state.update { it.copy(tgActionStatus = res.message, tgActionIsError = false) }
+                    showBanner(res.message)
+                } else {
+                    onFallbackCopy("127.0.0.1:$activePort")
+                    val msg = "Telegram не найден — добавьте вручную: SOCKS5 127.0.0.1:$activePort (скопировано) или укажите Telegram.exe"
+                    appendLog("ByeDPI → Telegram: ${res.message} [${res.detail}]", LogLevel.WARN)
+                    _state.update { it.copy(tgActionStatus = msg, tgActionIsError = true) }
+                    showBanner(msg, isError = true)
+                }
+            } catch (t: Throwable) {
+                onFallbackCopy("127.0.0.1:$port")
+                val msg = "Ошибка передачи ByeDPI в Telegram (${t.javaClass.simpleName}: ${t.message}) — адрес 127.0.0.1:$port скопирован"
+                appendLog(msg, LogLevel.ERROR)
+                _state.update { it.copy(tgActionStatus = msg, tgActionIsError = true) }
+                showBanner(msg, isError = true)
             }
         }
     }

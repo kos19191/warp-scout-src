@@ -117,11 +117,12 @@ class TelegramProxyFinderTest {
     }
 
     @Test
-    fun `TelegramOpener parses registry command with Cyrillic paths and workdir`() {
-        val regCmd = """"C:\Users\Администратор\AppData\Roaming\Telegram Desktop\Telegram.exe" -workdir "C:/Users/Администратор/AppData/Roaming/Telegram Desktop/" -- "%1""""
+    fun `TelegramOpener parses registry command with Cyrillic paths and normalizes workdir`() {
+        val regCmd = """"C:\Users\Администратор\AppData\Roaming\Telegram Desktop\Telegram.exe" -workdir "C:\Users\Администратор\AppData\Roaming\Telegram Desktop\" -- "%1""""
         val spec = TelegramOpener.parseRegistryCommand(regCmd)
         assertEquals("""C:\Users\Администратор\AppData\Roaming\Telegram Desktop\Telegram.exe""", spec?.exePath)
         assertEquals("""C:/Users/Администратор/AppData/Roaming/Telegram Desktop/""", spec?.workDir)
+        assertFalse(spec?.isStoreApp ?: true)
 
         val tgUrl = "tg://proxy?server=1.2.3.4&port=443&secret=ee123456"
         val args = TelegramOpener.buildLaunchArgs(spec!!, tgUrl)
@@ -135,25 +136,40 @@ class TelegramProxyFinderTest {
             ),
             args
         )
+
+        // Браузер в реестре tg:// должен игнорироваться.
+        val browserCmd = """"C:\Program Files\Google\Chrome\Application\chrome.exe" -- "%1""""
+        assertNull(TelegramOpener.parseRegistryCommand(browserCmd))
     }
 
     @Test
-    fun `TelegramOpener prefers running portable Telegram over registry path`() {
+    fun `TelegramOpener prefers running portable Telegram and marks WindowsApps store client`() {
         val portableExe = """D:\Portable\Telegram\Telegram.exe"""
         val regCmd = """"C:\Users\User\AppData\Roaming\Telegram Desktop\Telegram.exe" -workdir "C:/Users/User/TD/" -- "%1""""
         val spec = TelegramOpener.findTelegramClient(
-            runningExePaths = listOf(portableExe),
+            runningProcesses = listOf(TelegramOpener.RunningProcess(4242L, portableExe)),
             registryCommand = regCmd,
             standardCandidates = emptyList(),
             fileExists = { true }
         )
         assertEquals(portableExe, spec?.exePath)
+        assertEquals(4242L, spec?.runningPid)
         assertNull(spec?.workDir, "Портативный процесс не должен получать чужой -workdir из реестра")
         assertEquals("running", spec?.source)
+
+        val storeExe = """C:\Program Files\WindowsApps\TelegramMessengerLLP.TelegramDesktop_5.0.0\Telegram.exe"""
+        assertTrue(TelegramOpener.isWindowsStorePath(storeExe))
+        val storeSpec = TelegramOpener.findTelegramClient(
+            runningProcesses = listOf(TelegramOpener.RunningProcess(999L, storeExe)),
+            registryCommand = null,
+            standardCandidates = emptyList(),
+            fileExists = { false }
+        )
+        assertTrue(storeSpec?.isStoreApp == true)
     }
 
     @Test
-    fun `TelegramOpener rejects non-tg urls and does not launch browser when client missing`() {
+    fun `TelegramOpener rejects non-tg urls and falls back cleanly on missing or failed launch`() {
         val bad = TelegramOpener.openTgLink("https://t.me/proxy?server=1.2.3.4")
         assertFalse(bad.opened)
 
@@ -161,10 +177,28 @@ class TelegramProxyFinderTest {
             val missing = TelegramOpener.openTgLink(
                 tgUrl = "tg://socks?server=127.0.0.1&port=1080",
                 specOverride = null,
-                processStarter = { _, _ -> false },
-                shellFallback = { false }
+                processStarter = { _, _ -> false to "not-called" },
+                shellFallback = { false },
+                foregroundBumper = {}
             )
             assertFalse(missing.opened)
+
+            var shellCalled = false
+            val storeRes = TelegramOpener.openTgLink(
+                tgUrl = "tg://proxy?server=1.2.3.4&port=443&secret=ee1234",
+                specOverride = TelegramLaunchSpec(
+                    exePath = """C:\Program Files\WindowsApps\TelegramMessengerLLP.TelegramDesktop\Telegram.exe""",
+                    isStoreApp = true
+                ),
+                processStarter = { _, _ -> error("Store app must not be launched directly via ProcessBuilder") },
+                shellFallback = {
+                    shellCalled = true
+                    true
+                },
+                foregroundBumper = {}
+            )
+            assertTrue(shellCalled)
+            assertTrue(storeRes.opened)
         }
     }
 }

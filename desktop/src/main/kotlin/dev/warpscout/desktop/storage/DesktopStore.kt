@@ -173,6 +173,7 @@ class DesktopStore(val paths: DesktopPaths) {
             "byeDpiSystemProxy" to JsonVal.bool(s.byeDpiSystemProxy),
             "byeDpiBypassTunnel" to JsonVal.bool(s.byeDpiBypassTunnel),
             "byeDpiPacDomains" to JsonVal.str(s.byeDpiPacDomains),
+            "telegramExePath" to JsonVal.str(s.telegramExePath),
             "byeDpiNetworkProfiles" to JsonVal.arr(
                 s.byeDpiNetworkProfiles.values.map { p ->
                     JsonVal.obj(
@@ -244,6 +245,7 @@ class DesktopStore(val paths: DesktopPaths) {
                 byeDpiSystemProxy = o.bool("byeDpiSystemProxy") ?: d.byeDpiSystemProxy,
                 byeDpiBypassTunnel = o.bool("byeDpiBypassTunnel") ?: d.byeDpiBypassTunnel,
                 byeDpiPacDomains = o.str("byeDpiPacDomains")?.takeIf { it.isNotBlank() } ?: d.byeDpiPacDomains,
+                telegramExePath = o.str("telegramExePath") ?: d.telegramExePath,
                 byeDpiNetworkProfiles = o.arr("byeDpiNetworkProfiles")?.items?.mapNotNull { item ->
                     val po = item as? JsonVal.Obj ?: return@mapNotNull null
                     val key = po.str("networkKey")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null

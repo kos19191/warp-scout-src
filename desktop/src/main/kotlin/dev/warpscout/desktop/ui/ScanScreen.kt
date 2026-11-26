@@ -698,6 +698,56 @@ fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
                 )
             }
 
+            if (state.tgActionStatus.isNotBlank()) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (state.tgActionIsError) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f)
+                    else warp.surfaceHigh.copy(alpha = 0.75f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        state.tgActionStatus,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (state.tgActionIsError) MaterialTheme.colorScheme.onErrorContainer else warp.ok,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (s.telegramExePath.isNotBlank()) "Клиент: ${java.io.File(s.telegramExePath).name}" else "Клиент: автопоиск Telegram.exe",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(
+                        onClick = {
+                            val chosen = DesktopPlatform.chooseOpenFile("Выберите Telegram.exe")
+                            if (chosen != null && chosen.isFile) {
+                                controller.setTelegramExePath(chosen.absolutePath)
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Text("Указать Telegram.exe", style = MaterialTheme.typography.labelSmall)
+                    }
+                    if (s.telegramExePath.isNotBlank()) {
+                        TextButton(
+                            onClick = { controller.setTelegramExePath("") },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text("Авто", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+            }
+
             if (state.tgProxies.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     state.tgProxies.forEach { entry ->

@@ -117,6 +117,9 @@ data class DesktopSettings(
     val byeDpiPacDomains: String = ByeDpiPac.DEFAULT_DOMAINS_TEXT,
     val byeDpiNetworkProfiles: Map<String, NetworkDpiProfile> = emptyMap(),
 
+    // Пользовательский путь к Telegram.exe (пусто — автопоиск)
+    val telegramExePath: String = "",
+
     // Экспорт
     val exportTarget: ConfTarget = ConfTarget.AMNEZIA,
 

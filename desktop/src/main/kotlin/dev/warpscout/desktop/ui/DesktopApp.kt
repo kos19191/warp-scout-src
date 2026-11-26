@@ -4,6 +4,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
@@ -158,22 +159,55 @@ fun DesktopApp(
                 }
             }
         ) { innerPadding ->
-            Box(
+            Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
             ) {
-                when (activeTab) {
-                    DesktopTab.HOME -> HomeScreen(
-                        state = state,
-                        controller = controller,
-                        onNavigateToScan = { activeTab = DesktopTab.SCAN },
-                        onNavigateToSettings = { activeTab = DesktopTab.SETTINGS }
-                    )
-                    DesktopTab.SCAN -> ScanScreen(state = state, controller = controller)
-                    DesktopTab.ROUTES -> RoutesScreen(state = state, controller = controller)
-                    DesktopTab.SETTINGS -> SettingsScreen(state = state, controller = controller)
-                    DesktopTab.LOG -> LogScreen(state = state, controller = controller)
+                state.banner?.let { msg ->
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (state.bannerIsError) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.72f)
+                        else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = msg,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(onClick = { controller.clearBanner() }, modifier = Modifier.size(24.dp)) {
+                                Icon(Icons.Rounded.Close, contentDescription = "Закрыть", modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    when (activeTab) {
+                        DesktopTab.HOME -> HomeScreen(
+                            state = state,
+                            controller = controller,
+                            onNavigateToScan = { activeTab = DesktopTab.SCAN },
+                            onNavigateToSettings = { activeTab = DesktopTab.SETTINGS }
+                        )
+                        DesktopTab.SCAN -> ScanScreen(state = state, controller = controller)
+                        DesktopTab.ROUTES -> RoutesScreen(state = state, controller = controller)
+                        DesktopTab.SETTINGS -> SettingsScreen(state = state, controller = controller)
+                        DesktopTab.LOG -> LogScreen(state = state, controller = controller)
+                    }
                 }
             }
         }

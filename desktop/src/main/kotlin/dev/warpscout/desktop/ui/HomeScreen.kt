@@ -284,32 +284,6 @@ fun HomeScreen(
             }
         }
 
-        // --- 2. Баннер уведомлений ---
-        state.banner?.let { msg ->
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                color = if (state.bannerIsError) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
-                else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = msg,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.weight(1f)
-                    )
-                    IconButton(onClick = { controller.clearBanner() }, modifier = Modifier.size(24.dp)) {
-                        Icon(Icons.Rounded.Close, contentDescription = "Закрыть", modifier = Modifier.size(16.dp))
-                    }
-                }
-            }
-        }
-
         // --- 3. Главная карточка «Одна кнопка» ---
         WarpCard(
             containerColor = warp.surfaceLow,
