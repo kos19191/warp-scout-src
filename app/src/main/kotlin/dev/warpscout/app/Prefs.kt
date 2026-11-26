@@ -765,7 +765,8 @@ class Prefs(private val context: Context) {
 
     /**
      * Какие разделы «Настроек» раскрыты (с 1.10.49-beta5, см. [SettingsAccordion]): ключи через
-     * запятую. Пусто — все свёрнуты, видны только заголовки.
+     * запятую. Пусто — все свёрнуты, видны только заголовки. С 1.10.49-beta6 здесь же ключ
+     * `apps_list` — раскрыт ли список приложений в «Маршрутах».
      */
     var settingsOpen: Set<String>
         get() = sp.getString("settingsOpen", "").orEmpty()

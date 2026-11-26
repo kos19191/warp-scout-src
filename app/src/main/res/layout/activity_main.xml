@@ -524,9 +524,9 @@
           ══════ вкладка «Маршруты» (с 1.10.49-beta5; с 1.10.31 — «Туннелирование», до того «Приложения») ══════
           Что идёт через туннель: приложения, свои сайты или списки сайтов. Приложения и сайты
           действуют вместе: через туннель идут выбранные приложения и только к выбранным сайтам.
-          «Что туннелировать» из «Настроек» переехало сюда — ids прежние, логика сохранения та же. С
-          1.10.49-beta5 здесь же второй выход и выход приложений: одна кнопка «Сохранить и применить»
-          внизу сохраняет всю вкладку.
+          «Что туннелировать» из «Настроек» переехало сюда — ids прежние, логика сохранения та же. В
+          бете 5 здесь же были второй выход и выход приложений; с 1.10.49-beta6 они на вкладке «Обход»,
+          а список приложений сворачивается. «Сохранить и применить» внизу — для этой вкладки.
         -->
         <ScrollView
             android:id="@+id/pageApps"
@@ -672,41 +672,92 @@
                         android:layout_marginTop="8dp"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
-                    <com.google.android.material.textfield.TextInputLayout
-                        android:id="@+id/tilAppSearch"
-                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                    <!--
+                      Список приложений сворачивается (с 1.10.49-beta6, человек попросил): виден заголовок
+                      с итогом — сколько отмечено и у скольких свой выход, нажатие раскрывает поиск и сам
+                      список. Раскрыт ли он, помнит Prefs.settingsOpen (ключ apps_list), как разделы
+                      «Настроек». Тело в разметке видно: не соберётся гармошка — список останется на виду.
+                      Группа целиком прячется там же, где раньше прятались поиск и список (updateAppsState).
+                    -->
+                    <LinearLayout
+                        android:id="@+id/appsListGroup"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
-                        android:hint="@string/apps_search">
+                        android:orientation="vertical">
 
-                        <com.google.android.material.textfield.TextInputEditText
-                            android:id="@+id/editAppSearch"
+                        <View style="@style/SettingsGroupDivider" />
+
+                        <LinearLayout
+                            android:id="@+id/appsListHead"
+                            style="@style/SettingsGroupHead">
+
+                            <LinearLayout
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:orientation="vertical">
+
+                                <TextView
+                                    style="@style/SettingsGroupTitle"
+                                    android:text="@string/apps_list_title"
+                                    android:textAppearance="?attr/textAppearanceTitleSmall" />
+
+                                <TextView
+                                    android:id="@+id/textAppsListSummary"
+                                    style="@style/SettingsGroupSummary" />
+                            </LinearLayout>
+
+                            <ImageView
+                                android:id="@+id/appsListArrow"
+                                style="@style/SettingsGroupArrow" />
+                        </LinearLayout>
+
+                        <LinearLayout
+                            android:id="@+id/appsListBody"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:inputType="text" />
-                    </com.google.android.material.textfield.TextInputLayout>
+                            android:orientation="vertical">
 
-                    <com.google.android.material.checkbox.MaterialCheckBox
-                        android:id="@+id/checkAppsSystem"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="@string/apps_show_system" />
+                            <com.google.android.material.textfield.TextInputLayout
+                                android:id="@+id/tilAppSearch"
+                                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="8dp"
+                                android:hint="@string/apps_search">
 
-                    <!-- С 1.10.39: что значит кнопка выхода в строке (видна, когда есть второй выход). -->
-                    <TextView
-                        android:id="@+id/textAppExitHint"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="@string/app_exit_hint"
-                        android:textAppearance="?attr/textAppearanceBodySmall"
-                        android:visibility="gone" />
+                                <com.google.android.material.textfield.TextInputEditText
+                                    android:id="@+id/editAppSearch"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:inputType="text" />
+                            </com.google.android.material.textfield.TextInputLayout>
 
-                    <LinearLayout
-                        android:id="@+id/appsBox"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical" />
+                            <com.google.android.material.checkbox.MaterialCheckBox
+                                android:id="@+id/checkAppsSystem"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:text="@string/apps_show_system" />
+
+                            <!-- С 1.10.39: что значит кнопка выхода в строке (видна, когда есть второй выход). -->
+                            <TextView
+                                android:id="@+id/textAppExitHint"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:text="@string/app_exit_hint"
+                                android:textAppearance="?attr/textAppearanceBodySmall"
+                                android:visibility="gone" />
+
+                            <LinearLayout
+                                android:id="@+id/appsBox"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="vertical" />
+                        </LinearLayout>
+
+                        <View style="@style/SettingsGroupDivider" />
+                    </LinearLayout>
 
                 </LinearLayout>
 
@@ -854,215 +905,6 @@
                     android:layout_height="wrap_content"
                     android:text="@string/feat_dns" />
 
-                <!-- С 1.10.49-beta5 «Второй выход» — здесь, рядом с тем, что идёт через туннель (было в «Настройках»). -->
-                <!-- ── второй выход (регион) ──────────────────────────────── -->
-                <TextView
-                    style="@style/SectionHeader"
-                    android:text="@string/section_second_exit" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/second_hint"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <!-- С 1.10.44 (в бете — с 1.10.44-beta5): ключ Proton кнопкой, без сайта — вход в аккаунт,
-                     без аккаунта или сторонний сервис (ProtonConnect). -->
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnProtonConnect"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="@string/btn_proton_connect" />
-
-                <!-- С 1.10.39: шаги Proton внутри приложения и конфиг из скачанного файла — без
-                     копирования текста. -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnProtonGuide"
-                        style="@style/Widget.Material3.Button.TonalButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/btn_proton_guide" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnSecondFile"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:text="@string/btn_second_file" />
-                </LinearLayout>
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchSecondExit"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:text="@string/second_switch" />
-
-                <com.google.android.material.textfield.TextInputLayout
-                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:hint="@string/hint_second_conf">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editSecondConf"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:fontFamily="monospace"
-                        android:gravity="top"
-                        android:inputType="textMultiLine"
-                        android:minLines="3" />
-                </com.google.android.material.textfield.TextInputLayout>
-
-                <!-- Proton VPN Free (с 1.10.31): конфиг узнаётся сам, сервер выбирает приложение —
-                     здесь только страна. Видно, только когда вставлен конфиг Proton. -->
-                <LinearLayout
-                    android:id="@+id/panelSecondProton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:orientation="vertical"
-                    android:visibility="gone">
-
-                    <TextView
-                        android:id="@+id/textSecondProton"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:textAppearance="?attr/textAppearanceBodySmall"
-                        android:textColor="?attr/colorOnSurfaceVariant" />
-
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
-                        android:text="@string/second_country_label"
-                        android:textAppearance="?attr/textAppearanceBodyMedium" />
-
-                    <Spinner
-                        android:id="@+id/spinnerSecondCountry"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:minHeight="48dp" />
-                </LinearLayout>
-
-                <!-- Сайты второго выхода — сами, по спискам (с 1.10.31): галочки строит код. -->
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="@string/second_sources_label"
-                    android:textAppearance="?attr/textAppearanceBodyMedium" />
-
-                <LinearLayout
-                    android:id="@+id/secondSourcesBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical" />
-
-                <com.google.android.material.textfield.TextInputLayout
-                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:hint="@string/hint_second_domains">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editSecondDomains"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:gravity="top"
-                        android:inputType="textMultiLine|textNoSuggestions"
-                        android:minLines="2" />
-                </com.google.android.material.textfield.TextInputLayout>
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchSecondViaWarp"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:text="@string/second_via_warp" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnSecondResolve"
-                    style="@style/Widget.Material3.Button.TonalButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="@string/btn_second_resolve" />
-
-                <!-- Ход и итог кнопки выше (с 1.10.32): шаг 1–3 с полосой, потом цветная строка —
-                     работает ли второй выход и что делать. Раньше итог уходил в плашку на «Главной»,
-                     а отсюда её не видно. -->
-                <com.google.android.material.progressindicator.LinearProgressIndicator
-                    android:id="@+id/progressSecond"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/space_s"
-                    android:indeterminate="true"
-                    android:visibility="gone" />
-
-                <TextView
-                    android:id="@+id/textSecondResult"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:textAppearance="?attr/textAppearanceBodyMedium"
-                    android:visibility="gone" />
-
-                <TextView
-                    android:id="@+id/textSecondState"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <!-- ── выход для приложений (с 1.10.49-beta5 здесь; было в «Настройках» → «Автоматика») ── -->
-                <TextView
-                    style="@style/SectionHeader"
-                    android:text="@string/routes_app_exit_title" />
-
-                <!-- 1.10.44-beta1: «Второй выход» — приложение целиком (TikTok без утечек мимо туннеля). -->
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchFeatSecondWhole"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/feat_second_whole" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="4dp"
-                    android:layout_marginBottom="6dp"
-                    android:text="@string/feat_second_whole_note"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <!-- 1.10.43: эксперимент «выход для приложений — сам» и итог его замеров. -->
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchFeatAppAuto"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/feat_app_auto" />
-
-                <TextView
-                    android:id="@+id/textAppAuto"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="4dp"
-                    android:layout_marginBottom="6dp"
-                    android:textAppearance="?attr/textAppearanceBodySmall"
-                    android:visibility="gone" />
-
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnSaveApps"
                     style="@style/Widget.Material3.Button"
@@ -1076,8 +918,9 @@
         <!--
           ══════ вкладка «Обход» (с 1.10.49-beta5) ══════
           Что открывается, что режет провайдер и чем это обойти: «Доступность», «Режут DPI или адрес?»
-          со стратегиями и «Прокси для Telegram». Раньше всё это лежало в «Журнале» среди окон
-          просмотра; ids прежние, логика та же.
+          со стратегиями и «Прокси для Telegram» (раньше лежали в «Журнале» среди окон просмотра), а с
+          1.10.49-beta6 и «Второй выход» с «Выходом для приложений» (в бете 5 был в «Маршрутах») и своей
+          «Сохранить и применить» внизу. ids прежние, логика та же.
         -->
         <ScrollView
             android:id="@+id/pageBypass"
@@ -1415,6 +1258,231 @@
                     android:textAppearance="?attr/textAppearanceBodySmall"
                     android:textIsSelectable="true"
                     android:visibility="gone" />
+
+                <!--
+                  ── второй выход (с 1.10.49-beta6 — здесь, на вкладке «Обход») ──
+                  Свой сервер в другой стране для сайтов и приложений, закрытых для России: Proton, свой
+                  WireGuard/AmneziaWG или ключ vpn://, какие сайты идут через него, и «Выход для
+                  приложений». В бете 5 раздел был в «Маршрутах», раньше — в «Настройках»; кнопка выхода в
+                  строке приложения осталась в списке приложений «Маршрутов». ids прежние.
+                -->
+                <TextView
+                    style="@style/SectionHeader"
+                    android:text="@string/section_second_exit" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/second_hint"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <!-- С 1.10.44 (в бете — с 1.10.44-beta5): ключ Proton кнопкой, без сайта — вход в аккаунт,
+                     без аккаунта или сторонний сервис (ProtonConnect). -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnProtonConnect"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/btn_proton_connect" />
+
+                <!-- С 1.10.39: шаги Proton внутри приложения и конфиг из скачанного файла — без
+                     копирования текста. -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnProtonGuide"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/btn_proton_guide" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnSecondFile"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:text="@string/btn_second_file" />
+                </LinearLayout>
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchSecondExit"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/second_switch" />
+
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:hint="@string/hint_second_conf">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/editSecondConf"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:gravity="top"
+                        android:inputType="textMultiLine"
+                        android:minLines="3" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <!-- Proton VPN Free (с 1.10.31): конфиг узнаётся сам, сервер выбирает приложение —
+                     здесь только страна. Видно, только когда вставлен конфиг Proton. -->
+                <LinearLayout
+                    android:id="@+id/panelSecondProton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:id="@+id/textSecondProton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:textColor="?attr/colorOnSurfaceVariant" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text="@string/second_country_label"
+                        android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+                    <Spinner
+                        android:id="@+id/spinnerSecondCountry"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:minHeight="48dp" />
+                </LinearLayout>
+
+                <!-- Сайты второго выхода — сами, по спискам (с 1.10.31): галочки строит код. -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/second_sources_label"
+                    android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+                <LinearLayout
+                    android:id="@+id/secondSourcesBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:hint="@string/hint_second_domains">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/editSecondDomains"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="top"
+                        android:inputType="textMultiLine|textNoSuggestions"
+                        android:minLines="2" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchSecondViaWarp"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/second_via_warp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnSecondResolve"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/btn_second_resolve" />
+
+                <!-- Ход и итог кнопки выше (с 1.10.32): шаг 1–3 с полосой, потом цветная строка —
+                     работает ли второй выход и что делать. Раньше итог уходил в плашку на «Главной»,
+                     а отсюда её не видно. -->
+                <com.google.android.material.progressindicator.LinearProgressIndicator
+                    android:id="@+id/progressSecond"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_s"
+                    android:indeterminate="true"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/textSecondResult"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textAppearance="?attr/textAppearanceBodyMedium"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/textSecondState"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <!-- ── выход для приложений — часть второго выхода (с 1.10.49-beta6 здесь; в бете 5 — в
+                     «Маршрутах», раньше — в «Настройках» → «Автоматика») ── -->
+                <TextView
+                    style="@style/SettingsSubHeader"
+                    android:text="@string/routes_app_exit_title" />
+
+                <!-- 1.10.44-beta1: «Второй выход» — приложение целиком (TikTok без утечек мимо туннеля). -->
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatSecondWhole"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_second_whole" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:layout_marginBottom="6dp"
+                    android:text="@string/feat_second_whole_note"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <!-- 1.10.43: эксперимент «выход для приложений — сам» и итог его замеров. -->
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatAppAuto"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_app_auto" />
+
+                <TextView
+                    android:id="@+id/textAppAuto"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:layout_marginBottom="6dp"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:visibility="gone" />
+
+                <!-- Своя кнопка у второго выхода (с 1.10.49-beta6): его правки, как и раньше, применяет
+                     «Сохранить и применить» — сначала соберёт адреса, потом переподключит туннель. -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnSaveSecond"
+                    style="@style/Widget.Material3.Button"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="@string/btn_save_apply" />
             </LinearLayout>
         </ScrollView>
 
@@ -1422,8 +1490,8 @@
           ══════ вкладка «Настройки» ══════
           С 1.10.49-beta5 — гармошкой: видны только заголовки разделов, нажатие раскрывает раздел
           (SettingsAccordion), раскрытые запоминаются. Второй выход и выход приложений переехали в
-          «Маршруты», поиск выхода за рубежом — в «Подбор», Telegram — в «Обход»; резервная копия
-          пришла с «Главной», версия и обновления — из «Журнала». ids прежние.
+          «Обход» (в бете 5 были в «Маршрутах»), поиск выхода за рубежом — в «Подбор», Telegram — в
+          «Обход»; резервная копия пришла с «Главной», версия и обновления — из «Журнала». ids прежние.
         -->
         <ScrollView
             android:id="@+id/pageConfig"

@@ -254,6 +254,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             TunnelStatusBus.install(this)
             setupNav(savedInstanceState?.getInt(STATE_TAB) ?: 0)
             setupSettingsGroups()
+            setupAppsListFold()
             fillFromPrefs()
             buildJunkChecks()
             buildResourceList()
@@ -697,10 +698,12 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
      * сгенерировать, подключить — с настройками по умолчанию. Остальные нужны только когда
      * быстрый путь не сработал или нужен особый конфиг, поэтому ничего не удалено — всё разложено.
      *
-     * С 1.10.49-beta5 — по задачам: «Главная» · «Подбор» · «Маршруты» (что идёт через туннель и
-     * второй выход) · «Обход» (доступность, DPI, прокси Telegram) · «Настройки» (гармошкой) ·
+     * С 1.10.49-beta5 — по задачам: «Главная» · «Подбор» · «Маршруты» (что идёт через туннель) ·
+     * «Обход» (доступность, DPI, прокси Telegram, а с beta6 и второй выход) · «Настройки» (гармошкой) ·
      * «Журнал» (только смотреть: журнал, диагностика, отчёт). Человек спросил, почему настройки
-     * лежат в «Журнале», — раньше их туда складывали по мере появления.
+     * лежат в «Журнале», — раньше их туда складывали по мере появления. С 1.10.49-beta6 (тоже по его
+     * просьбе) второй выход со своими настройками переехал из «Маршрутов» в «Обход», а список
+     * приложений в «Маршрутах» сворачивается.
      */
     private fun setupNav(initial: Int) {
         pages = listOf(
@@ -884,6 +887,50 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             })
             scroll.requestLayout()
         }.onFailure { scroll.post(go) }
+    }
+
+    /** Свёрнутый список приложений в «Маршрутах» (с 1.10.49-beta6); null — не собрался, список раскрыт. */
+    private var appsListFold: SettingsAccordion? = null
+
+    /**
+     * Список приложений в «Маршрутах» сворачивается (с 1.10.49-beta6, человек попросил): виден заголовок
+     * с итогом — сколько отмечено и у скольких свой выход, нажатие раскрывает поиск и строки. Раскрыт ли
+     * список, помнит [Prefs.settingsOpen] (ключ [GROUP_APPS_LIST]) — как разделы «Настроек»: вкладка
+     * открывается такой, какой её оставили. Сначала список свёрнут. Не собралось — список остаётся
+     * раскрытым, как в разметке: спрятать выбор приложений хуже, чем показать его.
+     */
+    private fun setupAppsListFold() {
+        val fold = SettingsAccordion(prefs) { open ->
+            getString(if (open) R.string.group_expanded else R.string.group_collapsed)
+        }
+        runCatching {
+            fold.add(GROUP_APPS_LIST, binding.appsListHead, binding.appsListBody, binding.appsListArrow)
+            appsListFold = fold
+        }.onFailure { t ->
+            runCatching { fold.showAll() }
+            TunnelDebug.error("список приложений: " + SafeMode.describe(t))
+        }
+    }
+
+    /**
+     * Подпись свёрнутого списка (с 1.10.49-beta6): «Отмечено: 16 · свой выход: 5». Свой выход считаем,
+     * только когда кнопки выхода в строках есть ([exitsOn]) — как и строку «Выход по выбору».
+     */
+    private fun appsListSummary(exitsOn: Boolean): String {
+        val selected = prefs.appsSelected.size
+        val head = when (prefs.appsMode) {
+            Prefs.APPS_ONLY ->
+                if (selected == 0) getString(R.string.apps_list_only_none)
+                else getString(R.string.apps_list_only, selected)
+
+            Prefs.APPS_EXCEPT ->
+                if (selected == 0) getString(R.string.apps_list_except_none)
+                else getString(R.string.apps_list_except, selected)
+
+            else -> getString(R.string.apps_list_all)
+        }
+        val exits = if (exitsOn) prefs.appExits.size else 0
+        return if (exits > 0) head + " · " + getString(R.string.apps_list_exits, exits) else head
     }
 
     // ------------------------------------------------------ приложения в туннеле
@@ -1653,6 +1700,12 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         binding.tilAppSearch.visibility = if (needsList) View.VISIBLE else View.GONE
         binding.checkAppsSystem.visibility = if (needsList) View.VISIBLE else View.GONE
         binding.appsBox.visibility = if (needsList) View.VISIBLE else View.GONE
+        // Свёрнутый список (с 1.10.49-beta6): заголовок с итогом прячется вместе со списком. Ошибка в
+        // подписи не должна мешать остальному — отметки и выходы важнее.
+        runCatching {
+            binding.appsListGroup.visibility = if (needsList) View.VISIBLE else View.GONE
+            binding.textAppsListSummary.text = appsListSummary(exitsOn)
+        }
         if (!needsList) {
             binding.appsBox.removeAllViews()
         } else if (binding.appsBox.childCount == 0) {
@@ -2396,6 +2449,9 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         binding.btnSaveAndSend.setOnClickListener { saveAndSend() }
         binding.btnSaveScan.setOnClickListener { saveAndApply(getString(R.string.dirty_scan)) }
         binding.btnSaveApps.setOnClickListener { applyWithRoutes(getString(R.string.dirty_apps)) }
+        // С 1.10.49-beta6 второй выход — на вкладке «Обход», и у него своя кнопка: то же, что делала кнопка
+        // внизу «Маршрутов» беты 5, — собрать адреса, сохранить и переподключить.
+        binding.btnSaveSecond.setOnClickListener { applyWithRoutes(getString(R.string.dirty_second_exit)) }
         binding.btnSaveDpi.setOnClickListener { saveAndApply(getString(R.string.dirty_junk)) }
         binding.cardBanner.setOnClickListener { hideBanner() }
 
@@ -7296,6 +7352,9 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         const val GROUP_UPDATES = "updates"
         const val GROUP_THEME = "theme"
         const val GROUP_RESET = "reset"
+
+        /** Список приложений в «Маршрутах» (с 1.10.49-beta6) — тот же Prefs.settingsOpen, не переименовывать. */
+        const val GROUP_APPS_LIST = "apps_list"
 
         /** Что настраивается на вкладке «Туннелирование» и в шторке (с 1.10.31). */
         const val KIND_APPS = 0
