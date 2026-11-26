@@ -56,10 +56,6 @@ button { font: inherit; color: inherit; }
   width: 434px; height: 914px; border-radius: 54px; padding: 11px; background: #0f0f0f;
   box-shadow: 0 0 0 2px #2b2b2b, 0 0 0 9px #0a0a0a, 0 40px 90px rgba(0, 0, 0, .65);
 }
-.fab {
-  display: none; position: fixed; top: 10px; right: 10px; z-index: 80; border: 1px solid #ff8a1f;
-  background: rgba(20, 14, 10, .9); color: #ffb36b; border-radius: 999px; padding: 8px 14px; font-size: 13px;
-}
 @media (max-width: 760px) {
   .panel {
     position: fixed; left: 0; right: 0; bottom: 0; width: auto; max-height: 72%; z-index: 70;
@@ -70,7 +66,6 @@ button { font: inherit; color: inherit; }
   .stage { background: #000; }
   .phone { width: 100vw; height: 100vh; border-radius: 0; padding: 0; box-shadow: none; }
   .phone .app { border-radius: 0; }
-  .fab { display: block; }
 }
 
 /* ───────── приложение: темы ───────── */

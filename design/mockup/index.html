@@ -43,6 +43,8 @@
   <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="5" rx="1.5"/><path d="M5.5 9v9.5A1.5 1.5 0 0 0 7 20h10a1.5 1.5 0 0 0 1.5-1.5V9"/><path d="M10 13h4"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10z"/></symbol>
   <symbol id="i-reset" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.6-5.9"/><path d="M4 4v5h5"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/></symbol>
+  <symbol id="i-auto" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor"/></symbol>
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></symbol>
 </svg>
 
@@ -60,18 +62,39 @@
     <h2>Состояние</h2>
     <div class="seg" id="ctlState"><button data-v="off">Выключено</button><button data-v="scan">Подбор</button><button data-v="connecting">Подключение</button><button data-v="on">Подключено</button><button data-v="error">Нет связи</button></div>
     <button class="play" id="ctlPlay">Сценарий: подбор, подключение, вспышка щита</button>
-    <div class="note">
+    <div class="note" data-for="premium">
+      <b>Премиум.</b> Тёмный фон с оранжевым свечением и неоновыми диагоналями.<br>
       <b>Подбор.</b> Вокруг кнопки крутится кольцо-«микросхема», по дорожкам бегут импульсы, шкала и кольцо заполняются по ходу подбора.<br>
       <b>Подключение.</b> По кольцу бежит свет, ореол дышит.<br>
-      <b>Подключено.</b> Вспыхивает щит и расходится волна — дальше всё замирает: в покое анимаций нет, батарея не тратится.<br>
+      <b>Подключено.</b> Вспыхивает щит и расходится волна — дальше всё замирает: в покое анимаций нет, батарея не тратится.
+    </div>
+    <div class="note" data-for="soft">
+      <b>Нежный.</b> Светлая пастель: акварельные пятна и волны на фоне, круглые карточки и кнопки-«пилюли». Шесть цветов — кружки выше.<br>
+      <b>Подбор.</b> Кольцо заполняется, вокруг кружат три точки.<br>
+      <b>Подключение.</b> От кольца мягко расходятся круги.<br>
+      <b>Подключено.</b> Распускаются лепестки — дальше всё замирает: в покое анимаций нет, батарея не тратится.
+    </div>
+    <div class="note" data-for="glass">
+      <b>Стекло.</b> Матовое стекло поверх неонового света: сквозь карточки видны цветные пятна фона. Кольцо — неон двух цветов. Пять сочетаний — кружки выше.<br>
+      <b>Подбор.</b> Вокруг кольца бежит луч, крутятся пунктирные орбиты.<br>
+      <b>Подключение.</b> По кольцу догоняют друг друга две кометы.<br>
+      <b>Подключено.</b> По кольцу пробегает блик и расходится волна — дальше всё замирает: в покое анимаций нет, батарея не тратится.
+    </div>
+    <div class="note">
       <b>Маршрут.</b> Линия прорисовывается от вас через вход и выход WARP до второго выхода; пунктир — приложения, которые идут через каждый выход.<br>
-      <b>Расширенный режим.</b> Те же цвета и карточки, шапка с лого, вкладки с иконками, на «Главной» та же кнопка-кольцо.<br>
-      <b>Нежный.</b> Светлая пастель: акварельные пятна и волны на фоне, круглые карточки и кнопки-«пилюли». Подбор — кольцо заполняется, вокруг кружат три точки; подключение — от кольца расходятся мягкие круги; подключилось — распускаются лепестки.<br>
-      <b>Стекло.</b> Матовое стекло поверх неонового света: сквозь карточки видны цветные пятна фона. Кольцо — неон двух цветов. Подбор — бегущий луч и пунктирные орбиты; подключение — две кометы; подключилось — по кольцу пробегает блик и расходится волна.
+      <b>Расширенный режим.</b> Те же цвета и карточки, шапка с лого, вкладки с иконками, на «Главной» та же кнопка-кольцо.
     </div>
   </aside>
 
   <main class="stage" id="stage">
+    <div class="mbar" id="mbar">
+      <div class="mrow">
+        <div class="seg mseg" id="mDesign"><button data-v="premium">Премиум</button><button data-v="soft">Нежный</button><button data-v="glass">Стекло</button></div>
+        <button class="mbtn" id="mTheme" aria-label="Тема"><svg class="ico t-auto" viewBox="0 0 24 24"><use href="#i-auto"/></svg><svg class="ico t-dark" viewBox="0 0 24 24"><use href="#i-moon"/></svg><svg class="ico t-light" viewBox="0 0 24 24"><use href="#i-sun"/></svg></button>
+        <button class="mbtn more" id="mMore">Ещё</button>
+      </div>
+      <div class="mrow tones" id="mToneRow"><div class="swatches" id="mTone"></div><span class="sw-name" id="mToneName"></span></div>
+    </div>
     <div class="phone-scale" id="phoneScale">
       <div class="phone">
         <div class="app" id="app" data-theme="dark">
@@ -342,7 +365,6 @@
     </div>
   </main>
 </div>
-<button class="fab" id="fab">Макет</button>
 <script src="designs.js"></script>
 <script src="ring.js"></script>
 <script src="map.js"></script>

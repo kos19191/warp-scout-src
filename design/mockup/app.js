@@ -11,6 +11,7 @@
     theme: 'system', screen: 'simple', back: 'simple', state: 'on', progress: 0,
     connectedAt: Date.now() - 1021 * 1000, tab: 0, run: 0, act: '', dn: 118, up: 115,
   };
+  let fitReady = false; // до старта размеры ещё не считаны — fit() не звать
 
   const ringS = new Ring($('#orbS canvas'), app);
   const ringA = new Ring($('#orbA canvas'), app);
@@ -22,6 +23,9 @@
   const effTheme = () => (M.theme === 'system' ? (mq.matches ? 'dark' : 'light') : M.theme);
   const DESIGN_NAME = { premium: 'Премиум', soft: 'Нежный', glass: 'Стекло' };
   const THEME_NAME = { system: 'как в системе', light: 'светлая', dark: 'тёмная' };
+  const THEME_NEXT = { system: 'dark', dark: 'light', light: 'system' };
+  /** Чем кончается сценарий в каждом дизайне — подпись кнопки «Сценарий». */
+  const FINALE = { premium: 'вспышка щита', soft: 'лепестки', glass: 'блик и волна' };
   const tones = () => (M.design === 'soft' ? Designs.SOFT : M.design === 'glass' ? Designs.GLASS : null);
 
   function applyTheme() {
@@ -34,7 +38,12 @@
     drawBg();
     mark('#ctlTheme', M.theme);
     mark('#ctlDesign', M.design);
-    $$('#ctlDesign button').forEach((b) => { b.classList.toggle('soft', b.dataset.v === 'soft'); b.classList.toggle('glass', b.dataset.v === 'glass'); });
+    mark('#mDesign', M.design);
+    $$('#ctlDesign button, #mDesign button').forEach((b) => { b.classList.toggle('soft', b.dataset.v === 'soft'); b.classList.toggle('glass', b.dataset.v === 'glass'); });
+    $('#mTheme').dataset.v = M.theme;
+    $('#mTheme').title = 'Тема: ' + THEME_NAME[M.theme];
+    $('#ctlPlay').textContent = 'Сценарий: подбор, подключение, ' + FINALE[M.design];
+    document.title = 'WilyScout · ' + DESIGN_NAME[M.design] + ' — живой макет';
     $$('#themeRadios .radio').forEach((r) => r.classList.toggle('on', r.dataset.v === M.theme));
     $$('#designRadios .radio').forEach((r) => r.classList.toggle('on', r.dataset.v === M.design));
     renderTones();
@@ -47,14 +56,18 @@
     const cur = M.tone[M.design] || 0;
     $('#ctlToneBox').style.display = list ? '' : 'none';
     $('#toneBox').style.display = list ? '' : 'none';
+    const hadRow = $('#mToneRow').style.display !== 'none';
+    $('#mToneRow').style.display = list ? '' : 'none';
+    // Полоса сверху стала выше или ниже — телефон под ней меняет высоту: перерисовать холсты.
+    if (hadRow !== !!list && fitReady) requestAnimationFrame(fit);
     let summary = DESIGN_NAME[M.design];
     if (list) {
       const html = list.map((t, i) => {
         const bg = M.design === 'soft' ? t.pastel : 'linear-gradient(135deg,' + t.a + ',' + t.b + ')';
         return '<button class="sw' + (i === cur ? ' on' : '') + '" data-i="' + i + '" title="' + t.name + '" style="background:' + bg + '"></button>';
       }).join('');
-      $('#ctlTone').innerHTML = html; $('#toneSw').innerHTML = html;
-      $('#ctlToneName').textContent = list[cur].name; $('#toneName').textContent = list[cur].name;
+      $('#ctlTone').innerHTML = html; $('#toneSw').innerHTML = html; $('#mTone').innerHTML = html;
+      $('#ctlToneName').textContent = list[cur].name; $('#toneName').textContent = list[cur].name; $('#mToneName').textContent = list[cur].name;
       summary += ' · ' + list[cur].name;
     }
     $('#lookSummary').textContent = summary + ' · ' + THEME_NAME[M.theme];
@@ -74,6 +87,7 @@
       const v = JSON.parse(localStorage.getItem('wilyscout-mock') || 'null');
       if (v) { if (DESIGN_NAME[v.design]) M.design = v.design; if (v.tone) Object.assign(M.tone, v.tone); if (THEME_NAME[v.theme]) M.theme = v.theme; }
     } catch (e) { /* без хранилища */ }
+    if (DESIGN_NAME[window.MOCK_DESIGN]) M.design = window.MOCK_DESIGN;
     const h = new URLSearchParams(location.hash.slice(1));
     if (DESIGN_NAME[h.get('design')]) M.design = h.get('design');
     if (h.get('tone') !== null && M.design !== 'premium') M.tone[M.design] = Math.max(0, parseInt(h.get('tone'), 10) || 0) % tones().length;
@@ -390,7 +404,14 @@
     await sleep(700);
     scenario(true);
   });
-  $('#fab').addEventListener('click', () => $('#panel').classList.toggle('open'));
+  // Полоса сверху на узком экране: дизайн, цвет, тема и «Ещё» — вся панель макета шторкой.
+  $$('#mDesign button').forEach((b) => b.addEventListener('click', () => setDesign(b.dataset.v)));
+  $('#mTone').addEventListener('click', (e) => { const sw = e.target.closest('.sw'); if (sw) setTone(+sw.dataset.i); });
+  $('#mTheme').addEventListener('click', () => { M.theme = THEME_NEXT[M.theme]; applyTheme(); toast('Тема: ' + THEME_NAME[M.theme]); });
+  $('#mMore').addEventListener('click', () => {
+    const open = $('#panel').classList.toggle('open');
+    $('#mMore').classList.toggle('on', open);
+  });
 
   // ───────── размер телефона ─────────
   function fit() {
@@ -412,6 +433,7 @@
   applyTheme();
   mark('#ctlScreen', 'simple');
   setState('on');
+  fitReady = true;
   fit();
   setTimeout(fit, 300);
 })();

@@ -175,3 +175,54 @@ body[data-design="glass"] .stage { background: radial-gradient(1100px 760px at 5
 .panel .sw-name { padding: 6px 0 0; color: #9a938c; }
 .panel .seg button.on.soft { border-color: #c9b8f2; color: #ded3ff; background: rgba(201, 184, 242, .14); }
 .panel .seg button.on.glass { border-color: #22e1ff; color: #a5f3ff; background: rgba(34, 225, 255, .12); }
+body[data-design="soft"] .panel h1 span { color: #c9b8f2; }
+body[data-design="glass"] .panel h1 span { color: #22e1ff; }
+body[data-design="soft"] .play { background: linear-gradient(135deg, #d7c8fb, #f4bcd2); color: #2b2633; box-shadow: 0 0 18px rgba(201, 184, 242, .35); }
+body[data-design="glass"] .play { background: linear-gradient(90deg, #22e1ff, #ff3df2); color: #0a0a16; box-shadow: 0 0 18px rgba(34, 225, 255, .35); }
+
+/* Пояснения в панели: общее видно всегда, про анимации — только у выбранного дизайна. */
+.note[data-for] { display: none; }
+body[data-design="premium"] .note[data-for="premium"],
+body[data-design="soft"] .note[data-for="soft"],
+body[data-design="glass"] .note[data-for="glass"] { display: block; }
+
+/*
+ * Узкое окно (телефон, превью сбоку): панель уходит в шторку «Ещё», а сверху остаётся полоса —
+ * дизайн, тема и цвета всегда под рукой, телефон занимает всё остальное.
+ */
+.mbar { display: none; }
+.mbar .seg button.on.soft { border-color: #c9b8f2; color: #ded3ff; background: rgba(201, 184, 242, .14); }
+.mbar .seg button.on.glass { border-color: #22e1ff; color: #a5f3ff; background: rgba(34, 225, 255, .12); }
+@media (max-width: 760px) {
+  .stage { flex-direction: column; align-items: stretch; justify-content: flex-start; }
+  .mbar {
+    display: block; flex: none; padding: 8px 10px; background: #0d0c0b; border-bottom: 1px solid #221f1c;
+    color: #ddd; position: relative; z-index: 75;
+  }
+  .mrow { display: flex; align-items: center; gap: 6px; }
+  .mrow.tones { margin-top: 8px; gap: 10px; }
+  .mseg { flex: 1; flex-wrap: nowrap; gap: 5px; min-width: 0; }
+  .mseg button { padding: 7px 4px; min-width: 0; white-space: nowrap; }
+  .mbtn {
+    flex: none; height: 34px; min-width: 38px; border-radius: 10px; border: 1px solid #2c2825; background: #161412;
+    color: #d8d1ca; font-size: 13px; padding: 0 10px; display: grid; place-items: center; cursor: pointer;
+  }
+  .mbtn svg { width: 19px; height: 19px; grid-area: 1 / 1; }
+  .mbtn .t-dark, .mbtn .t-light, .mbtn[data-v="dark"] .t-auto, .mbtn[data-v="light"] .t-auto { display: none; }
+  .mbtn[data-v="dark"] .t-dark, .mbtn[data-v="light"] .t-light { display: block; }
+  .mbtn.on { border-color: #ff8a1f; color: #ffb36b; background: rgba(255, 138, 31, .12); }
+  body[data-design="soft"] .mbtn.on { border-color: #c9b8f2; color: #ded3ff; background: rgba(201, 184, 242, .14); }
+  body[data-design="glass"] .mbtn.on { border-color: #22e1ff; color: #a5f3ff; background: rgba(34, 225, 255, .12); }
+  .mbar .swatches { padding: 0; gap: 8px; flex-wrap: nowrap; }
+  .mbar .sw { width: 26px; height: 26px; flex: none; }
+  .mbar .sw.on { border-color: #fff; }
+  .mbar .sw.on::after { width: 8px; height: 4px; border-left-width: 2px; border-bottom-width: 2px; }
+  .mbar .sw-name { padding: 0; font-size: 12.5px; color: #9a938c; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .phone-scale { flex: 1 1 auto; min-height: 0; position: relative; }
+  .phone { position: absolute; inset: 0; width: auto; height: auto; }
+  .panel { z-index: 74; }
+}
+
+/* Выбранные кнопки панели — в цвете дизайна (у «Премиума» оранжевые, как были). */
+body[data-design="soft"] .seg button.on { border-color: #c9b8f2; color: #ded3ff; background: rgba(201, 184, 242, .14); }
+body[data-design="glass"] .seg button.on { border-color: #22e1ff; color: #a5f3ff; background: rgba(34, 225, 255, .12); }
