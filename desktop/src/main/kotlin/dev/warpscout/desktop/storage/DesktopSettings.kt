@@ -2,6 +2,8 @@ package dev.warpscout.desktop.storage
 
 import dev.warpscout.core.config.ConfTarget
 import dev.warpscout.core.lists.AllowLists
+import dev.warpscout.desktop.tunnel.ByeDpiPac
+import dev.warpscout.desktop.tunnel.ByeDpiPresets
 
 enum class ThemeMode(val title: String) {
     DARK("Тёмная"),
@@ -43,6 +45,17 @@ data class ShortlistEntry(
     val resourcesTotal: Int = 0,
     val checkedAtMs: Long = 0L,
     val confText: String
+)
+
+/** Запомненная стратегия ByeDPI для конкретной сети (по Wi-Fi SSID и/или шлюзу). */
+data class NetworkDpiProfile(
+    val networkKey: String,
+    val networkLabel: String,
+    val presetId: String,
+    val customArgs: String = "",
+    val fixedCount: Int = 0,
+    val totalChecks: Int = 0,
+    val testedAtMs: Long = 0L
 )
 
 /** Все пользовательские настройки десктопного приложения. */
@@ -96,10 +109,13 @@ data class DesktopSettings(
     val secondExitCidrs: String = "",
 
     // Встроенный обход DPI (ByeDPI / ciadpi.exe — локальный SOCKS5-прокси без драйвера ядра)
-    val byeDpiPresetId: String = "auto-universal",
+    val byeDpiPresetId: String = ByeDpiPresets.DEFAULT_ID,
     val byeDpiPort: Int = 1080,
     val byeDpiCustomArgs: String = "",
     val byeDpiSystemProxy: Boolean = false,
+    val byeDpiBypassTunnel: Boolean = true,
+    val byeDpiPacDomains: String = ByeDpiPac.DEFAULT_DOMAINS_TEXT,
+    val byeDpiNetworkProfiles: Map<String, NetworkDpiProfile> = emptyMap(),
 
     // Экспорт
     val exportTarget: ConfTarget = ConfTarget.AMNEZIA,

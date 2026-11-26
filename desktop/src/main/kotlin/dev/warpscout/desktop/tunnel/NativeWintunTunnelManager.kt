@@ -119,6 +119,9 @@ class NativeWintunTunnelManager(
 
     fun isDriverReady(): Boolean = WintunLoader.isAvailable(nativeDir)
 
+    /** Последний определённый физический шлюз и локальный IPv4 (до наката маршрутов Wintun). */
+    fun currentPhysicalGateway(): PhysicalGateway? = physicalGateway
+
     @Synchronized
     fun connect(
         primary: WarpConfig,

@@ -31,6 +31,7 @@ class WindowsIpHelperTest {
         assertNotNull(gw, "GetBestRoute2 should return active Windows default route")
         assertTrue(gw!!.interfaceLuid != 0L || gw.interfaceIndex > 0)
         assertNotNull(CidrMath.parseIpv4(gw.nextHop), "NextHop must be valid IPv4: ${gw.nextHop}")
+        assertNotNull(CidrMath.parseIpv4(gw.sourceIp), "GetBestRoute2 must return physical adapter sourceIp: '${gw.sourceIp}'")
         if (gw.interfaceLuid != 0L) {
             val idx = WindowsIpHelper.luidToIndex(gw.interfaceLuid)
             assertEquals(gw.interfaceIndex, idx, "ConvertInterfaceLuidToIndex must match GetBestRoute2 interfaceIndex")

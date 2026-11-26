@@ -4,6 +4,7 @@ import dev.warpscout.core.config.ConfTarget
 import dev.warpscout.core.json.JsonVal
 import dev.warpscout.core.json.parseJson
 import dev.warpscout.core.lists.AllowLists
+import dev.warpscout.desktop.tunnel.ByeDpiPresets
 import java.io.File
 
 /**
@@ -170,6 +171,21 @@ class DesktopStore(val paths: DesktopPaths) {
             "byeDpiPort" to JsonVal.num(s.byeDpiPort),
             "byeDpiCustomArgs" to JsonVal.str(s.byeDpiCustomArgs),
             "byeDpiSystemProxy" to JsonVal.bool(s.byeDpiSystemProxy),
+            "byeDpiBypassTunnel" to JsonVal.bool(s.byeDpiBypassTunnel),
+            "byeDpiPacDomains" to JsonVal.str(s.byeDpiPacDomains),
+            "byeDpiNetworkProfiles" to JsonVal.arr(
+                s.byeDpiNetworkProfiles.values.map { p ->
+                    JsonVal.obj(
+                        "networkKey" to JsonVal.str(p.networkKey),
+                        "networkLabel" to JsonVal.str(p.networkLabel),
+                        "presetId" to JsonVal.str(p.presetId),
+                        "customArgs" to JsonVal.str(p.customArgs),
+                        "fixedCount" to JsonVal.num(p.fixedCount),
+                        "totalChecks" to JsonVal.num(p.totalChecks),
+                        "testedAtMs" to JsonVal.num(p.testedAtMs)
+                    )
+                }
+            ),
             "exportTarget" to JsonVal.str(s.exportTarget.name),
             "activeShortlistIndex" to JsonVal.num(s.activeShortlistIndex),
             "lastTuneAtMs" to JsonVal.num(s.lastTuneAtMs),
@@ -222,10 +238,26 @@ class DesktopStore(val paths: DesktopPaths) {
                 secondExitConf = o.str("secondExitConf") ?: d.secondExitConf,
                 secondExitDomains = o.str("secondExitDomains") ?: d.secondExitDomains,
                 secondExitCidrs = o.str("secondExitCidrs") ?: d.secondExitCidrs,
-                byeDpiPresetId = o.str("byeDpiPresetId") ?: d.byeDpiPresetId,
+                byeDpiPresetId = o.str("byeDpiPresetId")?.let { ByeDpiPresets.normalizeId(it) } ?: d.byeDpiPresetId,
                 byeDpiPort = o.num("byeDpiPort")?.toInt()?.coerceIn(1024, 65535) ?: d.byeDpiPort,
                 byeDpiCustomArgs = o.str("byeDpiCustomArgs") ?: d.byeDpiCustomArgs,
                 byeDpiSystemProxy = o.bool("byeDpiSystemProxy") ?: d.byeDpiSystemProxy,
+                byeDpiBypassTunnel = o.bool("byeDpiBypassTunnel") ?: d.byeDpiBypassTunnel,
+                byeDpiPacDomains = o.str("byeDpiPacDomains")?.takeIf { it.isNotBlank() } ?: d.byeDpiPacDomains,
+                byeDpiNetworkProfiles = o.arr("byeDpiNetworkProfiles")?.items?.mapNotNull { item ->
+                    val po = item as? JsonVal.Obj ?: return@mapNotNull null
+                    val key = po.str("networkKey")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    val preset = po.str("presetId")?.let { ByeDpiPresets.normalizeId(it) } ?: return@mapNotNull null
+                    key to NetworkDpiProfile(
+                        networkKey = key,
+                        networkLabel = po.str("networkLabel") ?: key,
+                        presetId = preset,
+                        customArgs = po.str("customArgs") ?: "",
+                        fixedCount = po.num("fixedCount")?.toInt() ?: 0,
+                        totalChecks = po.num("totalChecks")?.toInt() ?: 0,
+                        testedAtMs = po.num("testedAtMs")?.toLong() ?: 0L
+                    )
+                }?.toMap() ?: d.byeDpiNetworkProfiles,
                 exportTarget = o.str("exportTarget")?.let { runCatching { ConfTarget.valueOf(it) }.getOrNull() } ?: d.exportTarget,
                 activeShortlistIndex = o.num("activeShortlistIndex")?.toInt()?.coerceAtLeast(0) ?: d.activeShortlistIndex,
                 lastTuneAtMs = o.num("lastTuneAtMs")?.toLong() ?: d.lastTuneAtMs,

@@ -100,7 +100,7 @@ jobs:
           Copy-Item $dll (Join-Path $resDir "wintun.dll") -Force
           Write-Host "Вшит подписанный wintun.dll → $resDir/wintun.dll"
 
-      - name: "Загрузка официального ByeDPI v0.17.3 (ciadpi.exe x86_64)"
+      - name: "Загрузка и проверка официального ByeDPI v0.17.3 (ciadpi.exe x86_64 + MIT LICENSE)"
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -109,6 +109,10 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/hufrea/byedpi/releases/download/v0.17.3/byedpi-17.3-x86_64-w64.zip" -OutFile $byeZip
           $zipHash = (Get-FileHash $byeZip -Algorithm SHA256).Hash.ToLower()
           Write-Host "byedpi-17.3-x86_64-w64.zip SHA-256: $zipHash"
+          if ($zipHash -ne "70d2c94147193cb915f9c6eb5144b8d404dacbcfa90bda2383b6b211afafa456") {
+            Write-Host "::error title=byedpi::Неожиданный SHA-256 архива byedpi-17.3-x86_64-w64.zip: $zipHash"
+            exit 1
+          }
           Expand-Archive -Path $byeZip -DestinationPath $byeDir -Force
           $exe = Get-ChildItem -Path $byeDir -Recurse -Filter "ciadpi*.exe" | Select-Object -First 1
           if (-not $exe) {
@@ -118,7 +122,8 @@ jobs:
           $resDir = "desktop/src/main/resources/native/win32-x86-64"
           New-Item -ItemType Directory -Force -Path $resDir | Out-Null
           Copy-Item $exe.FullName (Join-Path $resDir "ciadpi.exe") -Force
-          Write-Host "Вшит ByeDPI ($($exe.Name), $($exe.Length) байт) → $resDir/ciadpi.exe"
+          Copy-Item "desktop/windows/LICENSE-BYEDPI.txt" (Join-Path $resDir "LICENSE-BYEDPI.txt") -Force
+          Write-Host "Вшит проверенный ByeDPI ($($exe.Name), $($exe.Length) байт) + MIT LICENSE → $resDir/"
 
       - name: "Сборка портативного приложения (WarpScout.exe + встроенный JRE + Wintun + ByeDPI)"
         shell: pwsh
@@ -149,6 +154,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$appDir/bin" | Out-Null
           Copy-Item "desktop/src/main/resources/native/win32-x86-64/wintun.dll" "$appDir/bin/wintun.dll" -Force
           Copy-Item "desktop/src/main/resources/native/win32-x86-64/ciadpi.exe" "$appDir/bin/ciadpi.exe" -Force
+          Copy-Item "desktop/windows/LICENSE-BYEDPI.txt" "$appDir/bin/LICENSE-BYEDPI.txt" -Force
+          Copy-Item "desktop/windows/LICENSE-BYEDPI.txt" "$appDir/LICENSE-BYEDPI.txt" -Force
 
       - name: "Сборка MSI-установщика Windows (из патченного WarpScout.exe с UAC)"
         shell: pwsh

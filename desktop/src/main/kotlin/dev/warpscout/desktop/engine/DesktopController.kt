@@ -36,15 +36,21 @@ import dev.warpscout.core.tune.TuningSpec
 import dev.warpscout.desktop.storage.DesktopPoolMode
 import dev.warpscout.desktop.storage.DesktopSettings
 import dev.warpscout.desktop.storage.DesktopStore
+import dev.warpscout.desktop.storage.NetworkDpiProfile
 import dev.warpscout.desktop.storage.ShortlistEntry
 import dev.warpscout.desktop.storage.TunnelBackendMode
 import dev.warpscout.desktop.tunnel.ByeDpiManager
+import dev.warpscout.desktop.tunnel.ByeDpiPac
+import dev.warpscout.desktop.tunnel.ByeDpiPresets
 import dev.warpscout.desktop.tunnel.ByeDpiSnapshot
 import dev.warpscout.desktop.tunnel.CommandRunner
 import dev.warpscout.desktop.tunnel.EngineInfo
 import dev.warpscout.desktop.tunnel.EngineKind
 import dev.warpscout.desktop.tunnel.EngineLocator
 import dev.warpscout.desktop.tunnel.NativeWintunTunnelManager
+import dev.warpscout.desktop.tunnel.NetworkIdentity
+import dev.warpscout.desktop.tunnel.NetworkIdentityDetector
+import dev.warpscout.desktop.tunnel.PhysicalGateway
 import dev.warpscout.desktop.tunnel.ProcessCommandRunner
 import dev.warpscout.desktop.tunnel.SecondExitSpec
 import dev.warpscout.desktop.tunnel.SpeedTestResult
@@ -52,6 +58,7 @@ import dev.warpscout.desktop.tunnel.TraceAndSpeed
 import dev.warpscout.desktop.tunnel.TunnelPhase
 import dev.warpscout.desktop.tunnel.TunnelSnapshot
 import dev.warpscout.desktop.tunnel.WindowsAutostart
+import dev.warpscout.desktop.tunnel.WindowsNetConfigurator
 import dev.warpscout.desktop.tunnel.WindowsTunnelManager
 import dev.warpscout.desktop.tunnel.WintunLoader
 import dev.warpscout.desktop.update.AppUpdater
@@ -130,6 +137,7 @@ data class DesktopUiState(
 
     // Встроенный обход DPI (ByeDPI / ciadpi.exe) и сравнение «напрямую vs ByeDPI»
     val byeDpi: ByeDpiSnapshot = ByeDpiSnapshot(),
+    val currentNetwork: NetworkIdentity? = null,
     val dpiBusy: Boolean = false,
     val dpiStatus: String = "",
     val dpiComparison: DpiComparison? = null,
@@ -178,6 +186,10 @@ class DesktopController(
     private val scanCancel = AtomicBoolean(false)
     private val connectInFlight = AtomicBoolean(false)
     private var scheduledTune: ScheduledFuture<*>? = null
+    private var networkWatchTask: ScheduledFuture<*>? = null
+    @Volatile
+    private var lastNetworkKey: String? = null
+    private val netProbe = WindowsNetConfigurator(runner = runner)
 
     val listStore = FileListStore(store.paths.listsDir)
 
@@ -209,8 +221,10 @@ class DesktopController(
     /** Встроенный обход DPI (ByeDPI / ciadpi.exe — локальный SOCKS5-прокси без драйвера ядра). */
     val byeDpiManager = ByeDpiManager(
         nativeDir = store.paths.nativeDir,
+        pacExportFile = File(store.paths.root, "warpscout.pac"),
         onState = { snap -> _state.update { it.copy(byeDpi = snap) } },
-        onLog = { msg -> appendLog(msg) }
+        onLog = { msg -> appendLog(msg) },
+        physicalIpResolver = { resolvePhysicalGateway()?.sourceIp?.takeIf { it.isNotBlank() } }
     )
 
     private val isBuiltinMode: Boolean
@@ -251,6 +265,7 @@ class DesktopController(
         appendLog("WarpScout Desktop v${BuildInfo.current.version} запущен (каталог данных: ${store.paths.root.absolutePath})")
         refreshEngineAndPrivileges()
         rescheduleBackgroundTune(loaded)
+        startNetworkWatcher()
 
         if (loaded.autoCheckUpdates) {
             scheduler.schedule({ checkForUpdates(manual = false) }, 4, TimeUnit.SECONDS)
@@ -1095,21 +1110,74 @@ class DesktopController(
         if (byeDpiManager.snapshot.running) stopByeDpi() else startByeDpi()
     }
 
+    fun selectByeDpiPreset(presetId: String) {
+        val norm = ByeDpiPresets.normalizeId(presetId)
+        val net = _state.value.currentNetwork
+        updateSettings { cur ->
+            val updatedProfiles = if (net != null) {
+                cur.byeDpiNetworkProfiles + (
+                    net.key to NetworkDpiProfile(
+                        networkKey = net.key,
+                        networkLabel = net.label,
+                        presetId = norm,
+                        customArgs = if (norm == ByeDpiPresets.CUSTOM_ID) cur.byeDpiCustomArgs else "",
+                        testedAtMs = System.currentTimeMillis()
+                    )
+                )
+            } else cur.byeDpiNetworkProfiles
+            cur.copy(byeDpiPresetId = norm, byeDpiNetworkProfiles = updatedProfiles)
+        }
+        if (byeDpiManager.snapshot.running) startByeDpi()
+    }
+
+    fun setByeDpiBypassTunnel(enabled: Boolean) {
+        updateSettings { it.copy(byeDpiBypassTunnel = enabled) }
+        if (byeDpiManager.snapshot.running) startByeDpi()
+    }
+
+    fun setByeDpiPacDomains(domainsText: String) {
+        updateSettings { it.copy(byeDpiPacDomains = domainsText) }
+        byeDpiManager.updatePacDomains(domainsText)
+    }
+
+    fun clearByeDpiNetworkProfiles() {
+        updateSettings { it.copy(byeDpiNetworkProfiles = emptyMap()) }
+        showBanner("Сохранённые стратегии по сетям очищены")
+        appendLog("Кеш стратегий ByeDPI по сетям очищен")
+    }
+
     fun startByeDpi(enableSystemProxyOverride: Boolean? = null) {
-        val s = _state.value.settings
-        val useSysProxy = enableSystemProxyOverride ?: s.byeDpiSystemProxy
-        if (enableSystemProxyOverride != null && enableSystemProxyOverride != s.byeDpiSystemProxy) {
+        val useSysProxy = enableSystemProxyOverride ?: _state.value.settings.byeDpiSystemProxy
+        if (enableSystemProxyOverride != null && enableSystemProxyOverride != _state.value.settings.byeDpiSystemProxy) {
             updateSettings { it.copy(byeDpiSystemProxy = enableSystemProxyOverride) }
         }
         auxWorker.execute {
+            // Определяем текущую сеть и применяем запомненную для неё стратегию (если есть).
+            val net = refreshCurrentNetwork(triggerAutoOnChange = false)
+            if (net != null) {
+                val saved = _state.value.settings.byeDpiNetworkProfiles[net.key]
+                if (saved != null && saved.presetId != _state.value.settings.byeDpiPresetId) {
+                    updateSettings {
+                        it.copy(
+                            byeDpiPresetId = saved.presetId,
+                            byeDpiCustomArgs = if (saved.presetId == ByeDpiPresets.CUSTOM_ID) saved.customArgs else it.byeDpiCustomArgs
+                        )
+                    }
+                    appendLog("Сеть ${net.label}: применяю запомненную стратегию «${ByeDpiPresets.byId(saved.presetId).title}»")
+                }
+            }
+            val s = _state.value.settings
             val ok = byeDpiManager.start(
                 presetId = s.byeDpiPresetId,
                 port = s.byeDpiPort,
                 customArgs = s.byeDpiCustomArgs,
-                enableSystemProxy = useSysProxy
+                enableSystemProxy = useSysProxy,
+                bypassTunnel = s.byeDpiBypassTunnel,
+                pacDomainsText = s.byeDpiPacDomains
             )
             if (ok) {
-                showBanner("ByeDPI запущен: SOCKS5 127.0.0.1:${s.byeDpiPort}")
+                val bindInfo = byeDpiManager.snapshot.bindConnIp?.let { " · мимо WARP (-I $it)" }.orEmpty()
+                showBanner("ByeDPI запущен: SOCKS5 127.0.0.1:${s.byeDpiPort}$bindInfo")
             } else {
                 showBanner(byeDpiManager.snapshot.lastError ?: "Не удалось запустить ByeDPI", isError = true)
             }
@@ -1127,26 +1195,30 @@ class DesktopController(
         updateSettings { it.copy(byeDpiSystemProxy = enabled) }
         if (byeDpiManager.snapshot.running) {
             auxWorker.execute {
-                val ok = byeDpiManager.setSystemProxy(enabled)
+                val ok = byeDpiManager.setSystemProxy(enabled, _state.value.settings.byeDpiPacDomains)
                 showBanner(
-                    if (enabled && ok) "Системный прокси Windows включён (РФ и локальная сеть — напрямую)"
-                    else if (!enabled) "Системный прокси Windows выключен"
-                    else "Не удалось изменить системный прокси Windows",
+                    if (enabled && ok) "PAC-прокси Windows включён (YouTube/Discord → ByeDPI, остальное → DIRECT/WARP)"
+                    else if (!enabled) "PAC-прокси Windows выключен"
+                    else "Не удалось изменить PAC-прокси Windows",
                     isError = enabled && !ok
                 )
             }
         }
     }
 
-    /** Автоподбор лучшей стратегии ByeDPI под текущего провайдера через `:core` [DpiComparator]. */
-    fun runByeDpiAutoTune() {
+    /** Автоподбор лучшей Windows-стратегии ByeDPI под текущую сеть через `:core` [DpiComparator]. */
+    fun runByeDpiAutoTune(autoRestartIfRunning: Boolean = true) {
         if (_state.value.dpiBusy) return
         val wasRunning = byeDpiManager.snapshot.running
-        _state.update { it.copy(dpiBusy = true, dpiStatus = "Подбираю стратегию ByeDPI…") }
+        _state.update { it.copy(dpiBusy = true, dpiStatus = "Подбираю Windows-стратегию ByeDPI…") }
         auxWorker.execute {
             try {
+                val net = refreshCurrentNetwork(triggerAutoOnChange = false)
                 val checks = Presets.RESOURCE_CHECKS.filterNot { it.baselineExpected }
-                val res = byeDpiManager.autoTuneStrategy(checks) { step ->
+                val res = byeDpiManager.autoTuneStrategy(
+                    checks = checks,
+                    bypassTunnel = _state.value.settings.byeDpiBypassTunnel
+                ) { step ->
                     _state.update { it.copy(dpiStatus = step) }
                 }
                 if (res == null) {
@@ -1156,19 +1228,44 @@ class DesktopController(
                     _state.update { it.copy(dpiBusy = false, dpiStatus = err) }
                     return@execute
                 }
-                updateSettings { it.copy(byeDpiPresetId = res.bestPresetId) }
-                appendLog(res.summary, LogLevel.OK)
+                updateSettings { cur ->
+                    val updatedProfiles = if (net != null) {
+                        cur.byeDpiNetworkProfiles + (
+                            net.key to NetworkDpiProfile(
+                                networkKey = net.key,
+                                networkLabel = net.label,
+                                presetId = res.bestPresetId,
+                                fixedCount = res.bestFixedCount,
+                                totalChecks = res.totalChecks,
+                                testedAtMs = System.currentTimeMillis()
+                            )
+                        )
+                    } else cur.byeDpiNetworkProfiles
+                    cur.copy(
+                        byeDpiPresetId = res.bestPresetId,
+                        byeDpiNetworkProfiles = updatedProfiles
+                    )
+                }
+                val netSuffix = net?.let { " (сохранено для ${it.label})" }.orEmpty()
+                appendLog("${res.summary}$netSuffix", LogLevel.OK)
                 _state.update {
                     it.copy(
                         dpiBusy = false,
-                        dpiStatus = res.summary,
+                        dpiStatus = "${res.summary}$netSuffix",
                         dpiComparison = res.comparison
                     )
                 }
-                showBanner(res.summary)
-                if (wasRunning) {
+                showBanner("${res.summary}$netSuffix")
+                if (wasRunning && autoRestartIfRunning) {
                     val s = _state.value.settings
-                    byeDpiManager.start(s.byeDpiPresetId, s.byeDpiPort, s.byeDpiCustomArgs, s.byeDpiSystemProxy)
+                    byeDpiManager.start(
+                        presetId = s.byeDpiPresetId,
+                        port = s.byeDpiPort,
+                        customArgs = s.byeDpiCustomArgs,
+                        enableSystemProxy = s.byeDpiSystemProxy,
+                        bypassTunnel = s.byeDpiBypassTunnel,
+                        pacDomainsText = s.byeDpiPacDomains
+                    )
                 }
             } catch (e: Exception) {
                 val err = "Ошибка подбора ByeDPI: ${e.message}"
@@ -1191,7 +1288,9 @@ class DesktopController(
                         presetId = s.byeDpiPresetId,
                         port = s.byeDpiPort,
                         customArgs = s.byeDpiCustomArgs,
-                        enableSystemProxy = false
+                        enableSystemProxy = false,
+                        bypassTunnel = s.byeDpiBypassTunnel,
+                        pacDomainsText = s.byeDpiPacDomains
                     )
                     if (!startedTemp) {
                         val err = byeDpiManager.snapshot.lastError ?: "ByeDPI не запущен"
@@ -1225,6 +1324,7 @@ class DesktopController(
 
     fun shutdown(disconnectTunnel: Boolean = _state.value.settings.disconnectOnExit) {
         scheduledTune?.cancel(false)
+        networkWatchTask?.cancel(false)
         scanCancel.set(true)
         byeDpiManager.shutdown()
         if (nativeTunnel.snapshot.isUp) {
@@ -1241,6 +1341,86 @@ class DesktopController(
     }
 
     // ---------------------------------------------------------------- helpers
+
+    /**
+     * Определяет физический шлюз и локальный IPv4 сетевой карты.
+     * Если встроенный Wintun поднят, берём шлюз, сохранённый до наката маршрутов туннеля,
+     * иначе опрашиваем систему напрямую.
+     */
+    private fun resolvePhysicalGateway(): PhysicalGateway? {
+        val cached = nativeTunnel.currentPhysicalGateway()
+        if (nativeTunnel.snapshot.isUp && cached != null && cached.sourceIp.isNotBlank()) {
+            return cached
+        }
+        return runCatching { netProbe.detectPhysicalGateway() }.getOrNull() ?: cached
+    }
+
+    /** Фоновое отслеживание смены сети (Wi-Fi SSID / шлюз) для переключения или перепроверки стратегии ByeDPI. */
+    private fun startNetworkWatcher() {
+        networkWatchTask?.cancel(false)
+        networkWatchTask = scheduler.scheduleWithFixedDelay(
+            {
+                runCatching { refreshCurrentNetwork(triggerAutoOnChange = true) }
+            },
+            2L,
+            20L,
+            TimeUnit.SECONDS
+        )
+    }
+
+    private fun refreshCurrentNetwork(triggerAutoOnChange: Boolean): NetworkIdentity? {
+        val gw = resolvePhysicalGateway()
+        val net = NetworkIdentityDetector.detect(gw, runner) ?: return null
+        val prevKey = lastNetworkKey
+        lastNetworkKey = net.key
+        _state.update { it.copy(currentNetwork = net) }
+
+        if (prevKey == null) {
+            // Первый замер при запуске: если для этой сети есть запомненная стратегия — подхватываем её.
+            val saved = _state.value.settings.byeDpiNetworkProfiles[net.key]
+            if (saved != null && saved.presetId != _state.value.settings.byeDpiPresetId) {
+                updateSettings {
+                    it.copy(
+                        byeDpiPresetId = saved.presetId,
+                        byeDpiCustomArgs = if (saved.presetId == ByeDpiPresets.CUSTOM_ID) saved.customArgs else it.byeDpiCustomArgs
+                    )
+                }
+                appendLog("Сеть ${net.label}: загружена сохранённая стратегия ByeDPI «${ByeDpiPresets.byId(saved.presetId).title}»")
+            }
+            return net
+        }
+
+        if (prevKey != net.key) {
+            val saved = _state.value.settings.byeDpiNetworkProfiles[net.key]
+            val dpiRunning = byeDpiManager.snapshot.running
+            if (saved != null) {
+                appendLog("Смена сети → ${net.label}: применяю запомненную стратегию ByeDPI «${ByeDpiPresets.byId(saved.presetId).title}»")
+                updateSettings {
+                    it.copy(
+                        byeDpiPresetId = saved.presetId,
+                        byeDpiCustomArgs = if (saved.presetId == ByeDpiPresets.CUSTOM_ID) saved.customArgs else it.byeDpiCustomArgs
+                    )
+                }
+                if (dpiRunning && triggerAutoOnChange) {
+                    val s = _state.value.settings
+                    byeDpiManager.start(
+                        presetId = s.byeDpiPresetId,
+                        port = s.byeDpiPort,
+                        customArgs = s.byeDpiCustomArgs,
+                        enableSystemProxy = s.byeDpiSystemProxy,
+                        bypassTunnel = s.byeDpiBypassTunnel,
+                        pacDomainsText = s.byeDpiPacDomains
+                    )
+                }
+            } else {
+                appendLog("Обнаружена новая сеть: ${net.label}" + if (dpiRunning) " — перепроверяю стратегию ByeDPI…" else "")
+                if (dpiRunning && triggerAutoOnChange && !_state.value.dpiBusy) {
+                    runByeDpiAutoTune(autoRestartIfRunning = true)
+                }
+            }
+        }
+        return net
+    }
 
     private fun resolveFreshEngine(): EngineInfo {
         val wintunOk = WintunLoader.isAvailable(store.paths.nativeDir)

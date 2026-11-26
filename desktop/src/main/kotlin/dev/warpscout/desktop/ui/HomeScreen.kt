@@ -626,7 +626,8 @@ fun HomeScreen(
                             Text(
                                 buildString {
                                     append(state.byeDpi.presetTitle)
-                                    if (state.byeDpi.systemProxyEnabled) append(" · системный прокси ВКЛ")
+                                    if (!state.byeDpi.bindConnIp.isNullOrBlank()) append(" · мимо WARP (-I ${state.byeDpi.bindConnIp})")
+                                    if (state.byeDpi.systemProxyEnabled) append(" · PAC ВКЛ")
                                 },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant

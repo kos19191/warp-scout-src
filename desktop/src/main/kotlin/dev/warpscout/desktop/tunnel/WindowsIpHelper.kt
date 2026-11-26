@@ -288,8 +288,16 @@ object WindowsIpHelper {
         val ifIndex = bestRoute.getInt(OFF_INTERFACE_INDEX)
         val nhBytes = bestRoute.getByteArray(OFF_NEXTHOP_V4, 4)
         val nextHop = "${nhBytes[0].toInt() and 0xFF}.${nhBytes[1].toInt() and 0xFF}.${nhBytes[2].toInt() and 0xFF}.${nhBytes[3].toInt() and 0xFF}"
+        val srcFamily = bestSrc.getShort(0L)
+        val sourceIp = if (srcFamily == AF_INET) {
+            val sb = bestSrc.getByteArray(4L, 4)
+            val ip = "${sb[0].toInt() and 0xFF}.${sb[1].toInt() and 0xFF}.${sb[2].toInt() and 0xFF}.${sb[3].toInt() and 0xFF}"
+            if (ip == "0.0.0.0") "" else ip
+        } else {
+            ""
+        }
         if (luid == 0L && ifIndex <= 0) return null
-        return PhysicalGateway(nextHop = nextHop, interfaceIndex = ifIndex, interfaceLuid = luid)
+        return PhysicalGateway(nextHop = nextHop, interfaceIndex = ifIndex, interfaceLuid = luid, sourceIp = sourceIp)
     }
 
     /** Мгновенно проверяет, есть ли у системы рабочий глобальный IPv6-маршрут (`GetBestRoute2`, ~0.2 мс). */

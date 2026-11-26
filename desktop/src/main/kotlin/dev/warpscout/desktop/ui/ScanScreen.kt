@@ -23,6 +23,7 @@ import dev.warpscout.desktop.engine.DesktopController
 import dev.warpscout.desktop.engine.DesktopUiState
 import dev.warpscout.desktop.engine.Formatters
 import dev.warpscout.desktop.storage.DesktopPoolMode
+import dev.warpscout.desktop.tunnel.ByeDpiPac
 import dev.warpscout.desktop.tunnel.ByeDpiPresets
 
 /**
@@ -367,6 +368,10 @@ fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
         // --- 3. Встроенный обход DPI (ByeDPI / ciadpi.exe) + сравнение напрямую vs ByeDPI ---
         val dpi = state.byeDpi
         val clipboard = LocalClipboardManager.current
+        var showPacDomains by remember { mutableStateOf(false) }
+        val currentNet = state.currentNetwork
+        val savedNetProfile = currentNet?.let { s.byeDpiNetworkProfiles[it.key] }
+
         WarpCard {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -375,16 +380,67 @@ fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
             ) {
                 SectionHeader(
                     title = "Обход DPI (ByeDPI)",
-                    subtitle = if (dpi.running)
-                        "SOCKS5 ${dpi.socksAddress} · ${dpi.presetTitle}"
-                    else if (dpi.available)
-                        "Встроенный ciadpi.exe (без драйверов) — помощь, если WARP уходит в DME"
-                    else
+                    subtitle = if (dpi.running) {
+                        buildString {
+                            append("SOCKS5 ${dpi.socksAddress} · ${dpi.presetTitle}")
+                            if (!dpi.bindConnIp.isNullOrBlank()) append(" · мимо WARP (-I ${dpi.bindConnIp})")
+                        }
+                    } else if (dpi.available) {
+                        "Встроенный ciadpi.exe (Windows-стратегии + PAC без драйверов)"
+                    } else {
                         "ciadpi.exe не найден в каталоге bin/"
+                    }
                 )
             }
 
-            // Выбор стратегии
+            // Текущая сеть и запомненный профиль
+            if (currentNet != null || s.byeDpiNetworkProfiles.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = warp.surfaceHigh.copy(alpha = 0.65f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                currentNet?.let {
+                                    "Сеть: ${it.label}" + if (it.sourceIp.isNotBlank()) " · IP ${it.sourceIp}" else ""
+                                } ?: "Сеть определяется…",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                buildString {
+                                    if (savedNetProfile != null) {
+                                        append("Для этой сети сохранена: ${ByeDpiPresets.byId(savedNetProfile.presetId).title}")
+                                    } else {
+                                        append("Для этой сети стратегия ещё не сохранена")
+                                    }
+                                    if (s.byeDpiNetworkProfiles.isNotEmpty()) {
+                                        append(" · всего сетей: ${s.byeDpiNetworkProfiles.size}")
+                                    }
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (s.byeDpiNetworkProfiles.isNotEmpty()) {
+                            TextButton(
+                                onClick = { controller.clearByeDpiNetworkProfiles() },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text("Сбросить", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Выбор Windows-стратегии
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -393,11 +449,8 @@ fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
             ) {
                 ByeDpiPresets.BUILTIN.forEach { preset ->
                     FilterChip(
-                        selected = s.byeDpiPresetId == preset.id,
-                        onClick = {
-                            controller.updateSettings { it.copy(byeDpiPresetId = preset.id) }
-                            if (dpi.running) controller.startByeDpi()
-                        },
+                        selected = ByeDpiPresets.normalizeId(s.byeDpiPresetId) == preset.id,
+                        onClick = { controller.selectByeDpiPreset(preset.id) },
                         label = { Text(preset.title, style = MaterialTheme.typography.labelSmall) }
                     )
                 }
@@ -409,12 +462,12 @@ fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            if (s.byeDpiPresetId == ByeDpiPresets.CUSTOM_ID) {
+            if (ByeDpiPresets.normalizeId(s.byeDpiPresetId) == ByeDpiPresets.CUSTOM_ID) {
                 OutlinedTextField(
                     value = s.byeDpiCustomArgs,
                     onValueChange = { v -> controller.updateSettings { it.copy(byeDpiCustomArgs = v) } },
                     label = { Text("Флаги ciadpi.exe") },
-                    placeholder = { Text("--disorder 1 --tlsrec 1+s --udp-fake 1") },
+                    placeholder = { Text("--split 1+s --disorder 3+s --udp-fake 1") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     textStyle = MaterialTheme.typography.bodySmall
@@ -427,13 +480,75 @@ fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Системный прокси Windows", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
-                    Text("Браузеры через ByeDPI, сайты .ru и LAN — напрямую (при выходе сбрасывается)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Пускать ByeDPI мимо WARP (-I)", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                    Text(
+                        "Привязывает исходящие соединения к IP физической сетевой карты, чтобы не слать DPI-трафик внутрь туннеля",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = s.byeDpiBypassTunnel,
+                    onCheckedChange = { v -> controller.setByeDpiBypassTunnel(v) }
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Автонастройка прокси Windows (PAC)", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                    Text(
+                        "YouTube и Discord → SOCKS5 ByeDPI, остальное → DIRECT (в WARP). При падении или закрытии браузер сам вернётся на DIRECT",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
                 Switch(
                     checked = s.byeDpiSystemProxy,
                     onCheckedChange = { v -> controller.setByeDpiSystemProxy(v) }
                 )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val domainsCount = ByeDpiPac.parseDomains(s.byeDpiPacDomains).size
+                Text(
+                    "Домены в PAC ($domainsCount)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                TextButton(
+                    onClick = { showPacDomains = !showPacDomains },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    Text(if (showPacDomains) "Скрыть список" else "Настроить домены PAC", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
+            if (showPacDomains) {
+                OutlinedTextField(
+                    value = s.byeDpiPacDomains,
+                    onValueChange = { v -> controller.setByeDpiPacDomains(v) },
+                    label = { Text("Домены через ByeDPI SOCKS5 (через запятую)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    maxLines = 4,
+                    textStyle = MaterialTheme.typography.bodySmall
+                )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(
+                        onClick = { controller.setByeDpiPacDomains(ByeDpiPac.DEFAULT_DOMAINS_TEXT) },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Text("По умолчанию (YouTube + Discord)", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
             }
 
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

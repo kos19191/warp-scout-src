@@ -1,11 +1,14 @@
 package dev.warpscout.desktop.tunnel
 
 import dev.warpscout.core.config.SplitRoutes
+import java.net.Inet4Address
+import java.net.NetworkInterface
 
 data class PhysicalGateway(
     val nextHop: String,
     val interfaceIndex: Int,
-    val interfaceLuid: Long = 0L
+    val interfaceLuid: Long = 0L,
+    val sourceIp: String = ""
 )
 
 /**
@@ -28,21 +31,67 @@ class WindowsNetConfigurator(
 
     fun detectPhysicalGateway(): PhysicalGateway? {
         // 1. Быстрый нативный Win32 GetBestRoute2 (~0.2 мс, работает на Ethernet/Wi-Fi/PPPoE/модемах без PowerShell).
+        // Если туннель Wintun уже поднят, 1.1.1.1 может указать на Wintun (172.16.0.2 / NextHop=0.0.0.0) —
+        // в этом случае пробуем российский адрес 77.88.8.8 (в РФ-пресете он идёт через физическую карту),
+        // а затем точный PowerShell-поиск по 0.0.0.0/0 (который WarpScout никогда не перетирает).
         if (WindowsAutostart.isWindows()) {
-            val nativeGw = runCatching { WindowsIpHelper.getBestIpv4Route("1.1.1.1") }.getOrNull()
-            if (nativeGw != null) return nativeGw
+            for (probeIp in listOf("1.1.1.1", "77.88.8.8")) {
+                val nativeGw = runCatching { WindowsIpHelper.getBestIpv4Route(probeIp) }.getOrNull()
+                if (nativeGw != null && !isLikelyTunnelGateway(nativeGw)) {
+                    return fillSourceIpIfMissing(nativeGw)
+                }
+            }
         }
 
-        // 2. Резервный путь через PowerShell (включая PPPoE с NextHop=0.0.0.0).
+        // 2. Резервный путь через PowerShell (всегда смотрит на 0.0.0.0/0, включая PPPoE с NextHop=0.0.0.0).
         val ps = """
             ${'$'}r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                 Sort-Object -Property { ${'$'}_.RouteMetric + ${'$'}_.InterfaceMetric } |
                 Select-Object -First 1
-            if (${'$'}r) { Write-Output "${'$'}(${'$'}r.NextHop)|${'$'}(${'$'}r.InterfaceIndex)" }
+            if (${'$'}r) {
+                ${'$'}ip = (Get-NetIPAddress -InterfaceIndex ${'$'}r.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Where-Object { ${'$'}_.IPAddress -notlike '169.254.*' -and ${'$'}_.IPAddress -ne '127.0.0.1' } |
+                    Select-Object -First 1).IPAddress
+                Write-Output "${'$'}(${'$'}r.NextHop)|${'$'}(${'$'}r.InterfaceIndex)|${'$'}ip"
+            }
         """.trimIndent()
         val res = runPs(ps, timeoutMs = 8000L)
         if (!res.ok) return null
-        return parseGatewayOutput(res.stdout)
+        return parseGatewayOutput(res.stdout)?.let { fillSourceIpIfMissing(it) }
+    }
+
+    private fun isLikelyTunnelGateway(gw: PhysicalGateway): Boolean {
+        val src = gw.sourceIp
+        if (src.startsWith("172.16.0.")) return true
+        // На поднятом Wintun NextHop=0.0.0.0 и sourceIp=172.16.0.2; на обычном PPPoE sourceIp внешний.
+        if (gw.nextHop == "0.0.0.0" && src.isBlank()) return true
+        return false
+    }
+
+    private fun fillSourceIpIfMissing(gw: PhysicalGateway): PhysicalGateway {
+        if (gw.sourceIp.isNotBlank()) return gw
+        val resolved = resolveInterfaceIpv4(gw.interfaceIndex)
+        return if (resolved.isNotBlank()) gw.copy(sourceIp = resolved) else gw
+    }
+
+    private fun resolveInterfaceIpv4(interfaceIndex: Int): String {
+        if (interfaceIndex <= 0) return ""
+        return runCatching {
+            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return@runCatching ""
+            while (ifaces.hasMoreElements()) {
+                val nif = ifaces.nextElement()
+                if (nif.index != interfaceIndex) continue
+                val addrs = nif.inetAddresses
+                while (addrs.hasMoreElements()) {
+                    val addr = addrs.nextElement()
+                    if (addr is Inet4Address && !addr.isLoopbackAddress && !addr.isLinkLocalAddress) {
+                        val ip = addr.hostAddress.orEmpty()
+                        if (ip.isNotBlank() && !ip.startsWith("172.16.0.")) return@runCatching ip
+                    }
+                }
+            }
+            ""
+        }.getOrDefault("")
     }
 
     /** Добавляет `/32` маршруты к endpoint'ам через физическую карту (чтобы UDP не уходил в туннель). */
@@ -337,11 +386,12 @@ class WindowsNetConfigurator(
         fun parseGatewayOutput(output: String): PhysicalGateway? {
             val line = output.lineSequence().map { it.trim() }.firstOrNull { '|' in it } ?: return null
             val parts = line.split('|')
-            if (parts.size != 2) return null
+            if (parts.size < 2) return null
             val hop = parts[0].trim()
             val idx = parts[1].trim().toIntOrNull() ?: return null
             if (CidrMath.parseIpv4(hop) == null || idx <= 0) return null
-            return PhysicalGateway(hop, idx)
+            val src = parts.getOrNull(2)?.trim()?.takeIf { CidrMath.parseIpv4(it) != null }.orEmpty()
+            return PhysicalGateway(nextHop = hop, interfaceIndex = idx, sourceIp = src)
         }
 
         /**
