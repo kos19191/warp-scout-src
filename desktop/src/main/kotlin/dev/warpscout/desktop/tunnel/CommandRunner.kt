@@ -82,7 +82,8 @@ class ProcessCommandRunner : CommandRunner {
 /** Управление автозапуском приложения в реестре Windows (HKCU — прав администратора не требует). */
 object WindowsAutostart {
     private const val REG_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"
-    private const val VALUE_NAME = "WarpScout"
+    private const val VALUE_NAME = "WilyScout"
+    private const val LEGACY_VALUE_NAME = "WarpScout"
 
     fun isWindows(): Boolean = "win" in System.getProperty("os.name").orEmpty().lowercase()
 
@@ -90,12 +91,15 @@ object WindowsAutostart {
         if (!isWindows()) return CommandResult(0, "не Windows", "")
         return if (enabled) {
             val launchCmd = resolveLaunchCommand()
-                ?: return CommandResult(-1, "", "не удалось определить путь к WarpScout.exe")
+                ?: return CommandResult(-1, "", "не удалось определить путь к WilyScout.exe")
+            // Удаляем старую запись WarpScout, чтобы не было двойного автозапуска после переименования.
+            runner.run(listOf("reg.exe", "delete", REG_KEY, "/v", LEGACY_VALUE_NAME, "/f"), timeoutMs = 4000L)
             runner.run(
                 listOf("reg.exe", "add", REG_KEY, "/v", VALUE_NAME, "/t", "REG_SZ", "/d", "\"$launchCmd\" --minimized", "/f"),
                 timeoutMs = 5000L
             )
         } else {
+            runner.run(listOf("reg.exe", "delete", REG_KEY, "/v", LEGACY_VALUE_NAME, "/f"), timeoutMs = 4000L)
             val res = runner.run(
                 listOf("reg.exe", "delete", REG_KEY, "/v", VALUE_NAME, "/f"),
                 timeoutMs = 5000L
@@ -109,16 +113,20 @@ object WindowsAutostart {
 
     fun isEnabled(runner: CommandRunner = ProcessCommandRunner()): Boolean {
         if (!isWindows()) return false
-        return runner.run(listOf("reg.exe", "query", REG_KEY, "/v", VALUE_NAME), timeoutMs = 4000L).ok
+        return runner.run(listOf("reg.exe", "query", REG_KEY, "/v", VALUE_NAME), timeoutMs = 4000L).ok ||
+            runner.run(listOf("reg.exe", "query", REG_KEY, "/v", LEGACY_VALUE_NAME), timeoutMs = 4000L).ok
     }
 
     private fun resolveLaunchCommand(): String? {
         val jpackageApp = System.getProperty("jpackage.app-path")?.takeIf { it.isNotBlank() }
         if (jpackageApp != null && File(jpackageApp).exists()) return jpackageApp
         val cmd = ProcessHandle.current().info().command().orElse(null)
-        if (cmd != null && cmd.lowercase().endsWith("warpscout.exe") && File(cmd).exists()) return cmd
-        val localExe = File(System.getProperty("user.dir") ?: ".", "WarpScout.exe")
-        if (localExe.exists()) return localExe.absolutePath
+        if (cmd != null && (cmd.lowercase().endsWith("wilyscout.exe") || cmd.lowercase().endsWith("warpscout.exe")) && File(cmd).exists()) return cmd
+        val cwd = System.getProperty("user.dir") ?: "."
+        for (exeName in listOf("WilyScout.exe", "WarpScout.exe")) {
+            val localExe = File(cwd, exeName)
+            if (localExe.exists()) return localExe.absolutePath
+        }
         return cmd
     }
 

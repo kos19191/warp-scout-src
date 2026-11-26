@@ -8,7 +8,7 @@ plugins {
     id("org.jetbrains.compose")
 }
 
-val appVersion = "1.10.30"
+val appVersion = "1.10.31"
 val githubRepo = "kos19191/warp-scout-src"
 
 val generatedBuildInfoDir = layout.buildDirectory.dir("generated/resources/buildinfo")
@@ -88,10 +88,10 @@ compose.desktop {
 
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Exe)
-            packageName = "WarpScout"
+            packageName = "WilyScout"
             packageVersion = appVersion
-            description = "WarpScout Desktop - Cloudflare WARP and AmneziaWG auto-tuner and tunnel"
-            vendor = "WarpScout"
+            description = "WilyScout Desktop - Cloudflare WARP and AmneziaWG auto-tuner, DPI bypass and Telegram proxy helper"
+            vendor = "WilyScout"
             copyright = "MIT License"
 
             // jdk.crypto.ec и java.net.http нужны в собранном JRE для HTTPS/DoH/Cloudflare.
@@ -108,7 +108,7 @@ compose.desktop {
             )
 
             windows {
-                menuGroup = "WarpScout"
+                menuGroup = "WilyScout"
                 shortcut = true
                 dirChooser = true
                 perUserInstall = false

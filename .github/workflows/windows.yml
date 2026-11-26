@@ -125,7 +125,7 @@ jobs:
           Copy-Item "desktop/windows/LICENSE-BYEDPI.txt" (Join-Path $resDir "LICENSE-BYEDPI.txt") -Force
           Write-Host "Вшит проверенный ByeDPI ($($exe.Name), $($exe.Length) байт) + MIT LICENSE → $resDir/"
 
-      - name: "Сборка портативного приложения (WarpScout.exe + встроенный JRE + Wintun + ByeDPI)"
+      - name: "Сборка портативного приложения (WilyScout.exe + встроенный JRE + Wintun + ByeDPI)"
         shell: pwsh
         run: |
           ./gradlew --no-daemon :desktop:createDistributable --stacktrace 2>&1 | Tee-Object -FilePath build-dist.log
@@ -141,13 +141,13 @@ jobs:
             exit 1
           }
 
-      - name: "Вшивание UAC-манифеста (requireAdministrator) в WarpScout.exe и добавление bin/wintun.dll"
+      - name: "Вшивание UAC-манифеста (requireAdministrator) в WilyScout.exe и добавление bin/wintun.dll"
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $appDir = "desktop/build/compose/binaries/main/app/WarpScout"
+          $appDir = "desktop/build/compose/binaries/main/app/WilyScout"
           & "desktop/windows/patch-uac-manifest.ps1" `
-            -ExePath (Join-Path $appDir "WarpScout.exe") `
+            -ExePath (Join-Path $appDir "WilyScout.exe") `
             -FallbackManifestPath "desktop/windows/WarpScout.manifest"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -157,13 +157,13 @@ jobs:
           Copy-Item "desktop/windows/LICENSE-BYEDPI.txt" "$appDir/bin/LICENSE-BYEDPI.txt" -Force
           Copy-Item "desktop/windows/LICENSE-BYEDPI.txt" "$appDir/LICENSE-BYEDPI.txt" -Force
 
-      - name: "Сборка MSI-установщика Windows (из патченного WarpScout.exe с UAC)"
+      - name: "Сборка MSI-установщика Windows (из патченного WilyScout.exe с UAC)"
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $versionLine = Select-String -Path "desktop/build.gradle.kts" -Pattern 'val appVersion = "([^"]+)"'
           $version = $versionLine.Matches[0].Groups[1].Value
-          $appDir = (Resolve-Path "desktop/build/compose/binaries/main/app/WarpScout").Path
+          $appDir = (Resolve-Path "desktop/build/compose/binaries/main/app/WilyScout").Path
           $iconPath = (Resolve-Path "desktop/src/main/resources/icons/warpscout.ico").Path
           $msiDest = "out-msi"
           New-Item -ItemType Directory -Force -Path $msiDest | Out-Null
@@ -185,14 +185,14 @@ jobs:
           & $jpackage `
             --type msi `
             --app-image $appDir `
-            --name "WarpScout" `
+            --name "WilyScout" `
             --app-version $version `
-            --vendor "WarpScout" `
-            --description "WarpScout Desktop - Cloudflare WARP and AmneziaWG auto-tuner and tunnel" `
+            --vendor "WilyScout" `
+            --description "WilyScout Desktop - Cloudflare WARP and AmneziaWG auto-tuner, DPI bypass and Telegram proxy helper" `
             --copyright "MIT License" `
             --icon $iconPath `
             --win-menu `
-            --win-menu-group "WarpScout" `
+            --win-menu-group "WilyScout" `
             --win-shortcut `
             --win-dir-chooser `
             --win-upgrade-uuid "7a6b3e1d-8c42-4d91-9b0f-45b9b9188a3c" `
@@ -217,19 +217,19 @@ jobs:
 
           New-Item -ItemType Directory -Force -Path "out-win" | Out-Null
 
-          $appDir = "desktop/build/compose/binaries/main/app/WarpScout"
+          $appDir = "desktop/build/compose/binaries/main/app/WilyScout"
           if (-not (Test-Path $appDir)) {
             throw "Не найден каталог сборки: $appDir"
           }
 
-          $zipPath = "out-win/WarpScout-$version-windows-x64-portable.zip"
+          $zipPath = "out-win/WilyScout-$version-windows-x64-portable.zip"
           Compress-Archive -Path "$appDir/*" -DestinationPath $zipPath -Force
 
           $msi = Get-ChildItem -Path "out-msi" -Filter "*.msi" | Select-Object -First 1
           if ($null -eq $msi) {
             throw "Не найден MSI-установщик в out-msi"
           }
-          $msiOut = "out-win/WarpScout-$version-windows-x64.msi"
+          $msiOut = "out-win/WilyScout-$version-windows-x64.msi"
           Copy-Item $msi.FullName $msiOut -Force
 
           Get-ChildItem -Path "out-win" -File | ForEach-Object {
@@ -242,7 +242,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: warpscout-windows-x64
+          name: wilyscout-windows-x64
           path: out-win/*
           if-no-files-found: error
 
@@ -259,7 +259,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
-          name: warpscout-windows-x64
+          name: wilyscout-windows-x64
           path: out-win
 
       - name: "Публикация релиза Windows"
@@ -271,30 +271,30 @@ jobs:
           VERSION=$(grep -oP 'val appVersion = "\K[^"]+' desktop/build.gradle.kts)
           TAG="${INPUT_TAG:-desktop-windows-preview}"
           {
-            echo "WarpScout Desktop $VERSION для Windows 10/11 (x64)."
+            echo "WilyScout Desktop $VERSION (ранее WarpScout) для Windows 10/11 (x64)."
             echo
             echo "Подбирает рабочую точку Cloudflare WARP и профиль шума AmneziaWG, поднимает"
-            echo "собственный системный туннель одной кнопкой (встроенное ядро :core + подписанный драйвер Wintun)"
-            echo "и живёт в системном трее. Сторонние VPN-клиенты устанавливать не нужно."
+            echo "собственный системный туннель одной кнопкой (встроенное ядро :core + подписанный драйвер Wintun),"
+            echo "включает встроенный обход DPI (ByeDPI) и подбор бесплатных Fake-TLS MTProto-прокси для Telegram."
             echo
-            echo "**По умолчанию включён «Пресет обхода РФ»:** зарубежные сайты и сервисы идут через туннель, а российские (банки, Госуслуги, Яндекс, VK, маркетплейсы) и локальная сеть — напрямую. Переключить на «Весь трафик» можно в один клик во вкладке *Маршруты*."
+            echo "**По умолчанию включён «Пресет обхода РФ»:** зарубежные сайты и сервисы идут через туннель, а российские (банки, Госуслуги, Яндекс, VK, маркетплейсы) и локальная сеть — напрямую. Настройки из старого каталога WarpScout переносятся автоматически."
             echo
             echo "| Файл | Описание |"
             echo "|---|---|"
-            echo "| \`WarpScout-$VERSION-windows-x64.msi\` | **Установщик Windows** (ярлык в меню Пуск, встроенные JRE и Wintun) |"
-            echo "| \`WarpScout-$VERSION-windows-x64-portable.zip\` | Портативная версия — распакуй и запусти \`WarpScout.exe\` |"
+            echo "| \`WilyScout-$VERSION-windows-x64.msi\` | **Установщик Windows** (ярлык в меню Пуск, встроенные JRE, Wintun и ByeDPI) |"
+            echo "| \`WilyScout-$VERSION-windows-x64-portable.zip\` | Портативная версия — распакуй и запусти \`WilyScout.exe\` |"
             echo
             echo "**Что нужно:** только Windows 10/11 (x64). Java, AmneziaWG и сторонние драйверы устанавливать не нужно — всё уже внутри."
           } > notes.md
 
           if gh release view "$TAG" > /dev/null 2>&1; then
-            # Удаляем устаревшие .msi/.zip от прошлых версий, чтобы в релизе всегда была только актуальная сборка.
-            OLD_ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' | grep -E '\.(msi|zip)$' | grep -v "WarpScout-$VERSION-" || true)
+            # Удаляем устаревшие .msi/.zip от прошлых версий (включая старые WarpScout-*), чтобы в релизе была только актуальная сборка.
+            OLD_ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' | grep -E '\.(msi|zip)$' | grep -v "WilyScout-$VERSION-" || true)
             for asset in $OLD_ASSETS; do
               gh release delete-asset "$TAG" "$asset" --yes || true
             done
-            gh release edit "$TAG" --title "WarpScout Desktop $VERSION (Windows)" --notes-file notes.md --prerelease
+            gh release edit "$TAG" --title "WilyScout Desktop $VERSION (Windows)" --notes-file notes.md --prerelease
             gh release upload "$TAG" out-win/* --clobber
           else
-            gh release create "$TAG" out-win/* --title "WarpScout Desktop $VERSION (Windows)" --notes-file notes.md --target "$GITHUB_SHA" --prerelease
+            gh release create "$TAG" out-win/* --title "WilyScout Desktop $VERSION (Windows)" --notes-file notes.md --target "$GITHUB_SHA" --prerelease
           fi

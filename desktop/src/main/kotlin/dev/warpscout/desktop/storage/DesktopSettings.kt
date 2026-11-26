@@ -13,7 +13,7 @@ enum class ThemeMode(val title: String) {
 
 enum class TunnelBackendMode(val title: String, val subtitle: String) {
     BUILTIN_WINTUN(
-        "Встроенный туннель WarpScout (Wintun)",
+        "Встроенный туннель WilyScout (Wintun)",
         "Собственный WireGuard/AmneziaWG туннель из ядра :core — сторонние программы не нужны"
     ),
     EXTERNAL_AWG(

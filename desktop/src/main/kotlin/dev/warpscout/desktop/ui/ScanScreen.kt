@@ -25,6 +25,8 @@ import dev.warpscout.desktop.engine.Formatters
 import dev.warpscout.desktop.storage.DesktopPoolMode
 import dev.warpscout.desktop.tunnel.ByeDpiPac
 import dev.warpscout.desktop.tunnel.ByeDpiPresets
+import dev.warpscout.desktop.tunnel.MtProtoSecretKind
+import dev.warpscout.desktop.tunnel.TelegramProxyEntry
 
 /**
  * Вкладка «Подбор»: настройка пула точек и профилей шума AWG, запуск автоподбора,
@@ -645,6 +647,114 @@ fun ScanScreen(state: DesktopUiState, controller: DesktopController) {
                         }
                     }
                 }
+            }
+        }
+
+        // --- 4. Бесплатные MTProto-прокси (Fake-TLS) и быстрая привязка ByeDPI к Telegram ---
+        WarpCard {
+            SectionHeader(
+                title = "Прокси для Telegram (MTProto)",
+                subtitle = "Автоподбор бесплатных Fake-TLS (ee…) прокси из обновляемых списков с проверкой пинга с вашего ПК"
+            )
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { controller.findTelegramProxies() },
+                    enabled = !state.tgProxyBusy,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    if (state.tgProxyBusy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    } else {
+                        Icon(Icons.Rounded.Send, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(if (state.tgProxyBusy) "Ищу…" else "Найти MTProto-прокси", style = MaterialTheme.typography.labelMedium)
+                }
+
+                FilledTonalButton(
+                    onClick = {
+                        if (!dpi.running && dpi.available) {
+                            controller.toggleByeDpi()
+                        }
+                        DesktopPlatform.openUrl(TelegramProxyEntry.socksTgLink("127.0.0.1", s.byeDpiPort))
+                    },
+                    enabled = dpi.available,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)
+                ) {
+                    Text("ByeDPI → TG", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
+            if (state.tgProxyStatus.isNotBlank()) {
+                Text(
+                    state.tgProxyStatus,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (state.tgProxies.isNotEmpty()) warp.ok else warp.accentOrange
+                )
+            }
+
+            if (state.tgProxies.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    state.tgProxies.forEach { entry ->
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = warp.surfaceHigh.copy(alpha = 0.7f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        "${entry.server}:${entry.port}",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1
+                                    )
+                                    Text(
+                                        "${entry.badge} · ${entry.latencyMs} мс",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (entry.kind == MtProtoSecretKind.FAKE_TLS) warp.ok else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1
+                                    )
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    FilledTonalButton(
+                                        onClick = { DesktopPlatform.openUrl(entry.tgLink) },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                    ) {
+                                        Text("В Telegram", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            clipboard.setText(AnnotatedString(entry.tmeLink))
+                                            controller.showBanner("Ссылка прокси скопирована (подойдёт и для телефона)")
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                    ) {
+                                        Icon(Icons.Rounded.ContentCopy, contentDescription = "Копировать", modifier = Modifier.size(14.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (!state.tgProxyBusy) {
+                Text(
+                    "Нажмите «Найти MTProto-прокси» — WilyScout скачает свежие бесплатные Fake-TLS прокси, проверит пинг прямо с вашего провайдера и даст кнопку «В Telegram» в один клик. Переписка остаётся зашифрованной MTProto, но публичные прокси могут добавлять спонсорский канал и со временем отключаться.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }

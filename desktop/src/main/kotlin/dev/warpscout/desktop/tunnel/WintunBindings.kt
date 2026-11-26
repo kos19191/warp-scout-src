@@ -234,12 +234,12 @@ class WintunDevice private constructor(
             if (existing != null) {
                 runCatching { api.WintunCloseAdapter(existing) }
             }
-            var adapter = api.WintunCreateAdapter(WString(name), WString("WarpScout"), guid)
+            var adapter = api.WintunCreateAdapter(WString(name), WString("WilyScout"), guid)
             if (adapter == null) {
                 val err = Native.getLastError()
                 // Если GUID занят (например, предыдущая сессия ещё завершается) — пробуем без фиксированного GUID.
                 if (err == ERROR_ALREADY_EXISTS || err == HRESULT_ALREADY_EXISTS) {
-                    adapter = api.WintunCreateAdapter(WString(name), WString("WarpScout"), null)
+                    adapter = api.WintunCreateAdapter(WString(name), WString("WilyScout"), null)
                 }
                 if (adapter == null) {
                     val finalErr = Native.getLastError()

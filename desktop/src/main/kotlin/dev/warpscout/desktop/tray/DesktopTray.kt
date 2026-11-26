@@ -37,7 +37,7 @@ class DesktopTray(
     private val iconCache = HashMap<TunnelPhase, Image>()
 
     private val popup = PopupMenu()
-    private val itemStatus = MenuItem("WarpScout · Выключен").apply { isEnabled = false }
+    private val itemStatus = MenuItem("WilyScout · Выключен").apply { isEnabled = false }
     private val itemPrimary = MenuItem("Найти точку и подключиться")
     private val itemNext = MenuItem("Другая точка входа")
     private val menuTop3 = Menu("Лучшие конфиги")
@@ -80,7 +80,7 @@ class DesktopTray(
             popup.add(itemShow)
             popup.add(itemExit)
 
-            val icon = TrayIcon(renderIcon(TunnelPhase.OFF), "WarpScout — Выключен", popup).apply {
+            val icon = TrayIcon(renderIcon(TunnelPhase.OFF), "WilyScout — Выключен", popup).apply {
                 isImageAutoSize = true
                 addMouseListener(object : MouseAdapter() {
                     override fun mouseClicked(e: MouseEvent) {
@@ -130,8 +130,8 @@ class DesktopTray(
                 TunnelPhase.OFF -> "Выключен"
             }
 
-            icon.toolTip = "WarpScout — $statusLine"
-            itemStatus.label = "WarpScout: $statusLine"
+            icon.toolTip = "WilyScout — $statusLine"
+            itemStatus.label = "WilyScout: $statusLine"
 
             itemPrimary.label = when {
                 phase == TunnelPhase.CONNECTED -> "Выключить туннель"

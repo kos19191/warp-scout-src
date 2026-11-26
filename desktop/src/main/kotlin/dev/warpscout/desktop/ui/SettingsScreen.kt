@@ -152,7 +152,7 @@ fun SettingsScreen(state: DesktopUiState, controller: DesktopController) {
         WarpCard {
             SectionHeader(
                 title = "Движок туннеля",
-                subtitle = "По умолчанию работает собственный туннель WarpScout (Wintun + ядро :core) — без сторонних программ."
+                subtitle = "По умолчанию работает собственный туннель WilyScout (Wintun + ядро :core) — без сторонних программ."
             )
 
             dev.warpscout.desktop.storage.TunnelBackendMode.entries.forEach { mode ->

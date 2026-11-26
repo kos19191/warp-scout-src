@@ -79,7 +79,7 @@ fun DesktopApp(
                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
                                         Text(
-                                            "WarpScout",
+                                            "WilyScout",
                                             style = MaterialTheme.typography.titleMedium,
                                             fontWeight = FontWeight.Bold
                                         )

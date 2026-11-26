@@ -56,8 +56,8 @@ class NativeWintunTunnelManager(
     private val netConfig: WindowsNetConfigurator = netConfig ?: WindowsNetConfigurator(runner, onLog = onLog)
 
     companion object {
-        const val ADAPTER_NAME = "WarpScout"
-        const val PROBE_ADAPTER_NAME = "WarpScoutProbe"
+        const val ADAPTER_NAME = "WilyScout"
+        const val PROBE_ADAPTER_NAME = "WilyScoutProbe"
         const val MAX_FAILOVER_QUEUE = WindowsTunnelManager.MAX_FAILOVER_QUEUE
         const val COOLDOWN_MS = WindowsTunnelManager.COOLDOWN_MS
     }
@@ -141,7 +141,7 @@ class NativeWintunTunnelManager(
                     phase = TunnelPhase.ERROR,
                     statusMessage = "Нужны права администратора",
                     lastError = msg,
-                    advice = "Нажмите «Перезапустить от администратора» — Windows запросит подтверждение UAC, после чего WarpScout сразу поднимет встроенный туннель без сторонних программ.",
+                    advice = "Нажмите «Перезапустить от администратора» — Windows запросит подтверждение UAC, после чего WilyScout сразу поднимет встроенный туннель без сторонних программ.",
                     needsElevation = true
                 )
             }
@@ -217,7 +217,7 @@ class NativeWintunTunnelManager(
         if (requireElevationCheck && !runner.isElevated()) return null
         if (!skipNetConfig && !isDriverReady()) return null
         return object : TunnelVerifier {
-            override val title: String = "Встроенный туннель WarpScout (Wintun)"
+            override val title: String = "Встроенный туннель WilyScout (Wintun)"
 
             @Volatile
             private var probeTun: TunDevice? = null
@@ -410,7 +410,7 @@ class NativeWintunTunnelManager(
                         phase = TunnelPhase.ERROR,
                         statusMessage = if (elev) "Нужны права администратора" else "Ошибка адаптера Wintun",
                         lastError = msg,
-                        advice = if (elev) "Перезапустите WarpScout от имени администратора для создания сетевого адаптера."
+                        advice = if (elev) "Перезапустите WilyScout от имени администратора для создания сетевого адаптера."
                         else "Проверьте, что драйвер wintun.dll не заблокирован антивирусом.",
                         needsElevation = elev
                     )

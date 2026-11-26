@@ -37,20 +37,37 @@ class DesktopPaths(val root: File) {
                 return DesktopPaths(File(cwd, "data")).also { it.ensureDirs() }
             }
             val os = System.getProperty("os.name").orEmpty().lowercase()
-            val base = when {
+            val (base, legacy) = when {
                 "win" in os -> {
                     val appData = System.getenv("APPDATA")?.takeIf { it.isNotBlank() }
-                    if (appData != null) File(appData, "WarpScout")
-                    else File(System.getProperty("user.home"), "AppData/Roaming/WarpScout")
+                    val rootDir = if (appData != null) File(appData) else File(System.getProperty("user.home"), "AppData/Roaming")
+                    File(rootDir, "WilyScout") to File(rootDir, "WarpScout")
                 }
-                "mac" in os -> File(System.getProperty("user.home"), "Library/Application Support/WarpScout")
+                "mac" in os -> {
+                    val rootDir = File(System.getProperty("user.home"), "Library/Application Support")
+                    File(rootDir, "WilyScout") to File(rootDir, "WarpScout")
+                }
                 else -> {
                     val xdg = System.getenv("XDG_CONFIG_HOME")?.takeIf { it.isNotBlank() }
-                    if (xdg != null) File(xdg, "warpscout")
-                    else File(System.getProperty("user.home"), ".config/warpscout")
+                    val rootDir = if (xdg != null) File(xdg) else File(System.getProperty("user.home"), ".config")
+                    File(rootDir, "wilyscout") to File(rootDir, "warpscout")
                 }
             }
-            return DesktopPaths(base).also { it.ensureDirs() }
+            val paths = DesktopPaths(base).also { it.ensureDirs() }
+            migrateLegacyDataIfNeeded(legacy, paths)
+            return paths
+        }
+
+        /** Мягкий перенос настроек, Топ-3 и аккаунта WARP из старого каталога WarpScout при первом запуске WilyScout. */
+        internal fun migrateLegacyDataIfNeeded(legacyRoot: File, target: DesktopPaths) {
+            if (!legacyRoot.isDirectory || target.settingsFile.exists()) return
+            for (name in listOf("settings.json", "shortlist.json", "active.conf", "account-cache.json")) {
+                val src = File(legacyRoot, name)
+                val dst = File(target.root, name)
+                if (src.isFile && !dst.exists()) {
+                    runCatching { src.copyTo(dst, overwrite = false) }
+                }
+            }
         }
     }
 }

@@ -152,7 +152,7 @@ object AppUpdater {
                         Advapi32Util.registryGetStringValue(hkey, full, "DisplayName")
                     else null
                 }.getOrNull() ?: continue
-                if (!name.equals("WarpScout", ignoreCase = true)) continue
+                if (!name.equals("WilyScout", ignoreCase = true) && !name.equals("WarpScout", ignoreCase = true)) continue
                 val loc = runCatching {
                     if (Advapi32Util.registryValueExists(hkey, full, "InstallLocation"))
                         Advapi32Util.registryGetStringValue(hkey, full, "InstallLocation")
@@ -443,9 +443,9 @@ object AppUpdater {
         val logEsc = psQuote(File(updatesDir, "update.log").absolutePath)
         val errEsc = psQuote(File(updatesDir, UPDATE_ERROR_FILE).absolutePath)
         val msiLogEsc = psQuote(File(updatesDir, "msi-install.log").absolutePath)
-        val defaultExePath = currentExe?.absolutePath ?: """C:\Program Files\WarpScout\WarpScout.exe"""
+        val defaultExePath = currentExe?.absolutePath ?: """C:\Program Files\WilyScout\WilyScout.exe"""
         val defaultExeEsc = psQuote(defaultExePath)
-        val appDirEsc = psQuote((currentExe?.parentFile ?: File("""C:\Program Files\WarpScout""")).absolutePath)
+        val appDirEsc = psQuote((currentExe?.parentFile ?: File("""C:\Program Files\WilyScout""")).absolutePath)
 
         return buildString {
             appendLine("\$ErrorActionPreference = 'Stop'")
@@ -457,7 +457,7 @@ object AppUpdater {
             appendLine("  \$ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'")
             appendLine("  Add-Content -Path \$logFile -Value \"[\$ts] \$msg\" -Encoding UTF8 -ErrorAction SilentlyContinue")
             appendLine("}")
-            appendLine("Write-Log '=== WarpScout self-update start ==='")
+            appendLine("Write-Log '=== WilyScout self-update start ==='")
             appendLine("Write-Log 'Mode: ${if (isMsi) "MSI" else "PORTABLE"} | WaitPid: $currentPid | File: ${psQuote(downloadedFile.absolutePath)}'")
             appendLine("try {")
             if (currentPid > 0L) {
@@ -531,10 +531,10 @@ object AppUpdater {
                 appendLine("  if (Test-Path -LiteralPath \$stageDir) { Remove-Item -LiteralPath \$stageDir -Recurse -Force }")
                 appendLine("  Write-Log \"Extracting archive to \$stageDir...\"")
                 appendLine("  Expand-Archive -LiteralPath \$zipPath -DestinationPath \$stageDir -Force")
-                // Если в архиве файлы лежат внутри одной корневой подпапки (например WarpScout/WarpScout.exe), разворачиваем её.
+                // Если в архиве файлы лежат внутри одной корневой подпапки (например WilyScout/WilyScout.exe), разворачиваем её.
                 appendLine("  \$srcRoot = \$stageDir")
-                appendLine("  if (-not (Test-Path -LiteralPath (Join-Path \$srcRoot 'WarpScout.exe'))) {")
-                appendLine("    \$sub = Get-ChildItem -LiteralPath \$stageDir -Directory | Where-Object { Test-Path -LiteralPath (Join-Path \$_.FullName 'WarpScout.exe') } | Select-Object -First 1")
+                appendLine("  if (-not (Test-Path -LiteralPath (Join-Path \$srcRoot 'WilyScout.exe')) -and -not (Test-Path -LiteralPath (Join-Path \$srcRoot 'WarpScout.exe'))) {")
+                appendLine("    \$sub = Get-ChildItem -LiteralPath \$stageDir -Directory | Where-Object { (Test-Path -LiteralPath (Join-Path \$_.FullName 'WilyScout.exe')) -or (Test-Path -LiteralPath (Join-Path \$_.FullName 'WarpScout.exe')) } | Select-Object -First 1")
                 appendLine("    if (\$sub) { \$srcRoot = \$sub.FullName }")
                 appendLine("  }")
                 appendLine("  Write-Log \"Syncing files from \$srcRoot -> \$appDir\"")
@@ -562,17 +562,17 @@ object AppUpdater {
             appendLine("  Set-Content -Path \$errFile -Value \$msg -Encoding UTF8 -ErrorAction SilentlyContinue")
             appendLine("} finally {")
             if (launchAfter) {
-                appendLine("  \$candidates = @('$defaultExeEsc', 'C:\\Program Files\\WarpScout\\WarpScout.exe')")
+                appendLine("  \$candidates = @('C:\\Program Files\\WilyScout\\WilyScout.exe', (Join-Path \$appDir 'WilyScout.exe'), '$defaultExeEsc', 'C:\\Program Files\\WarpScout\\WarpScout.exe')")
                 appendLine("  \$launchExe = \$candidates | Where-Object { \$_ -and (Test-Path -LiteralPath \$_) } | Select-Object -First 1")
                 appendLine("  if (\$launchExe) {")
                 appendLine("    \$workDir = Split-Path -Parent \$launchExe")
                 appendLine("    Write-Log \"Relaunching: \$launchExe\"")
                 appendLine("    Start-Process -FilePath \$launchExe -WorkingDirectory \$workDir")
                 appendLine("  } else {")
-                appendLine("    Write-Log 'WarpScout.exe not found for relaunch'")
+                appendLine("    Write-Log 'WilyScout.exe not found for relaunch'")
                 appendLine("  }")
             }
-            appendLine("  Write-Log '=== WarpScout self-update end ==='")
+            appendLine("  Write-Log '=== WilyScout self-update end ==='")
             appendLine("}")
         }
     }

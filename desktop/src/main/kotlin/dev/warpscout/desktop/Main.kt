@@ -157,7 +157,7 @@ fun main(args: Array<String>) {
                     }
                 },
                 state = windowState,
-                title = "WarpScout",
+                title = "WilyScout",
                 icon = windowIcon,
                 resizable = true
             ) {

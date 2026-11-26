@@ -62,6 +62,8 @@ import dev.warpscout.desktop.tunnel.WindowsNetConfigurator
 import dev.warpscout.desktop.tunnel.WindowsTunnelManager
 import dev.warpscout.desktop.tunnel.WintunLoader
 import dev.warpscout.desktop.update.AppUpdater
+import dev.warpscout.desktop.tunnel.TelegramProxyEntry
+import dev.warpscout.desktop.tunnel.TelegramProxyFinder
 import dev.warpscout.desktop.update.BuildInfo
 import dev.warpscout.desktop.update.InstallKind
 import dev.warpscout.desktop.update.ReleaseInfo
@@ -141,6 +143,11 @@ data class DesktopUiState(
     val dpiBusy: Boolean = false,
     val dpiStatus: String = "",
     val dpiComparison: DpiComparison? = null,
+
+    // Подбор бесплатных MTProto-прокси (Fake-TLS) для Telegram
+    val tgProxyBusy: Boolean = false,
+    val tgProxyStatus: String = "",
+    val tgProxies: List<TelegramProxyEntry> = emptyList(),
 
     // Обновления из GitHub Releases
     val update: UpdateUiState = UpdateUiState(),
@@ -263,7 +270,7 @@ class DesktopController(
             }, "warpscout-byedpi-shutdown"))
         }
 
-        appendLog("WarpScout Desktop v${BuildInfo.current.version} запущен (каталог данных: ${store.paths.root.absolutePath})")
+        appendLog("WilyScout Desktop v${BuildInfo.current.version} запущен (каталог данных: ${store.paths.root.absolutePath})")
         AppUpdater.consumeLastUpdateError(store.paths.updatesDir)?.let { prevErr ->
             appendLog("Предыдущая попытка обновления не завершилась: $prevErr", LogLevel.WARN)
             showBanner(prevErr, isError = true)
@@ -295,7 +302,7 @@ class DesktopController(
 
             val modeInfo = when (s.backendMode) {
                 TunnelBackendMode.BUILTIN_WINTUN ->
-                    if (wintunOk) "Встроенный туннель WarpScout (Wintun готов)"
+                    if (wintunOk) "Встроенный туннель WilyScout (Wintun готов)"
                     else "Встроенный туннель (wintun.dll не найден в bin/)"
                 TunnelBackendMode.EXTERNAL_AWG ->
                     if (engine.available) "Внешний движок: ${engine.kind.title} (${engine.sourceLabel})"
@@ -313,7 +320,7 @@ class DesktopController(
         val args = if (autoConnect) listOf("--autoconnect") else emptyList()
         val ok = onRelaunchElevated(args)
         if (!ok) {
-            showBanner("Запрос прав администратора отменён или недоступен. Запустите WarpScout.exe правой кнопкой → «От имени администратора».", isError = true)
+            showBanner("Запрос прав администратора отменён или недоступен. Запустите WilyScout.exe правой кнопкой → «От имени администратора».", isError = true)
         }
     }
 
@@ -368,7 +375,7 @@ class DesktopController(
                 val rel = res.release
                 appendLog("Доступно обновление: ${rel.title} (${rel.tagName})", LogLevel.OK)
                 if (!manual) {
-                    onTrayNotify("Доступно обновление WarpScout", "${rel.title} — можно обновить из программы")
+                    onTrayNotify("Доступно обновление WilyScout", "${rel.title} — можно обновить из программы")
                 } else {
                     showBanner("Найдено обновление: ${rel.title}")
                 }
@@ -486,7 +493,7 @@ class DesktopController(
             )
 
             if (launched) {
-                appendLog("Установщик обновления запущен — закрываю WarpScout для замены файлов…", LogLevel.OK)
+                appendLog("Установщик обновления запущен — закрываю WilyScout для замены файлов…", LogLevel.OK)
                 onExitForUpdate()
             } else {
                 val err = "Не удалось запустить установщик автоматически. Файл сохранён в ${dl.file.absolutePath}"
@@ -639,7 +646,7 @@ class DesktopController(
                         } else {
                             _state.update { it.copy(activeConfText = compactConf) }
                         }
-                        onTrayNotify("WarpScout подключён", "Точка: ${nativeTunnel.snapshot.activeEndpoint}")
+                        onTrayNotify("WilyScout подключён", "Точка: ${nativeTunnel.snapshot.activeEndpoint}")
                     }
                 } else {
                     val engine = resolveFreshEngine()
@@ -648,7 +655,7 @@ class DesktopController(
                         val compactConf = WgConf.render(parsed)
                         store.saveActiveConfigText(compactConf)
                         _state.update { it.copy(activeConfText = compactConf) }
-                        onTrayNotify("WarpScout подключён", "Точка: ${externalAwgTunnel.snapshot.activeEndpoint}")
+                        onTrayNotify("WilyScout подключён", "Точка: ${externalAwgTunnel.snapshot.activeEndpoint}")
                     }
                 }
             } finally {
@@ -668,7 +675,7 @@ class DesktopController(
         worker.execute {
             val ok = if (isBuiltinMode) nativeTunnel.switchToNextEndpoint() else externalAwgTunnel.switchToNextEndpoint()
             if (ok) {
-                onTrayNotify("WarpScout", "Сменил точку на $currentActiveEndpoint")
+                onTrayNotify("WilyScout", "Сменил точку на $currentActiveEndpoint")
             } else {
                 showBanner("Не удалось сменить точку — попробуйте запустить подбор", isError = true)
             }
@@ -904,6 +911,42 @@ class DesktopController(
             } catch (e: Exception) {
                 appendLog("Ошибка проверки ресурсов: ${e.message}", LogLevel.ERROR)
                 _state.update { it.copy(checkingResources = false) }
+            }
+        }
+    }
+
+    /** Подбор бесплатных живых MTProto-прокси (приоритет Fake-TLS) для Telegram с замером пинга с этого ПК. */
+    fun findTelegramProxies() {
+        if (_state.value.tgProxyBusy) return
+        _state.update { it.copy(tgProxyBusy = true, tgProxyStatus = "Загружаю свежие списки MTProto-прокси…") }
+        auxWorker.execute {
+            try {
+                appendLog("Подбор MTProto-прокси для Telegram (приоритет Fake-TLS)…")
+                val res = TelegramProxyFinder.findBestProxies(
+                    onProgress = { msg -> _state.update { it.copy(tgProxyStatus = msg) } }
+                )
+                val status = when {
+                    res.proxies.isNotEmpty() -> {
+                        val fakeTlsCount = res.proxies.count { it.kind == dev.warpscout.desktop.tunnel.MtProtoSecretKind.FAKE_TLS }
+                        "Найдено ${res.proxies.size} быстрых прокси (Fake-TLS: $fakeTlsCount) из ${res.totalTested} проверенных"
+                    }
+                    else -> res.error ?: "Рабочие MTProto-прокси не найдены"
+                }
+                appendLog(
+                    "MTProto-прокси Telegram: $status",
+                    if (res.proxies.isNotEmpty()) LogLevel.OK else LogLevel.WARN
+                )
+                _state.update {
+                    it.copy(
+                        tgProxyBusy = false,
+                        tgProxyStatus = status,
+                        tgProxies = res.proxies
+                    )
+                }
+            } catch (e: Exception) {
+                val msg = "Ошибка подбора MTProto-прокси: ${e.message}"
+                appendLog(msg, LogLevel.ERROR)
+                _state.update { it.copy(tgProxyBusy = false, tgProxyStatus = msg) }
             }
         }
     }

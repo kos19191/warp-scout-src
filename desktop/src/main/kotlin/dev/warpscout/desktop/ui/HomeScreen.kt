@@ -169,7 +169,7 @@ fun HomeScreen(
                     )
                 }
                 Text(
-                    "Можно переключиться на встроенный туннель WarpScout (Wintun) — сторонние программы не понадобятся — или установить AmneziaWG.",
+                    "Можно переключиться на встроенный туннель WilyScout (Wintun) — сторонние программы не понадобятся — или установить AmneziaWG.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -218,7 +218,7 @@ fun HomeScreen(
                             modifier = Modifier.size(19.dp)
                         )
                         Text(
-                            text = upd.available?.let { "Доступно обновление ${it.version}" } ?: "Обновление WarpScout",
+                            text = upd.available?.let { "Доступно обновление ${it.version}" } ?: "Обновление WilyScout",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
@@ -373,13 +373,13 @@ fun HomeScreen(
                             if (shield != null) {
                                 Image(
                                     bitmap = shield,
-                                    contentDescription = "WarpScout",
+                                    contentDescription = "WilyScout",
                                     modifier = Modifier.size(92.dp)
                                 )
                             } else {
                                 Icon(
                                     Icons.Rounded.Shield,
-                                    contentDescription = "WarpScout",
+                                    contentDescription = "WilyScout",
                                     tint = ringColor,
                                     modifier = Modifier.size(56.dp)
                                 )
@@ -399,7 +399,7 @@ fun HomeScreen(
                     state.tunnel.phase == TunnelPhase.ERROR -> state.tunnel.advice ?: state.tunnel.lastError.orEmpty()
                     state.hasConfig && state.settings.lastTuneEndpoint.isNotBlank() ->
                         "Готова точка: ${state.settings.lastTuneEndpoint} (${state.settings.lastTuneJunk})"
-                    else -> "Нажмите кнопку — WarpScout сам найдёт точку Cloudflare и поднимет туннель"
+                    else -> "Нажмите кнопку — WilyScout сам найдёт точку Cloudflare и поднимет туннель"
                 }
 
                 Text(
