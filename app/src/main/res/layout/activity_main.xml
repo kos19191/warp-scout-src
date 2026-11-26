@@ -31,7 +31,7 @@
         android:layout_height="0dp"
         android:layout_weight="1">
 
-        <!-- ══════ вкладка «Старт» ══════ -->
+        <!-- ══════ вкладка «Главная» ══════ -->
         <ScrollView
             android:id="@+id/pageStart"
             android:layout_width="match_parent"
@@ -48,8 +48,9 @@
 
                 <!--
                   Порядок блоков — по частоте использования. Сверху то, что нужно каждый день
-                  (подключить/отключить), ниже итог последнего подбора, потом список замен, и только
-                  в конце то, что открывают редко: подбор и резервные копии.
+                  (подключить/отключить, где точка входа и выход), ниже итог последнего подбора, потом
+                  список замен и в конце подбор. Резервная копия и «Показать конфиг» с 1.10.49-beta5
+                  — в «Настройках».
                 -->
                 <com.google.android.material.card.MaterialCardView
                     android:id="@+id/cardConnect"
@@ -108,6 +109,15 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:text="@string/btn_stop" />
+
+                        <!-- Где мы: точка входа и выход (с 1.10.49-beta5 здесь, а не в «Настройках»). -->
+                        <TextView
+                            android:id="@+id/textEndpointNow"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_s"
+                            android:textAppearance="?attr/textAppearanceBodySmall"
+                            android:textColor="?attr/colorOnSurfaceVariant" />
                     </LinearLayout>
                 </com.google.android.material.card.MaterialCardView>
 
@@ -240,65 +250,10 @@
                             android:layout_marginTop="@dimen/space_s"
                             android:text="@string/btn_run" />
 
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnQuickConfig"
-                            style="@style/Widget.Material3.Button.TextButton"
-                            android:layout_width="match_parent"
-                            android:layout_height="@dimen/button_secondary"
-                            android:text="@string/btn_quick_config" />
-
                         <TextView
                             android:id="@+id/textQuickHint"
                             style="@style/Text.Caption"
                             android:text="@string/quick_hint" />
-                    </LinearLayout>
-                </com.google.android.material.card.MaterialCardView>
-
-                <com.google.android.material.card.MaterialCardView
-                    style="@style/Card.Section"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/space_m">
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical"
-                        android:padding="@dimen/space_l">
-
-                        <TextView
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:text="@string/home_backup_title"
-                            android:textAppearance="?attr/textAppearanceLabelLarge"
-                            android:textColor="?attr/colorOnSurfaceVariant" />
-
-                        <!--
-                          Обе кнопки — одного вида и во всю ширину, друг под другом: раньше
-                          «Восстановить последний» была текстовой кнопкой в половину строки,
-                          подпись не влезала и обрезалась, а рядом с рамкой выглядела как текст.
-                        -->
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnBackup"
-                            style="@style/Widget.Material3.Button.OutlinedButton"
-                            android:layout_width="match_parent"
-                            android:layout_height="@dimen/button_secondary"
-                            android:layout_marginTop="@dimen/space_s"
-                            android:text="@string/btn_backup"
-                            android:textSize="14sp" />
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnRestore"
-                            style="@style/Widget.Material3.Button.OutlinedButton"
-                            android:layout_width="match_parent"
-                            android:layout_height="@dimen/button_secondary"
-                            android:layout_marginTop="@dimen/space_xs"
-                            android:text="@string/btn_restore"
-                            android:textSize="14sp" />
-
-                        <TextView
-                            style="@style/Text.Caption"
-                            android:text="@string/backup_hint" />
                     </LinearLayout>
                 </com.google.android.material.card.MaterialCardView>
 
@@ -337,7 +292,7 @@
             </LinearLayout>
         </ScrollView>
 
-        <!-- ══════ вкладка «Скан» ══════ -->
+        <!-- ══════ вкладка «Подбор» ══════ -->
         <ScrollView
             android:id="@+id/pageScan"
             android:layout_width="match_parent"
@@ -544,7 +499,16 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="@string/check_auto_apply" />
-<com.google.android.material.button.MaterialButton
+
+                <!-- С 1.10.49-beta5 здесь, у фонового подбора (было в «Настройках» → «Автоматика»). -->
+                <!-- С 1.10.34: выход WARP в России (журнал 23.11 — медиа Telegram рывками) -->
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatAbroad"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_abroad" />
+
+                <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnSaveScan"
                     style="@style/Widget.Material3.Button"
                     android:layout_width="match_parent"
@@ -556,630 +520,13 @@
             </LinearLayout>
         </ScrollView>
 
-        <!-- ══════ вкладка «Конфиг» ══════ -->
-        <ScrollView
-            android:id="@+id/pageConfig"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:fillViewport="true"
-            android:visibility="gone">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:paddingStart="16dp"
-                android:paddingEnd="16dp"
-                android:paddingBottom="24dp">
-
-                <!-- ── оформление: тема для обоих видов экрана ── -->
-                <TextView
-                    style="@style/SectionHeader"
-                    android:text="@string/theme_title" />
-
-                <com.google.android.material.button.MaterialButtonToggleGroup
-                    android:id="@+id/themeGroup"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    app:selectionRequired="true"
-                    app:singleSelection="true">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnThemeSystem"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/theme_system" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnThemeLight"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/theme_light" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnThemeDark"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/theme_dark" />
-                </com.google.android.material.button.MaterialButtonToggleGroup>
-
-                <!-- ── автоматика: каждую новую функцию можно выключить ── -->
-                <TextView
-                    style="@style/SectionHeader"
-                    android:text="@string/feat_title" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/feat_hint"
-                    android:textAppearance="?attr/textAppearanceBodySmall"
-                    android:textColor="?attr/colorOnSurfaceVariant" />
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchFeatAutoStart"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/feat_autostart" />
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchFeatLink"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/feat_link" />
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchFeatProbe"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/feat_probe" />
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchFeatSpeed"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/feat_speed" />
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchFeatFreeze"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/feat_freeze" />
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchFeatDns"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/feat_dns" />
-
-                <!-- С 1.10.34: выход WARP в России (журнал 23.11 — медиа Telegram рывками) -->
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchFeatAbroad"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/feat_abroad" />
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchFeatTgSecond"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/feat_tg_second" />
-
-                <!-- 1.10.43: эксперимент «выход для приложений — сам» и итог его замеров. -->
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchFeatAppAuto"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/feat_app_auto" />
-
-                <TextView
-                    android:id="@+id/textAppAuto"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="4dp"
-                    android:layout_marginBottom="6dp"
-                    android:textAppearance="?attr/textAppearanceBodySmall"
-                    android:visibility="gone" />
-
-                <!-- 1.10.44-beta1: «Второй выход» — приложение целиком (TikTok без утечек мимо туннеля). -->
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchFeatSecondWhole"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/feat_second_whole" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="4dp"
-                    android:layout_marginBottom="6dp"
-                    android:text="@string/feat_second_whole_note"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <!-- ── что туннелируем и как (переехало из вкладки «Туннель») ── -->
-
-
-                <!-- ── сеть/DNS ───────────────────────────────────────────── -->
-                <TextView
-                    style="@style/SectionHeader"
-                    android:text="@string/section_network" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/label_dns" />
-
-                <Spinner
-                    android:id="@+id/dnsSpinner"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content" />
-
-                <!-- Что сейчас пойдёт в конфиг: адреса по имени или запасные (см. DnsBook). -->
-                <TextView
-                    android:id="@+id/textDnsNote"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textAppearance="?attr/textAppearanceBodySmall"
-                    android:textColor="?attr/colorOnSurfaceVariant"
-                    android:visibility="gone" />
-
-                <!--
-                  Кнопки «Проверить: откроется ли ChatGPT» больше нет (с 1.10.30): какую страну видит
-                  ChatGPT, показывает строка в списке «Доступность» Журнала.
-                -->
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.textfield.TextInputLayout
-                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:hint="@string/label_keepalive">
-
-                        <com.google.android.material.textfield.TextInputEditText
-                            android:id="@+id/editKeepalive"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:inputType="number" />
-                    </com.google.android.material.textfield.TextInputLayout>
-
-                    <com.google.android.material.textfield.TextInputLayout
-                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:hint="@string/label_mtu">
-
-                        <com.google.android.material.textfield.TextInputEditText
-                            android:id="@+id/editMtu"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:inputType="number" />
-                    </com.google.android.material.textfield.TextInputLayout>
-                </LinearLayout>
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchIpv6"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/switch_ipv6" />
-
-                <!-- «Что туннелировать» переехало на вкладку «Туннелирование» (с 1.10.31). -->
-
-                <TextView
-                    android:id="@+id/textEndpointNow"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:textAppearance="?attr/textAppearanceBodyMedium" />
-
-                <!-- Кнопки «Другая точка входа» больше нет (с 1.10.31): точку меняют «Лучшие точки»
-                     и автоматика сервиса. -->
-
-
-
-
-            
-                <!-- ── второй выход (регион) ──────────────────────────────── -->
-                <TextView
-                    style="@style/SectionHeader"
-                    android:text="@string/section_second_exit" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/second_hint"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <!-- С 1.10.44 (в бете — с 1.10.44-beta5): ключ Proton кнопкой, без сайта — вход в аккаунт,
-                     без аккаунта или сторонний сервис (ProtonConnect). -->
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnProtonConnect"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="@string/btn_proton_connect" />
-
-                <!-- С 1.10.39: шаги Proton внутри приложения и конфиг из скачанного файла — без
-                     копирования текста. -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnProtonGuide"
-                        style="@style/Widget.Material3.Button.TonalButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/btn_proton_guide" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnSecondFile"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:text="@string/btn_second_file" />
-                </LinearLayout>
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchSecondExit"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:text="@string/second_switch" />
-
-                <com.google.android.material.textfield.TextInputLayout
-                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:hint="@string/hint_second_conf">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editSecondConf"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:fontFamily="monospace"
-                        android:gravity="top"
-                        android:inputType="textMultiLine"
-                        android:minLines="3" />
-                </com.google.android.material.textfield.TextInputLayout>
-
-                <!-- Proton VPN Free (с 1.10.31): конфиг узнаётся сам, сервер выбирает приложение —
-                     здесь только страна. Видно, только когда вставлен конфиг Proton. -->
-                <LinearLayout
-                    android:id="@+id/panelSecondProton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:orientation="vertical"
-                    android:visibility="gone">
-
-                    <TextView
-                        android:id="@+id/textSecondProton"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:textAppearance="?attr/textAppearanceBodySmall"
-                        android:textColor="?attr/colorOnSurfaceVariant" />
-
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
-                        android:text="@string/second_country_label"
-                        android:textAppearance="?attr/textAppearanceBodyMedium" />
-
-                    <Spinner
-                        android:id="@+id/spinnerSecondCountry"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:minHeight="48dp" />
-                </LinearLayout>
-
-                <!-- Сайты второго выхода — сами, по спискам (с 1.10.31): галочки строит код. -->
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="@string/second_sources_label"
-                    android:textAppearance="?attr/textAppearanceBodyMedium" />
-
-                <LinearLayout
-                    android:id="@+id/secondSourcesBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical" />
-
-                <com.google.android.material.textfield.TextInputLayout
-                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:hint="@string/hint_second_domains">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editSecondDomains"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:gravity="top"
-                        android:inputType="textMultiLine|textNoSuggestions"
-                        android:minLines="2" />
-                </com.google.android.material.textfield.TextInputLayout>
-
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/switchSecondViaWarp"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:text="@string/second_via_warp" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnSecondResolve"
-                    style="@style/Widget.Material3.Button.TonalButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="@string/btn_second_resolve" />
-
-                <!-- Ход и итог кнопки выше (с 1.10.32): шаг 1–3 с полосой, потом цветная строка —
-                     работает ли второй выход и что делать. Раньше итог уходил в плашку на «Главной»,
-                     а отсюда её не видно. -->
-                <com.google.android.material.progressindicator.LinearProgressIndicator
-                    android:id="@+id/progressSecond"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/space_s"
-                    android:indeterminate="true"
-                    android:visibility="gone" />
-
-                <TextView
-                    android:id="@+id/textSecondResult"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:textAppearance="?attr/textAppearanceBodyMedium"
-                    android:visibility="gone" />
-
-                <TextView
-                    android:id="@+id/textSecondState"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <!-- ── экспорт: под кого, какой сервер, какие каналы ──────── -->
-                <TextView
-                    style="@style/SectionHeader"
-                    android:text="@string/section_export" />
-
-                <com.google.android.material.button.MaterialButtonToggleGroup
-                    android:id="@+id/exportGroup"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    app:selectionRequired="true"
-                    app:singleSelection="true">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnTargetAmnezia"
-                        style="?attr/materialButtonOutlinedStyle"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:textSize="11sp"
-                        android:text="@string/tgt_amnezia" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnTargetWg"
-                        style="?attr/materialButtonOutlinedStyle"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:textSize="11sp"
-                        android:text="@string/tgt_wg" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnTargetClash"
-                        style="?attr/materialButtonOutlinedStyle"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:textSize="11sp"
-                        android:text="@string/tgt_clash" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnTargetRoutes"
-                        style="?attr/materialButtonOutlinedStyle"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:textSize="11sp"
-                        android:text="@string/tgt_routes" />
-                </com.google.android.material.button.MaterialButtonToggleGroup>
-
-                <TextView
-                    android:id="@+id/textTargetNote"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.textfield.TextInputLayout
-                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:hint="@string/hint_server">
-
-                        <com.google.android.material.textfield.TextInputEditText
-                            android:id="@+id/editServer"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:inputType="textUri" />
-                    </com.google.android.material.textfield.TextInputLayout>
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnPickServer"
-                        style="@style/Widget.Material3.Button.TextButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/btn_pick_server" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnExportAmnezia"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/btn_export_amnezia" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnCopy"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="6dp"
-                        android:layout_weight="1"
-                        android:text="@string/btn_copy" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnSave"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/btn_save" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnShare"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="6dp"
-                        android:layout_weight="1"
-                        android:text="@string/btn_share" />
-                </LinearLayout>
-
-                                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnSaveAndApply"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/btn_save_apply" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnSaveAndSend"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="6dp"
-                        android:layout_weight="1"
-                        android:text="@string/btn_save_send" />
-                </LinearLayout>
-
-<TextView
-                    android:id="@+id/textConfig"
-                    style="@style/Text.Mono"
-                    android:layout_marginTop="@dimen/space_s" />
-
-
-                <!-- ── шум: маскировка handshake (перенесён из вкладки «Обход DPI») ── -->
-                <TextView
-                    style="@style/SectionHeader"
-                    android:text="@string/section_junk" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/junk_note"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <LinearLayout
-                    android:id="@+id/junkBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:orientation="vertical" />
-
-<com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnSaveDpi"
-                    style="@style/Widget.Material3.Button"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="@string/btn_save_apply" />
-
-                <!-- ── сброс по умолчанию (с 1.10.32): всё как после установки ── -->
-                <TextView
-                    style="@style/SectionHeader"
-                    android:text="@string/section_reset" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/reset_note"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnResetAll"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:layout_marginBottom="16dp"
-                    android:text="@string/btn_reset_all"
-                    android:textColor="?attr/colorError"
-                    app:strokeColor="?attr/colorError" />
-
-            </LinearLayout>
-        </ScrollView>
-
         <!--
-          ══════ вкладка «Туннелирование» (с 1.10.31; была «Приложения») ══════
+          ══════ вкладка «Маршруты» (с 1.10.49-beta5; с 1.10.31 — «Туннелирование», до того «Приложения») ══════
           Что идёт через туннель: приложения, свои сайты или списки сайтов. Приложения и сайты
           действуют вместе: через туннель идут выбранные приложения и только к выбранным сайтам.
-          «Что туннелировать» из «Настроек» переехало сюда — ids прежние, логика сохранения та же.
+          «Что туннелировать» из «Настроек» переехало сюда — ids прежние, логика сохранения та же. С
+          1.10.49-beta5 здесь же второй выход и выход приложений: одна кнопка «Сохранить и применить»
+          внизу сохраняет всю вкладку.
         -->
         <ScrollView
             android:id="@+id/pageApps"
@@ -1500,6 +847,222 @@
                         android:textAppearance="?attr/textAppearanceBodySmall" />
                 </LinearLayout>
 
+                <!-- С 1.10.49-beta5 здесь (было в «Настройках» → «Автоматика»): DNS при раздельных маршрутах. -->
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatDns"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_dns" />
+
+                <!-- С 1.10.49-beta5 «Второй выход» — здесь, рядом с тем, что идёт через туннель (было в «Настройках»). -->
+                <!-- ── второй выход (регион) ──────────────────────────────── -->
+                <TextView
+                    style="@style/SectionHeader"
+                    android:text="@string/section_second_exit" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/second_hint"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <!-- С 1.10.44 (в бете — с 1.10.44-beta5): ключ Proton кнопкой, без сайта — вход в аккаунт,
+                     без аккаунта или сторонний сервис (ProtonConnect). -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnProtonConnect"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/btn_proton_connect" />
+
+                <!-- С 1.10.39: шаги Proton внутри приложения и конфиг из скачанного файла — без
+                     копирования текста. -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnProtonGuide"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/btn_proton_guide" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnSecondFile"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:text="@string/btn_second_file" />
+                </LinearLayout>
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchSecondExit"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/second_switch" />
+
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:hint="@string/hint_second_conf">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/editSecondConf"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:gravity="top"
+                        android:inputType="textMultiLine"
+                        android:minLines="3" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <!-- Proton VPN Free (с 1.10.31): конфиг узнаётся сам, сервер выбирает приложение —
+                     здесь только страна. Видно, только когда вставлен конфиг Proton. -->
+                <LinearLayout
+                    android:id="@+id/panelSecondProton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:id="@+id/textSecondProton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:textColor="?attr/colorOnSurfaceVariant" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text="@string/second_country_label"
+                        android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+                    <Spinner
+                        android:id="@+id/spinnerSecondCountry"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:minHeight="48dp" />
+                </LinearLayout>
+
+                <!-- Сайты второго выхода — сами, по спискам (с 1.10.31): галочки строит код. -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/second_sources_label"
+                    android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+                <LinearLayout
+                    android:id="@+id/secondSourcesBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:hint="@string/hint_second_domains">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/editSecondDomains"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="top"
+                        android:inputType="textMultiLine|textNoSuggestions"
+                        android:minLines="2" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchSecondViaWarp"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/second_via_warp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnSecondResolve"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/btn_second_resolve" />
+
+                <!-- Ход и итог кнопки выше (с 1.10.32): шаг 1–3 с полосой, потом цветная строка —
+                     работает ли второй выход и что делать. Раньше итог уходил в плашку на «Главной»,
+                     а отсюда её не видно. -->
+                <com.google.android.material.progressindicator.LinearProgressIndicator
+                    android:id="@+id/progressSecond"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_s"
+                    android:indeterminate="true"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/textSecondResult"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textAppearance="?attr/textAppearanceBodyMedium"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/textSecondState"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <!-- ── выход для приложений (с 1.10.49-beta5 здесь; было в «Настройках» → «Автоматика») ── -->
+                <TextView
+                    style="@style/SectionHeader"
+                    android:text="@string/routes_app_exit_title" />
+
+                <!-- 1.10.44-beta1: «Второй выход» — приложение целиком (TikTok без утечек мимо туннеля). -->
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatSecondWhole"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_second_whole" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:layout_marginBottom="6dp"
+                    android:text="@string/feat_second_whole_note"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <!-- 1.10.43: эксперимент «выход для приложений — сам» и итог его замеров. -->
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatAppAuto"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_app_auto" />
+
+                <TextView
+                    android:id="@+id/textAppAuto"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:layout_marginBottom="6dp"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:visibility="gone" />
+
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnSaveApps"
                     style="@style/Widget.Material3.Button"
@@ -1510,9 +1073,14 @@
             </LinearLayout>
         </ScrollView>
 
-        <!-- ══════ вкладка «Журнал» ══════ -->
-        <androidx.core.widget.NestedScrollView
-            android:id="@+id/pageLog"
+        <!--
+          ══════ вкладка «Обход» (с 1.10.49-beta5) ══════
+          Что открывается, что режет провайдер и чем это обойти: «Доступность», «Режут DPI или адрес?»
+          со стратегиями и «Прокси для Telegram». Раньше всё это лежало в «Журнале» среди окон
+          просмотра; ids прежние, логика та же.
+        -->
+        <ScrollView
+            android:id="@+id/pageBypass"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:fillViewport="true"
@@ -1527,149 +1095,9 @@
                 android:paddingBottom="24dp">
 
                 <TextView
-                    android:id="@+id/textLogHint"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="@string/journal_empty"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <!--
-                  Журнал — в своём окне фиксированной высоты: строки листаются внутри, а не
-                  растягивают страницу на несколько экранов. Так до карточек ниже (диагностика,
-                  копирование) можно добраться одним движением, не проезжая весь лог.
-                -->
-                <androidx.core.widget.NestedScrollView
-                    android:id="@+id/logBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="300dp"
-                    android:layout_marginTop="8dp"
-                    android:background="?attr/colorSurfaceContainerLow"
-                    android:fillViewport="true"
-                    android:fadeScrollbars="false"
-                    android:padding="8dp"
-                    android:scrollbars="vertical">
-
-                    <TextView
-                        android:id="@+id/textLog"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:fontFamily="monospace"
-                        android:textAppearance="?attr/textAppearanceBodySmall" />
-                </androidx.core.widget.NestedScrollView>
-
-                <!--
-                  Очистка журнала. Нужна не «для чистоты»: после обновления человек собирает
-                  свежий журнал, и хвост прошлой версии в нём только мешает — в разборе
-                  смешиваются два разных поведения. Кнопка рядом с самим журналом, а не в
-                  настройках: её ищут там, где читают строки.
-                -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnLogClear"
-                        style="@style/Widget.Material3.Button.TextButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/btn_log_clear" />
-                </LinearLayout>
-
-                <!-- ── диагностика туннеля (flavor tunnel) ───────────────── -->
-                <LinearLayout
-                    android:id="@+id/tunnelDiagBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical">
-
-                    <TextView
-                        style="@style/SectionHeader"
-                        android:text="@string/section_tunnel_diag" />
-
-                    <!--
-                      Диагностика — тоже в своём окне: раньше она шла простынёй вниз страницы,
-                      и «Скопировать журнал» уезжала за несколько экранов.
-                    -->
-                    <androidx.core.widget.NestedScrollView
-                        android:id="@+id/diagBox"
-                        android:layout_width="match_parent"
-                        android:layout_height="240dp"
-                        android:layout_marginTop="4dp"
-                        android:background="?attr/colorSurfaceContainerLow"
-                        android:fillViewport="true"
-                        android:fadeScrollbars="false"
-                        android:padding="8dp"
-                        android:scrollbars="vertical">
-
-                        <LinearLayout
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:orientation="vertical">
-
-                            <TextView
-                                android:id="@+id/textTunnelState"
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:fontFamily="monospace"
-                                android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                            <LinearLayout
-                                android:id="@+id/tunnelAdviceBox"
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:layout_marginTop="4dp"
-                                android:orientation="vertical" />
-                        </LinearLayout>
-                    </androidx.core.widget.NestedScrollView>
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="horizontal">
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnTunnelRefresh"
-                            style="@style/Widget.Material3.Button.TextButton"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="@string/btn_tunnel_refresh" />
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnTunnelCopy"
-                            style="@style/Widget.Material3.Button.TextButton"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="@string/btn_tunnel_copy" />
-                    </LinearLayout>
-
-                    <!--
-                      Журнал файлом .txt: в буфер обмена идёт только хвост, а файл несёт журнал
-                      целиком — его удобнее отправить.
-                    -->
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnTunnelExport"
-                        style="@style/Widget.Material3.Button.TextButton"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="@string/btn_log_export" />
-                </LinearLayout>
-
-                <TextView
-                    android:id="@+id/textNetwork"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                <TextView
-                    android:id="@+id/textKeys"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textAppearance="?attr/textAppearanceBodySmall" />
+                    style="@style/Text.Caption"
+                    android:layout_marginTop="@dimen/space_s"
+                    android:text="@string/bypass_intro" />
 
                 <!--
                   ── доступность (с 1.10.30): что открылось через туннель и что без VPN ──
@@ -1941,6 +1369,14 @@
                     android:text="@string/tg_proxy_hint"
                     android:textAppearance="?attr/textAppearanceBodySmall" />
 
+                <!-- С 1.10.49-beta5 здесь, у прокси для Telegram (было в «Настройках» → «Автоматика»):
+                     сам Telegram через второй выход, а прокси ниже — запасной путь вручную. -->
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchFeatTgSecond"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/feat_tg_second" />
+
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnTgProxyFind"
                     style="@style/Widget.Material3.Button.TonalButton"
@@ -1979,6 +1415,794 @@
                     android:textAppearance="?attr/textAppearanceBodySmall"
                     android:textIsSelectable="true"
                     android:visibility="gone" />
+            </LinearLayout>
+        </ScrollView>
+
+        <!--
+          ══════ вкладка «Настройки» ══════
+          С 1.10.49-beta5 — гармошкой: видны только заголовки разделов, нажатие раскрывает раздел
+          (SettingsAccordion), раскрытые запоминаются. Второй выход и выход приложений переехали в
+          «Маршруты», поиск выхода за рубежом — в «Подбор», Telegram — в «Обход»; резервная копия
+          пришла с «Главной», версия и обновления — из «Журнала». ids прежние.
+        -->
+        <ScrollView
+            android:id="@+id/pageConfig"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:fillViewport="true"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:paddingBottom="24dp">
+
+                <LinearLayout
+                    android:id="@+id/groupConnHead"
+                    style="@style/SettingsGroupHead">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            style="@style/SettingsGroupTitle"
+                            android:text="@string/group_conn_title" />
+
+                        <TextView
+                            style="@style/SettingsGroupSummary"
+                            android:text="@string/group_conn_summary" />
+                    </LinearLayout>
+
+                    <ImageView
+                        android:id="@+id/groupConnArrow"
+                        style="@style/SettingsGroupArrow" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/groupConnBody"
+                    style="@style/SettingsGroupBody">
+
+                    <TextView
+                        style="@style/SettingsSubHeader"
+                        android:text="@string/section_network" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/label_dns" />
+
+                    <Spinner
+                        android:id="@+id/dnsSpinner"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content" />
+
+                    <!-- Что сейчас пойдёт в конфиг: адреса по имени или запасные (см. DnsBook). -->
+                    <TextView
+                        android:id="@+id/textDnsNote"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:textColor="?attr/colorOnSurfaceVariant"
+                        android:visibility="gone" />
+
+                    <!--
+                      Кнопки «Проверить: откроется ли ChatGPT» больше нет (с 1.10.30): какую страну видит
+                      ChatGPT, показывает строка в списке «Доступность» (с 1.10.49-beta5 — вкладка «Обход»).
+                    -->
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.textfield.TextInputLayout
+                            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:hint="@string/label_keepalive">
+
+                            <com.google.android.material.textfield.TextInputEditText
+                                android:id="@+id/editKeepalive"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:inputType="number" />
+                        </com.google.android.material.textfield.TextInputLayout>
+
+                        <com.google.android.material.textfield.TextInputLayout
+                            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:layout_weight="1"
+                            android:hint="@string/label_mtu">
+
+                            <com.google.android.material.textfield.TextInputEditText
+                                android:id="@+id/editMtu"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:inputType="number" />
+                        </com.google.android.material.textfield.TextInputLayout>
+                    </LinearLayout>
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchIpv6"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/switch_ipv6" />
+
+                    <TextView
+                        style="@style/SettingsSubHeader"
+                        android:text="@string/section_junk" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/junk_note"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <LinearLayout
+                        android:id="@+id/junkBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:orientation="vertical" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnSaveDpi"
+                        style="@style/Widget.Material3.Button"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/btn_save_apply" />
+                </LinearLayout>
+
+                <View style="@style/SettingsGroupDivider" />
+
+                <LinearLayout
+                    android:id="@+id/groupAutoHead"
+                    style="@style/SettingsGroupHead">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            style="@style/SettingsGroupTitle"
+                            android:text="@string/feat_title" />
+
+                        <TextView
+                            style="@style/SettingsGroupSummary"
+                            android:text="@string/group_auto_summary" />
+                    </LinearLayout>
+
+                    <ImageView
+                        android:id="@+id/groupAutoArrow"
+                        style="@style/SettingsGroupArrow" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/groupAutoBody"
+                    style="@style/SettingsGroupBody">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/feat_hint"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:textColor="?attr/colorOnSurfaceVariant" />
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchFeatAutoStart"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/feat_autostart" />
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchFeatLink"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/feat_link" />
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchFeatProbe"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/feat_probe" />
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchFeatSpeed"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/feat_speed" />
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchFeatFreeze"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/feat_freeze" />
+                </LinearLayout>
+
+                <View style="@style/SettingsGroupDivider" />
+
+                <LinearLayout
+                    android:id="@+id/groupExportHead"
+                    style="@style/SettingsGroupHead">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            style="@style/SettingsGroupTitle"
+                            android:text="@string/group_export_title" />
+
+                        <TextView
+                            style="@style/SettingsGroupSummary"
+                            android:text="@string/group_export_summary" />
+                    </LinearLayout>
+
+                    <ImageView
+                        android:id="@+id/groupExportArrow"
+                        style="@style/SettingsGroupArrow" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/groupExportBody"
+                    style="@style/SettingsGroupBody">
+
+                    <com.google.android.material.button.MaterialButtonToggleGroup
+                        android:id="@+id/exportGroup"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        app:selectionRequired="true"
+                        app:singleSelection="true">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnTargetAmnezia"
+                            style="?attr/materialButtonOutlinedStyle"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:textSize="11sp"
+                            android:text="@string/tgt_amnezia" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnTargetWg"
+                            style="?attr/materialButtonOutlinedStyle"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:textSize="11sp"
+                            android:text="@string/tgt_wg" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnTargetClash"
+                            style="?attr/materialButtonOutlinedStyle"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:textSize="11sp"
+                            android:text="@string/tgt_clash" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnTargetRoutes"
+                            style="?attr/materialButtonOutlinedStyle"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:textSize="11sp"
+                            android:text="@string/tgt_routes" />
+                    </com.google.android.material.button.MaterialButtonToggleGroup>
+
+                    <TextView
+                        android:id="@+id/textTargetNote"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.textfield.TextInputLayout
+                            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:hint="@string/hint_server">
+
+                            <com.google.android.material.textfield.TextInputEditText
+                                android:id="@+id/editServer"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:inputType="textUri" />
+                        </com.google.android.material.textfield.TextInputLayout>
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnPickServer"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/btn_pick_server" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnExportAmnezia"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/btn_export_amnezia" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnCopy"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="6dp"
+                            android:layout_weight="1"
+                            android:text="@string/btn_copy" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnSave"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/btn_save" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnShare"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="6dp"
+                            android:layout_weight="1"
+                            android:text="@string/btn_share" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnSaveAndApply"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/btn_save_apply" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnSaveAndSend"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="6dp"
+                            android:layout_weight="1"
+                            android:text="@string/btn_save_send" />
+                    </LinearLayout>
+
+                    <!-- «Показать конфиг» (с 1.10.49-beta5 здесь, а не на «Главной»): конфиг — в окне ниже. -->
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnQuickConfig"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="@dimen/button_secondary"
+                        android:layout_marginTop="@dimen/space_s"
+                        android:text="@string/btn_quick_config" />
+
+                    <TextView
+                        android:id="@+id/textConfig"
+                        style="@style/Text.Mono"
+                        android:layout_marginTop="@dimen/space_s" />
+                </LinearLayout>
+
+                <View style="@style/SettingsGroupDivider" />
+
+                <LinearLayout
+                    android:id="@+id/groupBackupHead"
+                    style="@style/SettingsGroupHead">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            style="@style/SettingsGroupTitle"
+                            android:text="@string/home_backup_title" />
+
+                        <TextView
+                            style="@style/SettingsGroupSummary"
+                            android:text="@string/group_backup_summary" />
+                    </LinearLayout>
+
+                    <ImageView
+                        android:id="@+id/groupBackupArrow"
+                        style="@style/SettingsGroupArrow" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/groupBackupBody"
+                    style="@style/SettingsGroupBody">
+
+                    <!--
+                      Обе кнопки — одного вида и во всю ширину, друг под другом: раньше
+                      «Восстановить последний» была текстовой кнопкой в половину строки,
+                      подпись не влезала и обрезалась, а рядом с рамкой выглядела как текст.
+                    -->
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnBackup"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="@dimen/button_secondary"
+                        android:layout_marginTop="@dimen/space_s"
+                        android:text="@string/btn_backup"
+                        android:textSize="14sp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnRestore"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="@dimen/button_secondary"
+                        android:layout_marginTop="@dimen/space_xs"
+                        android:text="@string/btn_restore"
+                        android:textSize="14sp" />
+
+                    <TextView
+                        style="@style/Text.Caption"
+                        android:text="@string/backup_hint" />
+                </LinearLayout>
+
+                <View style="@style/SettingsGroupDivider" />
+
+                <LinearLayout
+                    android:id="@+id/groupUpdatesHead"
+                    style="@style/SettingsGroupHead">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            style="@style/SettingsGroupTitle"
+                            android:text="@string/group_updates_title" />
+
+                        <TextView
+                            style="@style/SettingsGroupSummary"
+                            android:text="@string/group_updates_summary" />
+                    </LinearLayout>
+
+                    <ImageView
+                        android:id="@+id/groupUpdatesArrow"
+                        style="@style/SettingsGroupArrow" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/groupUpdatesBody"
+                    style="@style/SettingsGroupBody">
+
+                    <TextView
+                        android:id="@+id/textVersion"
+                        style="@style/Text.Caption" />
+
+                    <!-- Обновление (с 1.10.31): только по нажатию — проверить релиз, скачать, поставить поверх. -->
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnCheckUpdate"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="@dimen/button_secondary"
+                        android:layout_marginTop="@dimen/space_s"
+                        android:text="@string/btn_check_update"
+                        android:textSize="14sp" />
+                </LinearLayout>
+
+                <View style="@style/SettingsGroupDivider" />
+
+                <LinearLayout
+                    android:id="@+id/groupThemeHead"
+                    style="@style/SettingsGroupHead">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            style="@style/SettingsGroupTitle"
+                            android:text="@string/group_theme_title" />
+
+                        <TextView
+                            style="@style/SettingsGroupSummary"
+                            android:text="@string/group_theme_summary" />
+                    </LinearLayout>
+
+                    <ImageView
+                        android:id="@+id/groupThemeArrow"
+                        style="@style/SettingsGroupArrow" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/groupThemeBody"
+                    style="@style/SettingsGroupBody">
+
+                    <com.google.android.material.button.MaterialButtonToggleGroup
+                        android:id="@+id/themeGroup"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        app:selectionRequired="true"
+                        app:singleSelection="true">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnThemeSystem"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/theme_system" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnThemeLight"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/theme_light" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnThemeDark"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/theme_dark" />
+                    </com.google.android.material.button.MaterialButtonToggleGroup>
+                </LinearLayout>
+
+                <View style="@style/SettingsGroupDivider" />
+
+                <LinearLayout
+                    android:id="@+id/groupResetHead"
+                    style="@style/SettingsGroupHead">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            style="@style/SettingsGroupTitle"
+                            android:text="@string/section_reset" />
+
+                        <TextView
+                            style="@style/SettingsGroupSummary"
+                            android:text="@string/group_reset_summary" />
+                    </LinearLayout>
+
+                    <ImageView
+                        android:id="@+id/groupResetArrow"
+                        style="@style/SettingsGroupArrow" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/groupResetBody"
+                    style="@style/SettingsGroupBody">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/reset_note"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnResetAll"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:layout_marginBottom="16dp"
+                        android:text="@string/btn_reset_all"
+                        android:textColor="?attr/colorError"
+                        app:strokeColor="?attr/colorError" />
+                </LinearLayout>
+            </LinearLayout>
+        </ScrollView>
+
+        <!-- ══════ вкладка «Журнал» ══════ -->
+        <androidx.core.widget.NestedScrollView
+            android:id="@+id/pageLog"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:fillViewport="true"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:paddingBottom="24dp">
+
+                <TextView
+                    android:id="@+id/textLogHint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/journal_empty"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <!--
+                  Журнал — в своём окне фиксированной высоты: строки листаются внутри, а не
+                  растягивают страницу на несколько экранов. Так до карточек ниже (диагностика,
+                  копирование) можно добраться одним движением, не проезжая весь лог.
+                -->
+                <androidx.core.widget.NestedScrollView
+                    android:id="@+id/logBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="300dp"
+                    android:layout_marginTop="8dp"
+                    android:background="?attr/colorSurfaceContainerLow"
+                    android:fillViewport="true"
+                    android:fadeScrollbars="false"
+                    android:padding="8dp"
+                    android:scrollbars="vertical">
+
+                    <TextView
+                        android:id="@+id/textLog"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+                </androidx.core.widget.NestedScrollView>
+
+                <!--
+                  Очистка журнала. Нужна не «для чистоты»: после обновления человек собирает
+                  свежий журнал, и хвост прошлой версии в нём только мешает — в разборе
+                  смешиваются два разных поведения. Кнопка рядом с самим журналом, а не в
+                  настройках: её ищут там, где читают строки.
+                -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnLogClear"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/btn_log_clear" />
+                </LinearLayout>
+
+                <!-- ── диагностика туннеля (flavor tunnel) ───────────────── -->
+                <LinearLayout
+                    android:id="@+id/tunnelDiagBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/SectionHeader"
+                        android:text="@string/section_tunnel_diag" />
+
+                    <!--
+                      Диагностика — тоже в своём окне: раньше она шла простынёй вниз страницы,
+                      и «Скопировать журнал» уезжала за несколько экранов.
+                    -->
+                    <androidx.core.widget.NestedScrollView
+                        android:id="@+id/diagBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="240dp"
+                        android:layout_marginTop="4dp"
+                        android:background="?attr/colorSurfaceContainerLow"
+                        android:fillViewport="true"
+                        android:fadeScrollbars="false"
+                        android:padding="8dp"
+                        android:scrollbars="vertical">
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:id="@+id/textTunnelState"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:fontFamily="monospace"
+                                android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                            <LinearLayout
+                                android:id="@+id/tunnelAdviceBox"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="4dp"
+                                android:orientation="vertical" />
+                        </LinearLayout>
+                    </androidx.core.widget.NestedScrollView>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnTunnelRefresh"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/btn_tunnel_refresh" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnTunnelCopy"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/btn_tunnel_copy" />
+                    </LinearLayout>
+
+                    <!--
+                      Журнал файлом .txt: в буфер обмена идёт только хвост, а файл несёт журнал
+                      целиком — его удобнее отправить.
+                    -->
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnTunnelExport"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/btn_log_export" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/textNetwork"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <TextView
+                    android:id="@+id/textKeys"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
 
                 <!-- ── отчёт ──────────────────────────────────────────────── -->
                 <TextView
@@ -1988,22 +2212,6 @@
                 <TextView
                     android:id="@+id/textReport"
                     style="@style/Text.Mono" />
-
-
-                <TextView
-                    android:id="@+id/textVersion"
-                    style="@style/Text.Caption"
-                    android:layout_marginTop="@dimen/space_xl"
-                    android:gravity="center" />
-
-                <!-- Обновление (с 1.10.31): только по нажатию — проверить релиз, скачать, поставить поверх. -->
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnCheckUpdate"
-                    style="@style/Widget.Material3.Button.TextButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_gravity="center_horizontal"
-                    android:text="@string/btn_check_update" />
             </LinearLayout>
         </androidx.core.widget.NestedScrollView>
     </FrameLayout>
@@ -2023,7 +2231,7 @@
 
     <!--
       Навигация внизу: до неё дотягивается большой палец, и она не уезжает, когда содержимое
-      раздела длинное. Внутри — пять обычных кнопок, а не BottomNavigationView: у него слишком
+      раздела длинное. Внутри — шесть обычных кнопок, а не BottomNavigationView: у него слишком
       много собственной механики (меню, иконки, презентер, состояние выбора), и ошибка в ней
       роняет экран целиком. Здесь ломаться нечему.
     -->
@@ -2049,16 +2257,22 @@
             android:text="@string/tab_scan" />
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/nav_settings"
-            style="@style/Widget.WarpScout.NavButton"
-            android:layout_weight="1"
-            android:text="@string/tab_config" />
-
-        <com.google.android.material.button.MaterialButton
             android:id="@+id/nav_apps"
             style="@style/Widget.WarpScout.NavButton"
             android:layout_weight="1"
             android:text="@string/tab_apps" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/nav_bypass"
+            style="@style/Widget.WarpScout.NavButton"
+            android:layout_weight="1"
+            android:text="@string/tab_bypass" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/nav_settings"
+            style="@style/Widget.WarpScout.NavButton"
+            android:layout_weight="1"
+            android:text="@string/tab_config" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/nav_log"

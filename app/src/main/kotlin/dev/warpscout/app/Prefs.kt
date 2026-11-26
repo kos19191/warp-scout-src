@@ -763,6 +763,15 @@ class Prefs(private val context: Context) {
         get() = sp.getInt("themeMode", THEME_SYSTEM).coerceIn(THEME_SYSTEM, THEME_DARK)
         set(v) = sp.edit().putInt("themeMode", v.coerceIn(THEME_SYSTEM, THEME_DARK)).apply()
 
+    /**
+     * Какие разделы «Настроек» раскрыты (с 1.10.49-beta5, см. [SettingsAccordion]): ключи через
+     * запятую. Пусто — все свёрнуты, видны только заголовки.
+     */
+    var settingsOpen: Set<String>
+        get() = sp.getString("settingsOpen", "").orEmpty()
+            .split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        set(v) = sp.edit().putString("settingsOpen", v.sorted().joinToString(",")).apply()
+
     /** Регион выхода, определённый последним подключением (colo · страна · адрес). */
     var lastExitRegion: String
         get() = sp.getString("lastExitRegion", "").orEmpty()

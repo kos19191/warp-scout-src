@@ -1146,14 +1146,14 @@ class WarpVpnService : VpnService() {
         // невозможно объяснить, не заглядывая в настройки.
         TunnelDebug.stage(if (multiExit) "второй выход включён" else "второй выход выключен")
         if (tgViaSecond && tgFixed == AppExit.SECOND) {
-            TunnelDebug.stage("Telegram — через второй выход: так выбрано в «Туннелировании» (вопросов не задаю)")
+            TunnelDebug.stage("Telegram — через второй выход: так выбрано в «Маршрутах» (вопросов не задаю)")
         } else if (tgViaSecond) {
             TunnelDebug.stage(
                 "Telegram — через второй выход: на этой сети ты ответил «Переключить» (действует сутки), " +
                     "точка выходила через ${ExitSite.describe(tgSite)}; станет медленнее Москвы — верну через WARP"
             )
         } else if (tgFixed == AppExit.WARP && multiExit) {
-            TunnelDebug.stage("Telegram — всегда через WARP: так выбрано в «Туннелировании», второй выход для него выключен, вопросов не задаю")
+            TunnelDebug.stage("Telegram — всегда через WARP: так выбрано в «Маршрутах», второй выход для него выключен, вопросов не задаю")
         } else if (tgFixed == AppExit.SECOND && !quietSession) {
             TunnelDebug.stage("Telegram: выбран «Второй выход», но второго выхода в этой сессии нет — Telegram идёт через WARP")
         }
@@ -1864,7 +1864,7 @@ class WarpVpnService : VpnService() {
         val had = SplitRoutes.prefixesOf(cfg.allowedIps)
         if (wanted == had) return@runCatching null
         val next = cfg.copy(allowedIps = wanted.joinToString(", "))
-        TunnelDebug.stage("маршруты — нынешние из «Туннелирования» (${wanted.size}), а не из сохранённого конфига (${had.size})")
+        TunnelDebug.stage("маршруты — нынешние из «Маршрутов» (${wanted.size}), а не из сохранённого конфига (${had.size})")
         next to WgConf.render(next)
     }.getOrNull()
 
@@ -3074,7 +3074,7 @@ class WarpVpnService : VpnService() {
         val here = running && net == memoryNetKind()
         when {
             tgFixed != AppExit.AUTO -> TunnelDebug.stage(
-                "Telegram: ответ запомнен, но выход Telegram выбран в «Туннелировании» — по нему и идёт"
+                "Telegram: ответ запомнен, но выход Telegram выбран в «Маршрутах» — по нему и идёт"
             )
             !switch -> TunnelDebug.stage("Telegram: ответ «Оставить» — идёт через выход WARP, сутки на этой сети не спрашиваю")
             !here -> TunnelDebug.stage("Telegram: ответ «Переключить» запомнен на сутки для этой сети — переключу, когда туннель будет на ней")
@@ -3097,11 +3097,11 @@ class WarpVpnService : VpnService() {
         val settings = serviceSettings()
         // Выход Telegram выбран вручную (с 1.10.39) — подсказка о том, как его поменять.
         if (tgFixed == AppExit.WARP) {
-            return "Telegram всегда идёт через WARP — так выбрано в «Туннелировании»; если медиа тормозит, " +
+            return "Telegram всегда идёт через WARP — так выбрано в «Маршрутах»; если медиа тормозит, " +
                 "поставь в строке Telegram «Само» или «Второй выход»"
         }
         if (tgFixed == AppExit.SECOND) {
-            return "Telegram идёт через второй выход — так выбрано в «Туннелировании»; если медиа тормозит, " +
+            return "Telegram идёт через второй выход — так выбрано в «Маршрутах»; если медиа тормозит, " +
                 "поставь в строке Telegram «WARP»"
         }
         if (!ExitSite.isRussian(site)) {

@@ -253,6 +253,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             // Подключаемся к состоянию туннеля из его процесса (идемпотентно, см. TunnelStatusBus).
             TunnelStatusBus.install(this)
             setupNav(savedInstanceState?.getInt(STATE_TAB) ?: 0)
+            setupSettingsGroups()
             fillFromPrefs()
             buildJunkChecks()
             buildResourceList()
@@ -695,11 +696,16 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
      * Шесть вкладок вместо одной длинной страницы. Первая — «быстрый путь»: проверить,
      * сгенерировать, подключить — с настройками по умолчанию. Остальные нужны только когда
      * быстрый путь не сработал или нужен особый конфиг, поэтому ничего не удалено — всё разложено.
+     *
+     * С 1.10.49-beta5 — по задачам: «Главная» · «Подбор» · «Маршруты» (что идёт через туннель и
+     * второй выход) · «Обход» (доступность, DPI, прокси Telegram) · «Настройки» (гармошкой) ·
+     * «Журнал» (только смотреть: журнал, диагностика, отчёт). Человек спросил, почему настройки
+     * лежат в «Журнале», — раньше их туда складывали по мере появления.
      */
     private fun setupNav(initial: Int) {
         pages = listOf(
-            binding.pageStart, binding.pageScan, binding.pageConfig,
-            binding.pageApps, binding.pageLog
+            binding.pageStart, binding.pageScan, binding.pageApps,
+            binding.pageBypass, binding.pageConfig, binding.pageLog
         )
         navButtons().forEachIndexed { index, button ->
             button.setOnClickListener { showPage(index) }
@@ -708,9 +714,9 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         showPage(initial.coerceIn(0, pages.size - 1))
     }
 
-    /** Пять кнопок нижней панели в том же порядке, что и [pages]. */
+    /** Шесть кнопок нижней панели в том же порядке, что и [pages]. */
     private fun navButtons(): List<com.google.android.material.button.MaterialButton> = listOf(
-        binding.navStart, binding.navScan, binding.navSettings, binding.navApps, binding.navLog
+        binding.navStart, binding.navScan, binding.navApps, binding.navBypass, binding.navSettings, binding.navLog
     )
 
     /**
@@ -742,9 +748,10 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             if (safe == TAB_LOG) {
                 logTail.forceEnd()
                 diagTail.forceEnd()
-                // Подбор мог пройти в фоне — список «Доступность» показываем свежим.
-                renderAvailability()
             }
+            // Подбор мог пройти в фоне — список «Доступность» показываем свежим (с 1.10.49-beta5 он
+            // на вкладке «Обход», раньше был в «Журнале»).
+            if (safe == TAB_BYPASS) renderAvailability()
         }.onFailure { t ->
             TunnelDebug.error("не удалось открыть раздел $index: " + SafeMode.describe(t))
         }
@@ -801,18 +808,82 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         if (secondSetupUntil != 0L) outState.putLong(STATE_SECOND_SETUP, secondSetupUntil)
     }
 
-    /** «Сгенерировать конфиг» с первого экрана: тот же конфиг, что уйдёт в файл, только на виду. */
+    /**
+     * «Показать конфиг»: тот же конфиг, что уйдёт в файл, только на виду. С 1.10.49-beta5 кнопка
+     * не на «Главной», а в «Настройки» → «Экспорт конфига», прямо над окном конфига.
+     */
     private fun quickGenerate() {
         val cfg = currentConfig()
         if (cfg == null) {
             toast(getString(R.string.err_no_config))
-            showPage(TAB_CONFIG)
+            showSettingsGroup(GROUP_EXPORT)
             return
         }
         binding.textConfig.text = currentConfigText(cfg)
         prefs.lastConfigText = runCatching { WgConf.render(cfg) }.getOrDefault(prefs.lastConfigText)
-        showPage(TAB_CONFIG)
+        // Кнопка — к верху экрана, конфиг сразу под ней и виден целиком, насколько влезает.
+        showSettingsGroup(GROUP_EXPORT, binding.btnQuickConfig)
         toast(getString(R.string.quick_config_ready))
+    }
+
+    /** Разделы «Настроек» гармошкой (с 1.10.49-beta5); null — не собрались, всё раскрыто. */
+    private var settingsGroups: SettingsAccordion? = null
+
+    /**
+     * «Настройки» гармошкой: видны заголовки, раскрытые разделы запоминаются. Не собралось —
+     * разделы остаются раскрытыми (так они лежат в разметке): спрятать настройки хуже, чем
+     * показать их все сразу.
+     */
+    private fun setupSettingsGroups() {
+        val accordion = SettingsAccordion(prefs) { open ->
+            getString(if (open) R.string.group_expanded else R.string.group_collapsed)
+        }
+        runCatching {
+            accordion.add(GROUP_CONN, binding.groupConnHead, binding.groupConnBody, binding.groupConnArrow)
+            accordion.add(GROUP_AUTO, binding.groupAutoHead, binding.groupAutoBody, binding.groupAutoArrow)
+            accordion.add(GROUP_EXPORT, binding.groupExportHead, binding.groupExportBody, binding.groupExportArrow)
+            accordion.add(GROUP_BACKUP, binding.groupBackupHead, binding.groupBackupBody, binding.groupBackupArrow)
+            accordion.add(GROUP_UPDATES, binding.groupUpdatesHead, binding.groupUpdatesBody, binding.groupUpdatesArrow)
+            accordion.add(GROUP_THEME, binding.groupThemeHead, binding.groupThemeBody, binding.groupThemeArrow)
+            accordion.add(GROUP_RESET, binding.groupResetHead, binding.groupResetBody, binding.groupResetArrow)
+            settingsGroups = accordion
+        }.onFailure { t ->
+            runCatching { accordion.showAll() }
+            TunnelDebug.error("разделы настроек: " + SafeMode.describe(t))
+        }
+    }
+
+    /**
+     * Открыть «Настройки» на разделе [key]: раскрыть его и прокрутить так, чтобы [target] (иначе
+     * заголовок раздела) встал к верху экрана. Прокручиваем после раскладки: только что раскрытый
+     * раздел ещё не измерен, и до неё и место элемента, и длина страницы — прежние.
+     */
+    private fun showSettingsGroup(key: String, target: View? = null) {
+        showPage(TAB_CONFIG)
+        runCatching { settingsGroups?.open(key) }
+        val view = target ?: settingsGroups?.head(key) ?: return
+        val scroll = binding.pageConfig
+        val go = Runnable {
+            runCatching {
+                var y = 0
+                var v: View = view
+                while (v !== scroll) {
+                    y += v.top
+                    v = v.parent as? View ?: return@runCatching
+                }
+                val margin = (8 * resources.displayMetrics.density).toInt()
+                scroll.smoothScrollTo(0, (y - margin).coerceAtLeast(0))
+            }
+        }
+        runCatching {
+            scroll.viewTreeObserver.addOnGlobalLayoutListener(object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+                override fun onGlobalLayout() {
+                    runCatching { scroll.viewTreeObserver.removeOnGlobalLayoutListener(this) }
+                    scroll.post(go)
+                }
+            })
+            scroll.requestLayout()
+        }.onFailure { scroll.post(go) }
     }
 
     // ------------------------------------------------------ приложения в туннеле
@@ -843,7 +914,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         binding.editAppSearch.doAfterTextChanged { rebuildAppsList() }
         rebuildAppsList()
         runCatching { setupTunnelTab() }.onFailure { t ->
-            TunnelDebug.error("вкладка «Туннелирование»: " + SafeMode.describe(t))
+            TunnelDebug.error("вкладка «Маршруты»: " + SafeMode.describe(t))
         }
     }
 
@@ -6764,7 +6835,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             refreshRoutesState()
             updateSitesState()
             updateTunnelSummary()
-        }.onFailure { t -> TunnelDebug.error("туннелирование: вкладка не обновилась — " + SafeMode.describe(t)) }
+        }.onFailure { t -> TunnelDebug.error("маршруты: вкладка не обновилась — " + SafeMode.describe(t)) }
         suppressSettingsReconnect = false
         applyWithRoutes(
             "туннелирование",
@@ -7209,9 +7280,22 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         /** Пауза между переездом ползунка «Расширенный режим» и сменой вида. */
         const val MODE_SWITCH_DELAY_MS = 280L
 
+        /** Вкладки в порядке нижней панели (с 1.10.49-beta5 их шесть, см. setupNav). */
         const val TAB_START = 0
-        const val TAB_CONFIG = 2
-        const val TAB_LOG = 4
+        const val TAB_SCAN = 1
+        const val TAB_ROUTES = 2
+        const val TAB_BYPASS = 3
+        const val TAB_CONFIG = 4
+        const val TAB_LOG = 5
+
+        /** Разделы «Настроек» (ключи в Prefs.settingsOpen — не переименовывать). */
+        const val GROUP_CONN = "conn"
+        const val GROUP_AUTO = "auto"
+        const val GROUP_EXPORT = "export"
+        const val GROUP_BACKUP = "backup"
+        const val GROUP_UPDATES = "updates"
+        const val GROUP_THEME = "theme"
+        const val GROUP_RESET = "reset"
 
         /** Что настраивается на вкладке «Туннелирование» и в шторке (с 1.10.31). */
         const val KIND_APPS = 0
