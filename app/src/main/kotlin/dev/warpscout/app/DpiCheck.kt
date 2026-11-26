@@ -2,23 +2,32 @@ package dev.warpscout.app
 
 import android.content.Context
 import android.net.Network
+import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.system.Int64Ref
 import android.system.Os
 import android.system.OsConstants
 import dev.warpscout.core.dpi.DpiPlan
 import dev.warpscout.core.dpi.DpiProbe
 import dev.warpscout.core.dpi.DpiReport
 import dev.warpscout.core.dpi.DpiTargets
+import dev.warpscout.core.dpi.DpiTrick
 import dev.warpscout.core.dpi.DpiVerdict
+import dev.warpscout.core.dpi.FakeSender
+import dev.warpscout.core.dpi.TrickSender
 import dev.warpscout.core.json.JsonVal
 import dev.warpscout.core.json.parseJson
 import dev.warpscout.core.net.TcpSocketFactory
+import java.io.File
+import java.io.FileDescriptor
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.Socket
 import java.net.URL
 import java.net.URLEncoder
+import java.nio.channels.FileChannel
 
 /**
  * «Режут DPI или адрес» на телефоне (с 1.10.49-beta2, бета).
@@ -45,8 +54,14 @@ object DpiCheck {
         val byedpi: String,
         val trusted: Boolean,
         val rows: List<Row>,
-        /** План обхода в туннеле на этой сети (с 1.10.49-beta3, см. DpiPlan): «youtube=split,x=oob». */
-        val plan: String = ""
+        /**
+         * План обхода в туннеле на этой сети (с 1.10.49-beta3, см. DpiPlan): «v2:youtube=split,x=oob».
+         * С beta4 — с меткой [DpiPlan.VERSION]: планы beta3 подбирались по одним картинкам YouTube и
+         * не применяются (нужна новая проверка).
+         */
+        val plan: String = "",
+        /** Узел видео YouTube этой сети (с beta4): редиректор, который его называет, бывает закрыт. */
+        val videoHost: String = ""
     )
 
     /** Не нашлось выхода мимо туннеля — проверка показала бы туннель, а не провайдера. */
@@ -58,11 +73,71 @@ object DpiCheck {
     const val PLAN_NONE = "-"
     private const val KEEP_NETWORKS = 6
 
+    /** Что проверять стратегией (с 1.10.49-beta4): страница и видео YouTube, X, Discord и контроль. */
+    private val STRATEGY_TARGETS = setOf("youtube", DpiTargets.VIDEO_ID, "x", "discord", "google")
+
+    /** Итог «Проверить стратегию» (с beta4): не план сети, а ответ «открывает ли эта стратегия». */
+    class StrategyResult(val at: Long, val label: String, val trick: DpiTrick, val rows: List<Row>, val summary: String)
+
+    /** Своя стратегия из настроек (с beta4); не задана или не разбирается — null. */
+    fun customTrick(context: Context): DpiTrick? = DpiTrick.custom(Prefs(context).dpiCustom)
+
+    /** Фейк на этом телефоне (с beta4): Android 9+ — там есть публичный sendfile. */
+    fun fakeSender(context: Context): FakeSender? =
+        if (Build.VERSION.SDK_INT >= 28) AndroidFake(context.applicationContext.cacheDir) else null
+
     /**
      * Проверить текущую сеть. Долго (до минуты, в худшем случае три) — только из фонового потока.
      * [ownTunnelUp] — свой туннель поднят: тогда без сети мимо него не проверяем вовсе.
+     *
+     * С 1.10.49-beta4 это «Подобрать»: все встроенные приёмы и своя стратегия (если задана), фейк —
+     * если телефон умеет. [only] — «Проверить стратегию»: одна стратегия, только YouTube, его видео,
+     * X, Discord и контроль; итог — [StrategyResult] (план сети не меняется).
      */
     fun run(context: Context, ownTunnelUp: Boolean, progress: (String) -> Unit, cancelled: () -> Boolean): Pair<DpiReport, Saved> {
+        val (report, saved) = runProbe(context, ownTunnelUp, null, progress, cancelled)
+        return report to saved!!
+    }
+
+    /** «Проверить стратегию» (с beta4): см. [run]. */
+    fun runStrategy(context: Context, ownTunnelUp: Boolean, trick: DpiTrick, progress: (String) -> Unit, cancelled: () -> Boolean): Pair<DpiReport, StrategyResult> {
+        val app = context.applicationContext
+        val (report, _) = runProbe(app, ownTunnelUp, trick, progress, cancelled)
+        val label = labelOf(app, NetIdentity.currentKey(app))
+        val rows = report.results.filter { !it.target.control || !it.reachable }.map { r ->
+            val helped = r.helpers.any { it == trick }
+            val kind = when {
+                r.verdict == DpiVerdict.OPEN -> 0
+                helped -> 1
+                else -> 2
+            }
+            val text = when {
+                r.verdict == DpiVerdict.OPEN -> "открыт и так — стратегия не нужна"
+                helped -> "открывает" + (if (r.verdict == DpiVerdict.FASTER) " (быстрее, чем как есть)" else "")
+                else -> r.text()
+            }
+            Row(kind, (if (kind == 0) "✓" else if (kind == 1) "◐" else "✗") + " ${r.target.name} — $text")
+        }
+        val opened = report.results.filter { r -> !r.target.control && r.helpers.any { it == trick } }
+        val summary = when {
+            !report.controlOk -> "Контрольный сайт не открылся — итогу не верь: проверь интернет и повтори."
+            opened.isNotEmpty() -> "Стратегия ${DpiPlan.trickLabel(trick)} открывает: ${opened.joinToString(", ") { it.target.name }}."
+            report.results.any { !it.target.control && it.verdict != DpiVerdict.OPEN } ->
+                "Стратегия ${DpiPlan.trickLabel(trick)} на этой сети ничего не открывает."
+            else -> "Всё открыто и так — на этой сети обход не нужен."
+        }
+        val result = StrategyResult(System.currentTimeMillis(), label, trick, rows, summary)
+        saveStrategy(app, result)
+        return report to result
+    }
+
+    private fun runProbe(
+        context: Context,
+        ownTunnelUp: Boolean,
+        only: DpiTrick?,
+        progress: (String) -> Unit,
+        cancelled: () -> Boolean
+    ): Pair<DpiReport, Saved?> {
         val app = context.applicationContext
         val key = NetIdentity.currentKey(app)
         val label = labelOf(app, key)
@@ -73,23 +148,41 @@ object DpiCheck {
             TunnelDebug.problem("DPI: проверка не запущена — не нашлось сети мимо туннеля")
             throw NoBypass("нет сети мимо туннеля")
         }
+        val custom = customTrick(app)
+        val strategies = if (only != null) listOf(only) else DpiTrick.BUILTIN + listOfNotNull(custom)
+        val fake = fakeSender(app)
+        val previous = load(app).firstOrNull { it.network == key && it.network.isNotBlank() }
         TunnelDebug.stage(
-            "DPI: проверяю сеть $label" + (if (key.isNotBlank()) " ($key)" else "") +
-                (if (ownTunnelUp) " мимо туннеля" else "")
+            (if (only != null) "DPI: проверяю стратегию ${DpiPlan.trickLabel(only)} на сети $label" else "DPI: проверяю сеть $label") +
+                (if (key.isNotBlank()) " ($key)" else "") + (if (ownTunnelUp) " мимо туннеля" else "") +
+                (if (only == null) " — приёмов ${strategies.size}" + (if (custom != null) ", со своей стратегией" else "") else "") +
+                (if (strategies.any { it.needsFake }) (if (fake != null) ", фейк — пробую" else ", фейк — не на этом Android") else "")
         )
         val tcp = TcpSocketFactory { _ -> if (bypass && net != null) net.socketFactory.createSocket() else Socket() }
         val probe = DpiProbe(
             tcp = tcp,
             resolve = { host -> (if (bypass && net != null) net.getAllByName(host) else InetAddress.getAllByName(host)).toList() },
             fallbackResolve = { host -> doh(if (bypass) net else null, host) },
-            ttl = AndroidTtl
+            ttl = AndroidTtl,
+            strategies = strategies,
+            fake = fake,
+            videoHint = previous?.videoHost?.takeIf { it.isNotBlank() }
         )
-        val report = probe.run(DpiTargets.DEFAULT, network = label, progress = progress, cancelled = cancelled)
+        val targets = if (only != null) DpiTargets.DEFAULT.filter { it.id in STRATEGY_TARGETS } else DpiTargets.DEFAULT
+        val report = probe.run(targets, network = label, progress = progress, cancelled = cancelled)
+        if (only != null) {
+            report.journalLines().forEachIndexed { i, line ->
+                if (i == 0 || !line.startsWith("DPI: итог")) TunnelDebug.note(line)
+                else if (report.controlOk) TunnelDebug.ok(line) else TunnelDebug.problem(line)
+            }
+            return report to null
+        }
         // План обхода в туннеле (с 1.10.49-beta3): что на этой сети туннель поведёт напрямую с приёмом.
+        // С beta4 — по группам сайтов: страница YouTube, его видео, картинки, X и Discord отдельно.
         val plan = DpiPlan.of(report)
         val lines = report.journalLines() + (
             if (!report.controlOk) emptyList()
-            else if (plan.isEmpty) listOf("DPI: обход в туннеле на этой сети не нужен — YouTube и X идут как раньше")
+            else if (plan.isEmpty) listOf("DPI: обход в туннеле на этой сети не нужен — YouTube, X и Discord идут как раньше")
             else listOf("DPI: обход в туннеле на этой сети — ${plan.describe()} (напрямую, мимо WARP)")
         )
         lines.forEachIndexed { i, line ->
@@ -120,7 +213,11 @@ object DpiCheck {
                 Row(kind, "$mark ${r.target.name} — ${r.text()}")
             },
             // «Обходить нечего» — отдельной отметкой: пустое поле у итогов прежних версий значит «не знаю».
-            plan = if (!report.controlOk) "" else if (plan.isEmpty) PLAN_NONE else plan.encode()
+            plan = if (!report.controlOk) "" else if (plan.isEmpty) PLAN_NONE else DpiPlan.VERSION + plan.encode(),
+            // Узел видео: нашёлся сейчас — он; нет — прежний (редиректор закрыт, узел тот же).
+            videoHost = report.results.firstOrNull { it.target.id == DpiTargets.VIDEO_ID }?.target?.host
+                ?.takeIf { it.endsWith(".googlevideo.com") }
+                ?: previous?.videoHost.orEmpty()
         )
         save(app, saved)
         // План — сервису туннеля: он читает снимок настроек, а не настройки этого процесса.
@@ -158,21 +255,56 @@ object DpiCheck {
 
     /**
      * Планы обхода по сетям для сервиса туннеля (с 1.10.49-beta3, см. ServiceSettings.dpiPlans): только
-     * итоги, которым можно верить (контрольный сайт открылся), и только непустые.
+     * итоги, которым можно верить (контрольный сайт открылся), и только непустые. С beta4 — только
+     * планы с меткой [DpiPlan.VERSION] и как есть: «custom» в плане значит «своя стратегия из
+     * настроек», её подставит сервис (перекодирование здесь без своей стратегии её бы потеряло).
      */
     fun servicePlans(context: Context): List<String> = load(context)
-        .filter { it.trusted && it.network.isNotBlank() && it.plan.isNotBlank() }
-        .mapNotNull { s -> DpiPlan.decode(s.plan).takeIf { !it.isEmpty }?.let { DpiPlan.entry(s.network, it) } }
+        .filter { it.trusted && it.network.isNotBlank() && it.plan.startsWith(DpiPlan.VERSION) && it.plan.length > DpiPlan.VERSION.length }
+        .map { s -> clean(s.network).trim() + "\t" + s.plan }
 
-    /** План обхода для сети [key] из сохранённых итогов (для экрана). */
-    fun planFor(context: Context, key: String): DpiPlan = DpiPlan.forNetwork(servicePlans(context), key)
+    /** План сети [key] из её проверки (для экрана; без выбора человека). */
+    fun planFor(context: Context, key: String): DpiPlan = DpiPlan.forNetwork(servicePlans(context), key, customTrick(context))
+
+    /** План, который туннель применит на сети [key]: проверка этой сети и выбор человека (с beta4). */
+    fun effectivePlan(context: Context, key: String): DpiPlan {
+        val p = Prefs(context)
+        val custom = DpiTrick.custom(p.dpiCustom)
+        return DpiPlan.effective(DpiPlan.forNetwork(servicePlans(context), key, custom), p.dpiStrategy, DpiPlan.parseOverrides(p.dpiOverrides), custom)
+    }
+
+    /** Итог старой версии (план beta3 без метки): его не применяем — нужна новая проверка. */
+    fun isOldPlan(saved: Saved): Boolean = saved.plan.isNotBlank() && saved.plan != PLAN_NONE && !saved.plan.startsWith(DpiPlan.VERSION)
+
+    // ------------------------------------------------------------------ последняя проверка стратегии
+
+    private fun saveStrategy(context: Context, r: StrategyResult) {
+        val text = buildString {
+            append(r.at).append('\t').append(clean(r.label)).append('\t').append(clean(r.trick.id)).append('\t')
+                .append(clean(r.trick.byedpi)).append('\t').append(clean(r.trick.title)).append('\t').append(clean(r.summary))
+            r.rows.forEach { row -> append('\n').append(row.kind).append('\t').append(clean(row.text)) }
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("strategy:last", text).apply()
+    }
+
+    fun loadStrategy(context: Context): StrategyResult? = runCatching {
+        val text = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("strategy:last", null) ?: return null
+        val lines = text.split('\n')
+        val h = lines.first().split('\t')
+        if (h.size < 6) return null
+        val rows = lines.drop(1).mapNotNull { l ->
+            val i = l.indexOf('\t')
+            if (i <= 0) null else Row(l.substring(0, i).toIntOrNull() ?: 2, l.substring(i + 1))
+        }
+        StrategyResult(h[0].toLong(), h[1], DpiTrick(h[2], h[4], h[3]), rows, h[5])
+    }.getOrNull()
 
     private fun clean(s: String): String = s.replace('\n', ' ').replace('\t', ' ')
 
     private fun encode(s: Saved): String = buildString {
         append(s.at).append('\t').append(clean(s.network)).append('\t').append(clean(s.label)).append('\t')
             .append(if (s.trusted) 1 else 0).append('\t').append(clean(s.byedpi)).append('\t').append(clean(s.summary))
-            .append('\t').append(clean(s.plan))
+            .append('\t').append(clean(s.plan)).append('\t').append(clean(s.videoHost))
         s.rows.forEach { r -> append('\n').append(r.kind).append('\t').append(clean(r.text)) }
     }
 
@@ -184,8 +316,12 @@ object DpiCheck {
             val i = l.indexOf('\t')
             if (i <= 0) null else Row(l.substring(0, i).toIntOrNull() ?: 2, l.substring(i + 1))
         }
-        // Седьмое поле — план обхода (с 1.10.49-beta3); у итогов прежних версий его нет.
-        Saved(head[0].toLong(), head[1], head[2], head[5], head[4], head[3] == "1", rows, head.getOrNull(6).orEmpty())
+        // Седьмое поле — план обхода (с 1.10.49-beta3), восьмое — узел видео (с beta4); у итогов
+        // прежних версий их нет.
+        Saved(
+            head[0].toLong(), head[1], head[2], head[5], head[4], head[3] == "1", rows,
+            head.getOrNull(6).orEmpty(), head.getOrNull(7).orEmpty()
+        )
     }.getOrNull()
 
     // ------------------------------------------------------------------------------- запасной DNS
@@ -238,16 +374,81 @@ object DpiCheck {
         override fun get(socket: Socket): Int? = null
 
         override fun set(socket: Socket, ttl: Int): Boolean = runCatching {
-            ParcelFileDescriptor.fromSocket(socket).use { pfd ->
-                val fd = pfd.fileDescriptor
-                val remote = socket.inetAddress
-                if (remote is Inet6Address) {
-                    Os.setsockoptInt(fd, OsConstants.IPPROTO_IPV6, OsConstants.IPV6_UNICAST_HOPS, ttl)
-                } else {
-                    Os.setsockoptInt(fd, OsConstants.IPPROTO_IP, OsConstants.IP_TTL, ttl)
-                }
-            }
+            ParcelFileDescriptor.fromSocket(socket).use { pfd -> setTtl(pfd.fileDescriptor, socket, ttl) }
             true
         }.getOrDefault(false)
+
+        fun setTtl(fd: FileDescriptor, socket: Socket, ttl: Int) {
+            if (socket.inetAddress is Inet6Address) {
+                Os.setsockoptInt(fd, OsConstants.IPPROTO_IPV6, OsConstants.IPV6_UNICAST_HOPS, ttl)
+            } else {
+                Os.setsockoptInt(fd, OsConstants.IPPROTO_IP, OsConstants.IP_TTL, ttl)
+            }
+        }
     }
+
+    /**
+     * Фейк (`--fake` у ByeDPI, с 1.10.49-beta4) без root — как у ByeDPI на Linux: подделка лежит в
+     * общей странице файла, sendfile отдаёт ядру ссылку на эту страницу (а не копию), пакет уходит с
+     * маленьким TTL и до сервера не доходит — его видит только фильтр по дороге. Потом в ту же
+     * страницу пишется настоящее начало, TTL возвращается, и ядро само повторяет «потерянный» пакет —
+     * уже с настоящими байтами. Сервер получает только настоящее.
+     *
+     * Если ядро скопирует данные (сетевая карта без scatter-gather), повтор уйдёт с подделкой — сервер
+     * ответит на чужое приветствие, и проверка ([DpiProbe]) честно засчитает приём неудачным.
+     * Нужен Android 9+ (sendfile с Int64Ref); файл — во внутреннем кеше приложения.
+     */
+    internal class AndroidFake(private val dir: File) : FakeSender {
+        override fun send(socket: Socket, fake: ByteArray, real: ByteArray, ttl: Int, normalTtl: Int) {
+            if (Build.VERSION.SDK_INT < 28) throw TrickSender.Unsupported("фейк: нужен Android 9 или новее")
+            if (fake.size != real.size || fake.isEmpty()) throw TrickSender.Unsupported("фейк: длина подделки не та")
+            val file = try {
+                File.createTempFile("fake", ".bin", dir)
+            } catch (e: Exception) {
+                throw TrickSender.Unsupported("фейк: нет места для файла (${e.message})")
+            }
+            try {
+                RandomAccessFile(file, "rw").use { raf ->
+                    raf.setLength(fake.size.toLong())
+                    val map = raf.channel.map(FileChannel.MapMode.READ_WRITE, 0, fake.size.toLong())
+                    map.put(fake)
+                    ParcelFileDescriptor.fromSocket(socket).use { pfd ->
+                        val fd = pfd.fileDescriptor
+                        try {
+                            AndroidTtl.setTtl(fd, socket, ttl)
+                        } catch (e: Exception) {
+                            throw TrickSender.Unsupported("фейк: система не дала поменять TTL")
+                        }
+                        try {
+                            val off = Int64Ref(0)
+                            var left = fake.size.toLong()
+                            while (left > 0) {
+                                val n = Os.sendfile(fd, raf.fd, off, left)
+                                if (n <= 0) throw TrickSender.Unsupported("фейк: sendfile ничего не отправил")
+                                left -= n
+                            }
+                            // Пакет должен уйти, пока в странице подделка; потом — настоящее начало.
+                            Thread.sleep(FAKE_HOLD_MS)
+                        } catch (e: TrickSender.Unsupported) {
+                            throw e
+                        } catch (e: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                            throw TrickSender.Unsupported("фейк: остановлено")
+                        } catch (e: Exception) {
+                            throw TrickSender.Unsupported("фейк: sendfile не сработал (${e.message})")
+                        } finally {
+                            map.position(0)
+                            map.put(real)
+                            runCatching { AndroidTtl.setTtl(fd, socket, normalTtl) }
+                        }
+                    }
+                }
+            } finally {
+                runCatching { file.delete() }
+            }
+        }
+    }
+
+    /** Сколько ждать после отправки подделки, прежде чем писать в страницу настоящее (как у ByeDPI ~10–50 мс). */
+    private const val FAKE_HOLD_MS = 25L
 }

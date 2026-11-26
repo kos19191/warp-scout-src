@@ -1781,6 +1781,119 @@
                     android:textAppearance="?attr/textAppearanceBodySmall"
                     android:textIsSelectable="true" />
 
+                <!--
+                  1.10.49-beta4: стратегия обхода — общая (по проверке сети, не обходить, встроенный приём
+                  или своя), выбор по сервисам (YouTube, X, Discord), своя строка ByeDPI с разбором на лету
+                  и «Проверить стратегию» (одна стратегия на YouTube, его видео, X и Discord).
+                -->
+                <TextView
+                    android:id="@+id/textDpiStrategyHead"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="@string/dpi_strategy_head"
+                    android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+                <TextView
+                    android:id="@+id/textDpiStrategyHint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/dpi_strategy_hint"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDpiStrategy"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:gravity="start|center_vertical"
+                    android:textAllCaps="false" />
+
+                <LinearLayout
+                    android:id="@+id/dpiServicesBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+
+                <com.google.android.material.textfield.TextInputLayout
+                    android:id="@+id/tilDpiCustom"
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:hint="@string/dpi_custom_hint">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/editDpiCustom"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:imeOptions="actionDone"
+                        android:inputType="text|textNoSuggestions"
+                        android:maxLines="4" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <TextView
+                    android:id="@+id/textDpiCustomParse"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:textIsSelectable="true" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnDpiCustomSave"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/dpi_custom_save" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnDpiStrategyTest"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:text="@string/dpi_strategy_test" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/textDpiStrategyProgress"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/textDpiStrategyResultHead"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:textAppearance="?attr/textAppearanceLabelMedium"
+                    android:visibility="gone" />
+
+                <LinearLayout
+                    android:id="@+id/dpiStrategyBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+
+                <TextView
+                    android:id="@+id/textDpiStrategySummary"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:textIsSelectable="true"
+                    android:visibility="gone" />
+
                 <TextView
                     android:id="@+id/textDpiHead"
                     android:layout_width="match_parent"
@@ -1810,6 +1923,61 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:visibility="gone" />
+
+                <!--
+                  ── прокси для Telegram (с 1.10.49-beta4, бета) ──
+                  Публичные прокси MTProto: найти, проверить до ответа Telegram (мимо туннеля) и одной
+                  кнопкой добавить в Telegram. Последний список хранится.
+                -->
+                <TextView
+                    style="@style/SectionHeader"
+                    android:text="@string/section_tg_proxy" />
+
+                <TextView
+                    android:id="@+id/textTgProxyHint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/tg_proxy_hint"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnTgProxyFind"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/tg_proxy_find" />
+
+                <TextView
+                    android:id="@+id/textTgProxyProgress"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/textTgProxyHead"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:textAppearance="?attr/textAppearanceLabelLarge"
+                    android:visibility="gone" />
+
+                <LinearLayout
+                    android:id="@+id/tgProxyBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+
+                <TextView
+                    android:id="@+id/textTgProxyNote"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:textIsSelectable="true"
                     android:visibility="gone" />
 
                 <!-- ── отчёт ──────────────────────────────────────────────── -->

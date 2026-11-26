@@ -21,9 +21,10 @@ import dev.warpscout.app.TunnelDebug
 import dev.warpscout.core.config.SplitRoutes
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.crypto.Crypto
-import dev.warpscout.core.dpi.DpiFamilies
 import dev.warpscout.core.dpi.DpiPlan
 import dev.warpscout.core.dpi.DpiRelay
+import dev.warpscout.core.dpi.DpiServices
+import dev.warpscout.core.dpi.DpiTrick
 import dev.warpscout.core.junk.JunkLibrary
 import dev.warpscout.core.lists.AllowLists
 import dev.warpscout.core.lists.AppServices
@@ -1233,8 +1234,8 @@ class WarpVpnService : VpnService() {
         val tunFd = pfd.fileDescriptor
         val tunWait: (Long) -> Boolean = { ms -> waitTunReadable(tunFd, ms) }
         val rawOut = FileOutputStream(pfd.fileDescriptor)
-        // Обход DPI в туннеле (с 1.10.49-beta3): YouTube и X напрямую с приёмом, если «Проверить DPI» на
-        // этой сети нашла, что приём помогает. Ему нужен диспетчер tun — и без второго выхода (с одним
+        // Обход DPI в туннеле (с 1.10.49-beta3): YouTube, X и (с beta4) Discord напрямую с приёмом, если
+        // «Проверить DPI» на этой сети нашла, что приём помогает, или человек выбрал стратегию сам. Ему нужен диспетчер tun — и без второго выхода (с одним
         // выходом). Обходить нечего — ровно прежний путь.
         val dpiOn = if (quietSession) null else runCatching { dpiSetup(exitRules) }
             .onFailure { TunnelDebug.problem("обход DPI: не включился (${it.javaClass.simpleName}: ${it.message?.take(80)})") }
@@ -3542,12 +3543,22 @@ class WarpVpnService : VpnService() {
         val warpUids: Set<Int>,
     )
 
-    /** План обхода для текущей сети; выключен или проверки на этой сети не было — пустой. */
+    /**
+     * План обхода для текущей сети; выключен — пустой. С 1.10.49-beta4 — с выбором человека: общая
+     * стратегия («по проверке сети» — план из «Проверить DPI» этой сети), выбор по сервисам и своя
+     * строка ByeDPI.
+     */
     private fun dpiPlanNow(settings: ServiceSettings = serviceSettings()): Pair<DpiPlan, String> {
         val net = dev.warpscout.app.NetIdentity.currentKey(this)
         if (!settings.dpiBypass) return DpiPlan.EMPTY to net
-        return DpiPlan.forNetwork(settings.dpiPlans, net) to net
+        val custom = DpiTrick.custom(settings.dpiCustom)
+        val auto = DpiPlan.forNetwork(settings.dpiPlans, net, custom)
+        return DpiPlan.effective(auto, settings.dpiStrategy, DpiPlan.parseOverrides(settings.dpiOverrides), custom) to net
     }
+
+    /** Человек выбрал стратегию сам (не «по проверке сети») — общую или для какого-то сервиса. */
+    private fun dpiChosen(settings: ServiceSettings): Boolean =
+        settings.dpiStrategy != DpiPlan.AUTO || DpiPlan.parseOverrides(settings.dpiOverrides).values.any { it != DpiPlan.AUTO }
 
     /**
      * Нужен ли обход в этой сессии. null — нет: выключен, Android старше 10 (владельца соединения система
@@ -3558,12 +3569,16 @@ class WarpVpnService : VpnService() {
         val (plan, net) = dpiPlanNow(settings)
         val label = dev.warpscout.app.DpiCheck.labelOf(this, net)
         if (!settings.dpiBypass) {
-            if (settings.dpiPlans.isNotEmpty()) TunnelDebug.stage("обход DPI: выключен в настройках — YouTube и X идут как раньше")
+            if (settings.dpiPlans.isNotEmpty()) TunnelDebug.stage("обход DPI: выключен в настройках — YouTube, X и Discord идут как раньше")
             return null
         }
         if (plan.isEmpty) {
-            if (settings.dpiPlans.isNotEmpty()) {
-                TunnelDebug.stage("обход DPI: для сети «$label» плана нет (проверки не было или обходить нечего) — всё как раньше")
+            if (settings.dpiPlans.isNotEmpty() || dpiChosen(settings)) {
+                TunnelDebug.stage(
+                    "обход DPI: для сети «$label» плана нет (" +
+                        (if (dpiChosen(settings)) "выбрано «не обходить» или своя стратегия не задана" else "проверки не было или обходить нечего") +
+                        ") — всё как раньше"
+                )
             }
             return null
         }
@@ -3577,8 +3592,9 @@ class WarpVpnService : VpnService() {
         val outside = ArrayList<String>()
         val second = ArrayList<String>()
         val selected = settings.appsSelected.toSet()
-        for (fam in DpiFamilies.ALL) {
-            for (pkg in fam.packages) {
+        for (svc in DpiServices.ALL) {
+            val covered = plan.coversService(svc.id)
+            for (pkg in svc.packages) {
                 if (pkg == packageName) continue
                 val info = runCatching {
                     @Suppress("DEPRECATION")
@@ -3586,7 +3602,7 @@ class WarpVpnService : VpnService() {
                 }.getOrNull() ?: continue
                 val title = runCatching { packageManager.getApplicationLabel(info).toString() }.getOrDefault(pkg)
                 if (exitRules[pkg] == AppExit.SECOND) {
-                    if (plan.trickFor(fam.id) != null) second += title
+                    if (covered) second += title
                     continue
                 }
                 val inTunnel = when (settings.appsMode) {
@@ -3595,11 +3611,11 @@ class WarpVpnService : VpnService() {
                     else -> true
                 }
                 if (!inTunnel) {
-                    if (plan.trickFor(fam.id) != null) outside += title
+                    if (covered) outside += title
                     continue
                 }
-                apps[info.uid] = DpiRelay.App(title, fam.id)
-                if (plan.trickFor(fam.id) != null) names += title
+                apps[info.uid] = DpiRelay.App(title, svc.id)
+                if (covered) names += title
             }
         }
         if (outside.isNotEmpty()) {
@@ -3683,6 +3699,8 @@ class WarpVpnService : VpnService() {
             ttl = dev.warpscout.app.DpiCheck.AndroidTtl,
             mtu = mtu.coerceIn(576, 1420),
             log = { line -> TunnelDebug.stage(line) },
+            // Фейк (с 1.10.49-beta4): только если в плане есть приём с фейком и Android 9+.
+            fake = dev.warpscout.app.DpiCheck.fakeSender(this),
         )
     }
 
@@ -3703,7 +3721,7 @@ class WarpVpnService : VpnService() {
             if (relay.plan != plan) {
                 relay.plan = plan
                 TunnelDebug.stage(
-                    if (plan.isEmpty) "обход DPI: выключен — новые соединения YouTube и X идут через туннель"
+                    if (plan.isEmpty) "обход DPI: выключен — новые соединения YouTube, X и Discord идут через туннель"
                     else "обход DPI: план обновлён на лету — ${plan.describe()}"
                 )
             }

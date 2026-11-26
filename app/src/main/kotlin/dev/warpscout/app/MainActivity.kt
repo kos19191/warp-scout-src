@@ -1637,6 +1637,70 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     @Volatile
     private var dpiChecking = false
 
+    /** «Стратегия обхода» и «Прокси для Telegram» (с 1.10.49-beta4) — в своих файлах. */
+    private var dpiPanel: DpiStrategyPanel? = null
+    private var tgPanel: TelegramProxyPanel? = null
+
+    private fun dpiApplyToTunnel(): Boolean {
+        if (!(tunnel.supported && (tunnel.isUp || tunnel.active))) return false
+        runCatching { tunnel.reloadDpi() }
+        return true
+    }
+
+    /**
+     * «Проверить стратегию» (с 1.10.49-beta4): одна стратегия на YouTube, его видео, X и Discord —
+     * открывает ли она их на этой сети. План сети не меняется.
+     */
+    private fun checkDpiStrategy(trick: dev.warpscout.core.dpi.DpiTrick) {
+        if (dpiChecking) {
+            banner(getString(R.string.dpi_running))
+            return
+        }
+        if (engine.running || Availability.processBound(this)) {
+            banner(getString(R.string.dpi_busy_scan))
+            return
+        }
+        val ownUp = tunnel.supported && (tunnel.isUp || tunnel.active)
+        val foreign = ForeignVpn.find(this, ownUp = ownUp)
+        if (foreign != null) {
+            TunnelDebug.stage("DPI: проверка стратегии не запущена — работает другой VPN ($foreign)")
+            banner(getString(R.string.dpi_foreign_vpn, foreign), error = true)
+            return
+        }
+        dpiChecking = true
+        binding.btnDpiCheck.isEnabled = false
+        dpiPanel?.showTesting(true)
+        val app = applicationContext
+        Thread({
+            val result = runCatching {
+                DpiCheck.runStrategy(app, ownUp, trick, progress = { line ->
+                    runOnUiThread {
+                        if (::binding.isInitialized && dpiChecking) dpiPanel?.showTesting(true, getString(R.string.dpi_progress, line))
+                    }
+                }, cancelled = { false })
+            }
+            runOnUiThread {
+                dpiChecking = false
+                if (!::binding.isInitialized || isFinishing || isDestroyed) return@runOnUiThread
+                runCatching {
+                    binding.btnDpiCheck.isEnabled = true
+                    dpiPanel?.showTesting(false)
+                    dpiPanel?.renderTest()
+                    result.onSuccess { done ->
+                        banner(getString(R.string.dpi_strategy_test_done, done.second.summary))
+                    }.onFailure { t ->
+                        if (t is DpiCheck.NoBypass) {
+                            banner(getString(R.string.dpi_no_bypass), error = true)
+                        } else {
+                            TunnelDebug.problem("DPI: проверка стратегии не удалась: " + SafeMode.describe(t))
+                            banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
+                        }
+                    }
+                }
+            }
+        }, "warpscout-dpi-strategy").apply { isDaemon = true }.start()
+    }
+
     /**
      * «Проверить DPI» (с 1.10.49-beta2, бета): YouTube, Discord и др. напрямую через провайдера — как
      * есть и с приёмами обхода (см. [DpiCheck]). Туннель не трогается: проверка идёт мимо него.
@@ -1659,6 +1723,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         }
         dpiChecking = true
         binding.btnDpiCheck.isEnabled = false
+        binding.btnDpiStrategyTest.isEnabled = false
         binding.btnDpiCheck.setText(R.string.dpi_checking)
         binding.textDpiProgress.visibility = View.VISIBLE
         binding.textDpiProgress.text = getString(R.string.dpi_running)
@@ -1678,6 +1743,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                 if (!::binding.isInitialized || isFinishing || isDestroyed) return@runOnUiThread
                 runCatching {
                     binding.btnDpiCheck.isEnabled = true
+                    binding.btnDpiStrategyTest.isEnabled = true
                     binding.btnDpiCheck.setText(R.string.dpi_check_now)
                     binding.textDpiProgress.visibility = View.GONE
                     renderDpi()
@@ -1701,6 +1767,8 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     /** Итоги «Проверить DPI»: подробно — по текущей сети, по остальным — строкой. */
     private fun renderDpi() {
         runCatching { renderDpiBypass() }
+        runCatching { dpiPanel?.render() }
+        runCatching { tgPanel?.render() }
         val all = DpiCheck.load(this)
         val key = NetIdentity.currentKey(this)
         val current = all.firstOrNull { it.network == key } ?: all.firstOrNull()
@@ -1736,10 +1804,13 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         val key = NetIdentity.currentKey(this)
         val label = DpiCheck.labelOf(this, key)
         val saved = DpiCheck.load(this).firstOrNull { it.network == key }
-        val plan = DpiCheck.planFor(this, key)
+        // С 1.10.49-beta4 — план, который туннель применит: проверка сети и выбор стратегии человеком.
+        val plan = DpiCheck.effectivePlan(this, key)
         binding.textDpiBypass.text = when {
             !on -> getString(R.string.dpi_bypass_off)
             !plan.isEmpty -> getString(R.string.dpi_bypass_on, label, plan.describe())
+            prefs.dpiStrategy == dev.warpscout.core.dpi.DpiPlan.OFF -> getString(R.string.dpi_bypass_chosen_off)
+            saved != null && DpiCheck.isOldPlan(saved) -> getString(R.string.dpi_bypass_old, label)
             saved != null && saved.trusted && saved.plan == DpiCheck.PLAN_NONE -> getString(R.string.dpi_bypass_none, label)
             else -> getString(R.string.dpi_bypass_unknown, label)
         }
@@ -2351,7 +2422,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             updateScheduleNote()
         }
 
-        // Обход DPI в туннеле (с 1.10.49-beta3): YouTube и X напрямую с приёмом по плану этой сети.
+        // Обход DPI в туннеле (с 1.10.49-beta3): YouTube, X и (с beta4) Discord напрямую с приёмом.
         binding.switchDpiBypass.isChecked = prefs.featDpiBypass
         binding.switchDpiBypass.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked == prefs.featDpiBypass) return@setOnCheckedChangeListener
@@ -2368,6 +2439,27 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
                 )
             }
         }
+
+        // «Стратегия обхода» (с 1.10.49-beta4): общая, по сервисам, своя строка ByeDPI, «Проверить стратегию».
+        runCatching {
+            dpiPanel = DpiStrategyPanel(
+                this, binding, prefs,
+                banner = { text, error -> banner(text, error) },
+                applyToTunnel = { dpiApplyToTunnel() },
+                startTest = { trick -> checkDpiStrategy(trick) },
+                onChanged = { runCatching { renderDpiBypass() } },
+            ).also { it.bind() }
+        }.onFailure { t -> TunnelDebug.problem("стратегия DPI: экран — " + SafeMode.describe(t)) }
+
+        // «Прокси для Telegram» (с 1.10.49-beta4): найти, проверить до ответа Telegram, добавить в Telegram.
+        runCatching {
+            tgPanel = TelegramProxyPanel(
+                this, binding,
+                banner = { text, error -> banner(text, error) },
+                busy = { engine.running || Availability.processBound(this) },
+                ownTunnelUp = { tunnel.supported && (tunnel.isUp || tunnel.active) },
+            ).also { it.bind() }
+        }.onFailure { t -> TunnelDebug.problem("Telegram: экран — " + SafeMode.describe(t)) }
 
         // «Проверить DPI» в Журнале (с 1.10.49-beta2): режут сайты по имени (поможет обход) или по адресу.
         binding.btnDpiCheck.setOnClickListener {
@@ -4538,7 +4630,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         // предупреждением про Telegram («Москва — Telegram может тормозить») человек попросил убрать
         // (23.11): площадка и что с Telegram — в журнале. Страна — по свежей проверке, иначе запомненная.
         val fresh = listOf(serviceExit, exitRegion).firstOrNull { dev.warpscout.core.net.CfTrace.countryOf(it).isNotBlank() }
-        val region = dev.warpscout.core.net.CfTrace.countryOf(fresh ?: prefs.lastExitRegion)
+        val region = exitPlace(fresh ?: prefs.lastExitRegion)
             .ifBlank { getString(R.string.region_unknown) }
         val text = StringBuilder(getString(R.string.endpoint_now, now.ifBlank { "—" }, region))
         // Второй выход — третьей строкой, только когда он поднят (см. secondExitCountry).
@@ -4548,6 +4640,21 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             )
         }
         binding.textEndpointNow.text = text
+    }
+
+    /**
+     * Выход WARP для экрана (с 1.10.49-beta4): город площадки Cloudflare («Стокгольм»), а не страна
+     * адреса. 26.11 экран писал «выход RU», а выход был в Стокгольме (ARN): Cloudflare записывает
+     * адреса WARP в страну человека («RU · Novosibirsk»). Городом, а не кодом площадки: «HEL» читалось
+     * как страна (23.11). Города не знаем — страна, как раньше.
+     */
+    private fun exitPlace(summary: String?): String {
+        val site = dev.warpscout.core.net.ExitSite.fromSummary(summary)
+        if (site.isNotBlank()) {
+            val city = dev.warpscout.core.net.ExitSite.city(site)
+            if (city.isNotBlank() && city != site) return city
+        }
+        return dev.warpscout.core.net.CfTrace.countryOf(summary)
     }
 
     /**
@@ -5234,7 +5341,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         val endpoint = if (up) TunnelDebug.endpoint.trim().ifBlank { snap?.endpoint.orEmpty() } else ""
         val net = netKindNow().ifBlank { "сеть" }
         val exitSummary = snap?.takeIf { linkFresh && it.linkWeb == TunnelStatus.LINK_OK }?.linkExit
-        val country = dev.warpscout.core.net.CfTrace.countryOf(exitSummary)
+        val country = exitPlace(exitSummary)
         val where = if (endpoint.isBlank()) {
             ""
         } else {

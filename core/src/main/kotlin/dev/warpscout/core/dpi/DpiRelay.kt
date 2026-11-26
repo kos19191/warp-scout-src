@@ -57,11 +57,13 @@ class DpiRelay(
     private val log: (String) -> Unit = {},
     private val families: List<DpiFamily> = DpiFamilies.ALL,
     private val clock: () -> Long = System::currentTimeMillis,
-    private val timing: Timing = Timing()
+    private val timing: Timing = Timing(),
+    /** Фейк (с 1.10.49-beta4, см. [FakeSender]); null — приёмы с фейком напрямую не открываются. */
+    private val fake: FakeSender? = null
 ) : PacketTap {
 
-    /** Приложение, чьи соединения разбираем: название (для журнала) и сервис ([DpiFamily.id]). */
-    class App(val name: String, val family: String)
+    /** Приложение, чьи соединения разбираем: название (для журнала) и сервис ([DpiService.id]). */
+    class App(val name: String, val service: String)
 
     /** Откуда берутся сокеты: мимо туннеля (с protect) и через него (обычный сокет процесса). */
     interface Connector {
@@ -194,6 +196,9 @@ class DpiRelay(
     private val familyFails = ConcurrentHashMap<String, Int>()
     private val familyOk = ConcurrentHashMap.newKeySet<String>()
 
+    /** Группа сайтов → группа стратегии (`--auto`), которой открылось в последний раз: с неё и начинаем. */
+    private val goodGroup = ConcurrentHashMap<String, Int>()
+
     private val pool: ExecutorService = Executors.newCachedThreadPool { r ->
         Thread(r, "warpscout-dpi-relay").apply { isDaemon = true }
     }
@@ -293,7 +298,7 @@ class DpiRelay(
         }
         val uid = ownerOf(6, key)
         val app = apps[uid] ?: return false
-        if (p.trickFor(app.family) == null || familyBlocked(app.family)) return false
+        if (!serviceActive(p, app.service)) return false
         val s = TcpPacket.parse(packet, len) ?: return false
         val v6 = s.v6
         val ourMss = if (v6) mss6 else mss4
@@ -319,7 +324,7 @@ class DpiRelay(
         val key = FlowKey.of(packet, len) ?: return false
         val block = quic[key] ?: run {
             val app = apps[ownerOf(17, key)]
-            (app != null && p.trickFor(app.family) != null && !familyBlocked(app.family)).also { quic[key] = it }
+            (app != null && serviceActive(p, app.service)).also { quic[key] = it }
         }
         if (!block) return false
         quicBlocked.incrementAndGet()
@@ -343,6 +348,13 @@ class DpiRelay(
         }
         return uid
     }
+
+    /**
+     * Разбирать ли соединения приложений сервиса: в плане есть его главная группа сайтов (страница,
+     * видео), и она не наказана неудачами. Только картинки — не повод (см. [DpiFamily.primary]).
+     */
+    private fun serviceActive(p: DpiPlan, service: String): Boolean =
+        families.any { it.service == service && it.primary && p.trickFor(it.id) != null && !familyBlocked(it.id) }
 
     private fun familyBlocked(id: String): Boolean {
         val until = badFamily[id] ?: return false
@@ -554,7 +566,7 @@ class DpiRelay(
             var first: ByteArray? = null
             var route = Route.TUNNEL
             if (hello.isNotEmpty() && fam != null && trick != null && !familyBlocked(fam.id)) {
-                val r = tryDirect(f, hello, trick, fam)
+                val r = tryGroups(f, hello, trick, fam)
                 if (r != null) {
                     sock = r.first
                     first = r.second
@@ -654,23 +666,50 @@ class DpiRelay(
         }
     }
 
+    /**
+     * Группы стратегии по очереди (`--auto`, с 1.10.49-beta4): начиная с той, что открыла эту группу
+     * сайтов в прошлый раз; каждая — новым соединением. Ни одна не открыла — null.
+     */
+    private fun tryGroups(f: Flow, hello: ByteArray, trick: DpiTrick, fam: DpiFamily): Pair<Socket, ByteArray>? {
+        val n = trick.strategy.groups.size.coerceAtLeast(1)
+        val first = (goodGroup[fam.id] ?: 0).coerceIn(0, n - 1)
+        for (k in 0 until n) {
+            val g = (first + k) % n
+            if (k > 0 && f.lock.withLock { f.state == St.CLOSED }) return null
+            val r = tryDirect(f, hello, trick, fam, g, last = k == n - 1)
+            if (r != null) {
+                if (n > 1) goodGroup[fam.id] = g
+                return r
+            }
+            // Адрес молчит на подключение — дальше группы не помогут.
+            if (lastConnectFailed.get() == true) break
+        }
+        return null
+    }
+
+    /** Последняя попытка напрямую не подключилась (а не «приём не помог»). */
+    private val lastConnectFailed = ThreadLocal<Boolean>()
+
     /** Напрямую с приёмом: сокет и первые байты ответа; null — не открылось (причина — в журнале). */
-    private fun tryDirect(f: Flow, hello: ByteArray, trick: DpiTrick, fam: DpiFamily): Pair<Socket, ByteArray>? {
+    private fun tryDirect(f: Flow, hello: ByteArray, trick: DpiTrick, fam: DpiFamily, group: Int = 0, last: Boolean = true): Pair<Socket, ByteArray>? {
         var s: Socket? = null
         var stage = 0
+        lastConnectFailed.set(false)
         try {
             val sock = direct.connect(f.srvAddr, f.srvPort, timing.directConnectMs, f.uid) {}
             s = sock
             stage = 1
             runCatching { sock.tcpNoDelay = true }
-            sock.soTimeout = timing.replyMs
-            TrickSender.send(sock, hello, trick, ttl)
+            sock.soTimeout = trick.strategy.timeoutMs.takeIf { it > 0 } ?: timing.replyMs
+            TrickSender.send(sock, hello, trick, ttl, fake, group)
             stage = 2
             val buf = ByteArray(16 * 1024)
             val n = sock.getInputStream().read(buf)
             if (n <= 0) throw EOFException("сервер закрыл соединение сразу после приветствия")
             // Запись «alert» вместо ответа: приём сломал приветствие для этого сервера.
             if ((buf[0].toInt() and 0xFF) == 0x15) throw IOException("сервер ответил ошибкой TLS")
+            // Ответ на чужое приветствие: до сервера дошёл фейк (TTL велик) — соединение уже не наше.
+            if (DpiDesync.sidMismatch(hello, buf, n)) throw IOException("до сервера дошёл фейк — TTL велик")
             sock.soTimeout = 0
             directOk(f, fam, trick)
             return sock to buf.copyOf(n)
@@ -679,7 +718,9 @@ class DpiRelay(
             throw e
         } catch (e: Exception) {
             runCatching { s?.close() }
-            directFailed(f, fam, trick, stage, e)
+            if (stage == 0) lastConnectFailed.set(true)
+            // Неудача группы, за которой есть следующая, — не неудача приёма: в журнал и в счёт — только последняя.
+            if (last || stage == 0) directFailed(f, fam, trick, stage, e)
             return null
         }
     }
@@ -687,7 +728,7 @@ class DpiRelay(
     private fun directOk(f: Flow, fam: DpiFamily, trick: DpiTrick) {
         familyFails.remove(fam.id)
         if (familyOk.add(fam.id)) {
-            say("обход DPI: ${fam.title} — открылся напрямую с приёмом «${trick.title}» (${hostOf(f)}, ${f.app.name})")
+            say("обход DPI: ${fam.title} — открылся напрямую с приёмом ${DpiPlan.trickLabel(trick)} (${hostOf(f)}, ${f.app.name})")
         }
     }
 
@@ -695,7 +736,7 @@ class DpiRelay(
         val why = when {
             e is TrickSender.Unsupported -> "приём не работает на этом телефоне: ${e.message}"
             e is SocketTimeoutException && stage == 0 -> "нет ответа на подключение — похоже на блокировку по адресу"
-            e is SocketTimeoutException -> "тишина после приветствия — приём «${trick.title}» не помог"
+            e is SocketTimeoutException -> "тишина после приветствия — приём ${DpiPlan.trickLabel(trick)} не помог"
             else -> shortReason(e)
         }
         val now = clock()

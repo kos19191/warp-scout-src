@@ -124,6 +124,14 @@ jobs:
           need /tmp/selftest.log "обход DPI: QUIC выбранного приложения закрыт («порт закрыт» — сразу перейдёт на TCP), чужой — мимо"
           need /tmp/selftest.log "обход DPI: план по проверке на Tele2 (26.11) — YouTube «разрез», X «лишний байт (OOB)», Instagram нет"
           need /tmp/selftest.log "DPI: имя узла видео по кластеру — как у conv.py"
+          # 1.10.49-beta4: стратегии как у ByeDPI (свои строки, фейк), выбор человека поверх проверки сети,
+          # план beta3 не применяется; прокси MTProto — проверка до ответа Telegram, а не «порт открыт».
+          need /tmp/selftest.log "стратегия: «--split 1+s --disorder 3+s» и «-s1+s -d3+s» — одно и то же"
+          need /tmp/selftest.log "фейк: отправка — подделка той же длины с TTL 5, обычный TTL 64 после; сервер получил настоящее приветствие"
+          need /tmp/selftest.log "обход DPI: выбор человека поверх проверки — YouTube «фейк (TTL 5)» целиком, Discord не обходить, X по проверке"
+          need /tmp/selftest.log "обход DPI: план beta3 (подобран по картинкам) не применяется — нужна новая проверка; план beta4 читается"
+          need /tmp/selftest.log "Telegram: прокси Fake-TLS — до ответа Telegram (obfuscated2, req_pq → resPQ), сервер 2"
+          need /tmp/selftest.log "Telegram: ответ TLS подписан чужим ключом — не MTProxy этого секрета (только «порт открыт»)"
           # Начальные экраны (1.10.44-beta6): сохраняется ровно отмеченное, снятое руками не возвращается.
           need /tmp/selftest.log "начальные экраны: сохраняются ровно отмеченные"
           need /tmp/selftest.log "начальные экраны: снятый TikTok второй выход не получает, отмеченный ChatGPT — получает"

@@ -122,7 +122,12 @@ object Updater {
      * Только через API: страница releases/latest пре-релизов не показывает.
      */
     private fun checkBeta(currentVersion: String, buildRev: String): Check {
-        val release = latestBetaFromApi()
+        // С 1.10.49-beta4: API отказал (без входа — 60 запросов в час на адрес; 26.11 в 09:29 так и
+        // вышло) — лента релизов: обычная страница, лимита API у неё нет, пре-релизы в ней есть.
+        val viaApi = runCatching { latestBetaFromApi() }
+        val release = viaApi.getOrElse { api ->
+            runCatching { latestBetaFromWeb() }.getOrElse { throw api }
+        }
         if (release.apkUrl.isBlank()) return Check.NoAsset(release.tag, apkName(release.version))
         val cmp = compareBeta(release.version, currentVersion)
         if (cmp > 0) return Check.Newer(release)
@@ -155,6 +160,27 @@ object Updater {
             apkUrl = apk?.str("browser_download_url").orEmpty(),
             size = apk?.num("size")?.toLong() ?: 0L,
             sumsUrl = sums?.str("browser_download_url"),
+        )
+    }
+
+    /**
+     * Бета без API (с 1.10.49-beta4): лента `releases.atom` — в ней последние релизы с тегами, и
+     * пре-релизы тоже. Имя файла и контрольные суммы — по тегу, как у [latestFromWeb].
+     */
+    private fun latestBetaFromWeb(): Release {
+        val body = get("$WEB/releases.atom", api = false)
+        val tags = Regex("""/releases/tag/(v[0-9][^"'<>\s?#&]*)""").findAll(body)
+            .map { it.groupValues[1] }.filter { it.contains("-beta") }.distinct().toList()
+        val tag = tags.maxWithOrNull { a, b -> compareBeta(a, b) } ?: error("бета: в ленте релизов нет бета-версий")
+        val version = tag.removePrefix("v")
+        val name = apkName(version)
+        return Release(
+            tag = tag,
+            version = version,
+            apkName = name,
+            apkUrl = "$WEB/releases/download/$tag/$name",
+            size = 0L,
+            sumsUrl = "$WEB/releases/download/$tag/SHA256SUMS.txt",
         )
     }
 

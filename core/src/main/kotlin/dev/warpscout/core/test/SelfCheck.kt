@@ -233,6 +233,12 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("бета: обход DPI в туннеле — YouTube и X напрямую с приёмом (1.10.49-beta3)") {
             DpiRelayChecks { name, ok, detail -> check(name, ok, detail) }.run()
         }
+        section("бета: стратегии DPI как у ByeDPI — свои, фейк, Discord, план по группам сайтов (1.10.49-beta4)") {
+            DpiStrategyChecks { name, ok, detail -> check(name, ok, detail) }.run()
+        }
+        section("бета: прокси MTProto для Telegram — найти, проверить до ответа Telegram (1.10.49-beta4)") {
+            MtProxyChecks { name, ok, detail -> check(name, ok, detail) }.run()
+        }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
                 liveNetwork()

@@ -91,7 +91,7 @@ class DpiChecks(private val check: (String, Boolean, String) -> Unit) {
         )
 
         for (t in DpiTrick.entries) {
-            val expected = if (t == DpiTrick.TLSREC || t == DpiTrick.DISORDER_TLSREC) two else hello
+            val expected = if (t.strategy.groups.first().tlsrec.isNotEmpty()) two else hello
             ok(
                 "DPI: приём «${t.title}» — сервер получает " + (if (expected === two) "две записи" else "исходный ClientHello"),
                 TlsHello.joined(TlsHello.plan(t, hello)).contentEquals(expected)

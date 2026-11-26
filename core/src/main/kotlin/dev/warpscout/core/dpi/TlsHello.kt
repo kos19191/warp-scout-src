@@ -22,7 +22,17 @@ object TlsHello {
      * сразу за куском отправить один срочный байт (TCP OOB): сервер его из потока выбросит, а фильтр,
      * который срочные данные не понимает, увидит лишний байт посреди имени.
      */
-    class Piece(val bytes: ByteArray, val lowTtl: Boolean = false, val oobAfter: Boolean = false)
+    class Piece(
+        val bytes: ByteArray,
+        val lowTtl: Boolean = false,
+        val oobAfter: Boolean = false,
+        /**
+         * Фейк (с 1.10.49-beta4): вместо [bytes] сначала уходит [fake] той же длины с TTL [fakeTtl] —
+         * до фильтра доходит, до сервера нет, — а [bytes] система потом перешлёт сама (см. [FakeSender]).
+         */
+        val fake: ByteArray? = null,
+        val fakeTtl: Int = 0
+    )
 
     /** Байт, который уходит срочным (OOB): как у ByeDPI по умолчанию. */
     const val OOB_BYTE: Int = 'a'.code
@@ -117,26 +127,15 @@ object TlsHello {
     }
 
     /**
-     * Какими кусками уходит первый пакет при приёме [trick]. Склейка кусков (без срочного байта) —
-     * ровно то, что получит сервер: для «как есть», разреза, перестановки и OOB это исходный
-     * ClientHello, для «двух записей» — он же, поделённый на две записи.
+     * Какими кусками уходит первый пакет при приёме [trick] (группа [group] его стратегии). Склейка
+     * кусков (без срочного байта) — ровно то, что получит сервер: для «как есть», разреза,
+     * перестановки, фейка и OOB это исходный ClientHello, для «двух записей» — он же, поделённый на
+     * записи. С 1.10.49-beta4 — по строке ByeDPI (см. [DpiDesync]).
      */
-    fun plan(trick: DpiTrick, hello: ByteArray): List<Piece> {
-        if (hello.size < 8) return listOf(Piece(hello))
-        val cut = cutPos(hello)
-        fun tlsrec(): ByteArray = runCatching { splitRecord(hello, cut) }.getOrDefault(hello)
-        return when (trick) {
-            DpiTrick.PLAIN -> listOf(Piece(hello))
-            DpiTrick.SPLIT -> listOf(Piece(hello.copyOfRange(0, cut)), Piece(hello.copyOfRange(cut, hello.size)))
-            DpiTrick.TLSREC -> listOf(Piece(tlsrec()))
-            // `--disorder 1`: первый байт — с TTL 1. Фильтр видит поток с середины заголовка записи и
-            // разобрать его не может, а пропавший байт система перешлёт сама, когда сервер о нём спросит.
-            DpiTrick.DISORDER -> listOf(Piece(hello.copyOfRange(0, 1), lowTtl = true), Piece(hello.copyOfRange(1, hello.size)))
-            DpiTrick.DISORDER_TLSREC -> tlsrec().let { rec ->
-                listOf(Piece(rec.copyOfRange(0, 1), lowTtl = true), Piece(rec.copyOfRange(1, rec.size)))
-            }
-            DpiTrick.OOB -> listOf(Piece(hello.copyOfRange(0, cut), oobAfter = true), Piece(hello.copyOfRange(cut, hello.size)))
-        }
+    fun plan(trick: DpiTrick, hello: ByteArray, group: Int = 0, rnd: java.util.Random = java.util.Random()): List<Piece> {
+        if (trick.strategy.isPlain || hello.size < 8) return listOf(Piece(hello))
+        val g = trick.strategy.groups.getOrElse(group) { trick.strategy.groups.first() }
+        return DpiDesync.plan(hello, g, rnd).pieces
     }
 
     /** Что получит сервер, если кусков [plan] — склейка без срочного байта (для проверок). */
@@ -148,21 +147,77 @@ object TlsHello {
 }
 
 /**
- * Приёмы обхода, которые приложение умеет само, без root и без ByeDPI. [byedpi] — те же приёмы в
- * параметрах ByeDPI: их можно перенести в ByeDPI на телефоне или в версию для компьютера.
+ * Приём обхода — стратегия ByeDPI с именем (с 1.10.49-beta4; до того — пять зашитых приёмов).
+ * [byedpi] — строка ByeDPI: её же можно перенести в ByeDPI на телефоне или в версию для компьютера.
+ * Встроенные — [BUILTIN] (в порядке проверки: от самых безобидных к фейку); свою стратегию человек
+ * задаёт строкой ([custom], id [CUSTOM_ID]).
  */
-enum class DpiTrick(val id: String, val title: String, val byedpi: String, val needsTtl: Boolean = false) {
-    PLAIN("plain", "как есть", ""),
-    SPLIT("split", "разрез", "--split 1+s"),
-    TLSREC("tlsrec", "две записи TLS", "--tlsrec 1+s"),
-    DISORDER("disorder", "перестановка", "--disorder 1", needsTtl = true),
-    DISORDER_TLSREC("disorder+tlsrec", "перестановка + две записи", "--disorder 1 --tlsrec 1+s", needsTtl = true),
-    OOB("oob", "лишний байт (OOB)", "--oob 1+s");
+class DpiTrick(val id: String, val title: String, val byedpi: String) {
+    val strategy: DpiStrategy = if (byedpi.isBlank()) DpiStrategy.NONE else DpiStrategy.of(byedpi)
+
+    /** Нужен TTL (перестановка, фейк): без доступа к нему приём честно «не проверить». */
+    val needsTtl: Boolean get() = strategy.needsTtl
+
+    /** Нужен фейк ([FakeSender]): без него — «не проверить». */
+    val needsFake: Boolean get() = strategy.needsFake
+
+    val isCustom: Boolean get() = id == CUSTOM_ID
+
+    override fun equals(other: Any?): Boolean = other is DpiTrick && other.id == id && other.byedpi == byedpi
+    override fun hashCode(): Int = id.hashCode() * 31 + byedpi.hashCode()
+    override fun toString(): String = title
 
     companion object {
+        val PLAIN = DpiTrick("plain", "как есть", "")
+        val SPLIT = DpiTrick("split", "разрез", "--split 1+s")
+        val TLSREC = DpiTrick("tlsrec", "две записи TLS", "--tlsrec 1+s")
+        val DISORDER = DpiTrick("disorder", "перестановка", "--disorder 1")
+        val DISORDER_TLSREC = DpiTrick("disorder+tlsrec", "перестановка + две записи", "--disorder 1 --tlsrec 1+s")
+        val OOB = DpiTrick("oob", "лишний байт (OOB)", "--oob 1+s")
+
+        /** Рекомендация ByeDPI для Windows: разрез в имени и перестановка чуть дальше. */
+        val SPLIT_DISORDER = DpiTrick("split+disorder", "разрез + перестановка", "--split 1+s --disorder 3+s")
+
+        /** Имя — мелкими кусками вперемешку: против фильтров, которые склеивают только пару кусков. */
+        val CHOP = DpiTrick(
+            "chop", "мелкая нарезка",
+            "--disorder 1 --disorder 3+s --split 6+s --disorder 9+s --split 12+s --tlsrec 1+s"
+        )
+
+        /** Две записи и срочный байт внутри второго заголовка: фильтр путается в разметке записей. */
+        val TLSREC_OOB = DpiTrick("tlsrec+oob", "две записи + OOB", "--tlsrec 1+s --oob 3+s")
+
+        /** Фейк (как `ciadpi --fake -1 --ttl N`): TTL подбирается — фильтр ближе сервера, но насколько, зависит от сети. */
+        val FAKE3 = DpiTrick("fake3", "фейк (TTL 3)", "--fake -1 --ttl 3")
+        val FAKE5 = DpiTrick("fake5", "фейк (TTL 5)", "--fake -1 --ttl 5")
+        val FAKE8 = DpiTrick("fake8", "фейк (TTL 8)", "--fake -1 --ttl 8")
+
+        const val CUSTOM_ID = "custom"
+
+        /** Встроенные приёмы — в порядке проверки и предпочтения: проще — раньше. */
+        val BUILTIN: List<DpiTrick> = listOf(
+            SPLIT, TLSREC, DISORDER, DISORDER_TLSREC, OOB, SPLIT_DISORDER, CHOP, TLSREC_OOB, FAKE3, FAKE5, FAKE8
+        )
+
+        /** То же, что [BUILTIN] (имя до beta4). */
+        val BYPASS: List<DpiTrick> get() = BUILTIN
+
+        /** Все известные по id (без своей стратегии). */
+        val entries: List<DpiTrick> get() = listOf(PLAIN) + BUILTIN
+
         fun byId(id: String): DpiTrick? = entries.firstOrNull { it.id == id }
 
-        /** Приёмы, кроме «как есть», — в порядке проверки: от самых безобидных к требующим TTL. */
-        val BYPASS: List<DpiTrick> = listOf(SPLIT, TLSREC, DISORDER, DISORDER_TLSREC, OOB)
+        /** Своя стратегия из строки ByeDPI; строка не разбирается или ничего не делает — null. */
+        fun custom(args: String): DpiTrick? {
+            val text = args.trim()
+            if (text.isEmpty()) return null
+            val parsed = DpiStrategy.parse(text)
+            val st = parsed.strategy ?: return null
+            if (st.isPlain) return null
+            return DpiTrick(CUSTOM_ID, "своя стратегия", st.source)
+        }
+
+        /** Место в порядке предпочтения: встроенные — по [BUILTIN], своя — после них. */
+        fun order(t: DpiTrick): Int = BUILTIN.indexOf(t).let { if (it >= 0) it else if (t.isCustom) BUILTIN.size else BUILTIN.size + 1 }
     }
 }

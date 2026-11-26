@@ -135,11 +135,13 @@ data class DpiAttempt(
     val bytesIn: Long = 0,
     val status: Int = 0,
     val kbps: Int = -1,
-    val stalled: Boolean = false
+    val stalled: Boolean = false,
+    /** Группа стратегии (после `--auto`), которой открылось; 0 — первая. */
+    val group: Int = 0
 ) {
     fun short(): String = when {
         stage == DpiStage.SKIPPED -> "${trick.title} — не проверить ($reason)"
-        ok -> "${trick.title} ✓" + (if (kbps > 0) " ${DpiReport.speed(kbps)}" else "")
+        ok -> "${trick.title} ✓" + (if (group > 0) " (группа ${group + 1})" else "") + (if (kbps > 0) " ${DpiReport.speed(kbps)}" else "")
         else -> "${trick.title} ✗ $reason"
     }
 }
@@ -202,7 +204,7 @@ data class DpiTargetResult(
 
     /** Строка для журнала: адрес, все попытки и итог. */
     fun journal(): String =
-        "${target.name} (${target.host}" + (if (address.isNotBlank()) " → $address" else "") + ")" +
+        target.name + (if (target.host.isBlank() && address.isBlank()) "" else " (${target.host}" + (if (address.isNotBlank()) " → $address" else "") + ")") +
             (if (dnsNote.isNotBlank()) " [$dnsNote]" else "") + ": " +
             (if (attempts.isEmpty()) "—" else attempts.joinToString(" · ") { it.short() }) +
             " ⇒ " + text()
@@ -216,7 +218,9 @@ class DpiReport(
     val network: String,
     val results: List<DpiTargetResult>,
     val tookMs: Long,
-    val ttl: Boolean
+    val ttl: Boolean,
+    /** Фейк (с 1.10.49-beta4): true — отправлялся, false — на этом телефоне не работает, null — не пробовали. */
+    val fake: Boolean? = null
 ) {
     /** Контрольный сайт открылся (или его нет в списке): итогу можно верить. */
     val controlOk: Boolean
@@ -230,7 +234,7 @@ class DpiReport(
             r.helpers.forEach { counts[it] = (counts[it] ?: 0) + 1 }
         }
         // При равенстве — приём проще (раньше в списке): разрез надёжнее перестановки.
-        return counts.entries.sortedWith(compareByDescending<Map.Entry<DpiTrick, Int>> { it.value }.thenBy { it.key.ordinal })
+        return counts.entries.sortedWith(compareByDescending<Map.Entry<DpiTrick, Int>> { it.value }.thenBy { DpiTrick.order(it.key) })
             .map { it.key to it.value }
     }
 
@@ -257,7 +261,8 @@ class DpiReport(
         if (ip.isNotEmpty()) parts += "По адресу (нужен VPN): " + ip.joinToString(", ") { it.target.name } + "."
         if (hard.isNotEmpty()) parts += "Не помогают эти приёмы: " + hard.joinToString(", ") { it.target.name } + "."
         if (open.isNotEmpty()) parts += "Открыто и так: " + open.joinToString(", ") { it.target.name } + "."
-        if (!ttl) parts += "Перестановку проверить не удалось: система не дала поменять TTL."
+        if (!ttl) parts += "Перестановку и фейк проверить не удалось: система не дала поменять TTL."
+        else if (fake == false) parts += "Фейк на этом телефоне не отправился (нужен Android 9 или новее, и система должна это позволять) — приёмы с фейком пропущены."
         return parts.joinToString(" ")
     }
 
@@ -305,7 +310,16 @@ class DpiProbe(
     val maxDataMs: Long = 6000,
     private val port: Int = 443,
     /** Пускать на локальные адреса (только для самопроверки: там сервер — на 127.0.0.1). */
-    private val allowLocal: Boolean = false
+    private val allowLocal: Boolean = false,
+    /** Какие приёмы пробовать (с 1.10.49-beta4): встроенные и, если задана, своя стратегия. */
+    val strategies: List<DpiTrick> = DpiTrick.BUILTIN,
+    /** Фейк (с beta4, см. [FakeSender]); null — приёмы с фейком «не проверить». */
+    private val fake: FakeSender? = null,
+    /**
+     * Узел видео YouTube этой сети с прошлой проверки (с beta4): редиректор, который его называет,
+     * сам бывает закрыт (Tele2 26.11) — тогда проверяется прошлый узел.
+     */
+    private val videoHint: String? = null
 ) {
 
     /** Доступ к TTL исходящих пакетов сокета (в Android — через setsockopt). */
@@ -323,7 +337,7 @@ class DpiProbe(
         network: String = "",
         progress: (String) -> Unit = {},
         cancelled: () -> Boolean = { false },
-        threads: Int = 4,
+        threads: Int = 6,
         deadlineMs: Long = 180_000
     ): DpiReport {
         val t0 = System.currentTimeMillis()
@@ -343,9 +357,15 @@ class DpiProbe(
                     )
                 }
             }
-            val ttlWorks = ttl != null && results.flatMap { it.attempts }
-                .none { it.trick.needsTtl && it.stage == DpiStage.SKIPPED }
-            return DpiReport(t0, network, results, System.currentTimeMillis() - t0, ttlWorks)
+            val all = results.flatMap { it.attempts }
+            val ttlWorks = ttl != null && all.none { it.trick.needsTtl && !it.trick.needsFake && it.stage == DpiStage.SKIPPED }
+            val fakeTried = all.filter { it.trick.needsFake }
+            val fakeWorks = when {
+                fakeTried.isEmpty() -> null
+                fake == null -> false
+                else -> fakeTried.any { it.stage != DpiStage.SKIPPED }
+            }
+            return DpiReport(t0, network, results, System.currentTimeMillis() - t0, ttlWorks, fakeWorks)
         } finally {
             pool.shutdownNow()
         }
@@ -371,7 +391,7 @@ class DpiProbe(
         attempts += plain
         val tryTricks = plain.stage != DpiStage.CONNECT && (!plain.ok || target.speed)
         if (tryTricks) {
-            for (trick in DpiTrick.BYPASS) {
+            for (trick in strategies) {
                 if (cancelled()) break
                 progress("${target.name}: ${trick.title}")
                 attempts += attempt(target, addr, trick)
@@ -400,7 +420,15 @@ class DpiProbe(
     private fun checkVideo(target: DpiTarget, progress: (String) -> Unit, cancelled: () -> Boolean): DpiTargetResult {
         progress("${target.name}: спрашиваю редиректор")
         val (cluster, why) = discoverCluster(cancelled)
-        if (cluster == null) return DpiTargetResult(target, "", why, emptyList(), DpiVerdict.DNS, emptyList())
+        if (cluster == null) {
+            // Редиректор закрыт — узел этой сети с прошлой проверки: узлы GGC меняются редко.
+            val hint = videoHint?.trim()?.lowercase()?.takeIf { it.endsWith(".googlevideo.com") && it.length < 120 }
+            if (hint != null && !cancelled()) {
+                val r = check(target.copy(host = hint), progress, cancelled)
+                return r.copy(dnsNote = "$why — взят узел этой сети с прошлой проверки" + (if (r.dnsNote.isNotBlank()) "; ${r.dnsNote}" else ""))
+            }
+            return DpiTargetResult(target, "", why, emptyList(), DpiVerdict.DNS, emptyList())
+        }
         val hosts = GoogleVideo.hostsOf(cluster)
         if (hosts.isEmpty()) {
             return DpiTargetResult(
@@ -422,7 +450,9 @@ class DpiProbe(
         val (addresses, dnsNote) = addressesOf(red.host)
         val addr = addresses.firstOrNull() ?: return null to "редиректор: ${dnsNote.ifBlank { "адрес не узнать" }}"
         var last = ""
-        for (trick in listOf(DpiTrick.PLAIN) + DpiTrick.BYPASS) {
+        // Только простые приёмы: редиректор проверяется и отдельной целью, а здесь важно не ждать минуту.
+        val quick = listOf(DpiTrick.PLAIN) + strategies.filter { !it.needsFake && it.strategy.groups.size == 1 }.take(4)
+        for (trick in quick) {
             if (cancelled()) break
             if (trick.needsTtl && ttl == null) continue
             val (a, body) = fetch(red, addr, trick, keepBody = true)
@@ -448,13 +478,23 @@ class DpiProbe(
     }
 
     /** Одна попытка: подключение, TLS (первый пакет — по приёму [trick]), запрос страницы. */
-    fun attempt(target: DpiTarget, address: InetAddress, trick: DpiTrick): DpiAttempt =
-        fetch(target, address, trick, keepBody = false).first
+    fun attempt(target: DpiTarget, address: InetAddress, trick: DpiTrick): DpiAttempt {
+        // Группы `--auto`: не открылось первой — следующей, как у ByeDPI (новым соединением).
+        val groups = trick.strategy.groups.size.coerceAtLeast(1)
+        var last: DpiAttempt? = null
+        for (g in 0 until groups) {
+            val a = fetch(target, address, trick, keepBody = false, group = g).first
+            if (a.ok) return a.copy(group = g)
+            if (a.stage == DpiStage.SKIPPED || a.stage == DpiStage.CONNECT) return a
+            last = a
+        }
+        return last ?: DpiAttempt(trick, false, DpiStage.SKIPPED, "нет групп")
+    }
 
     /** То же, и начало ответа текстом ([keepBody], до 4 КБ) — для редиректора видео. */
-    private fun fetch(target: DpiTarget, address: InetAddress, trick: DpiTrick, keepBody: Boolean): Pair<DpiAttempt, String> {
+    private fun fetch(target: DpiTarget, address: InetAddress, trick: DpiTrick, keepBody: Boolean, group: Int = 0): Pair<DpiAttempt, String> {
         var pumpRef: TlsPump? = null
-        val a = attemptInner(target, address, trick, keepBody) { pumpRef = it }
+        val a = attemptInner(target, address, trick, keepBody, group) { pumpRef = it }
         return a to (pumpRef?.bodyText().orEmpty())
     }
 
@@ -463,9 +503,11 @@ class DpiProbe(
         address: InetAddress,
         trick: DpiTrick,
         keepBody: Boolean,
+        group: Int,
         onPump: (TlsPump) -> Unit
     ): DpiAttempt {
         if (trick.needsTtl && ttl == null) return DpiAttempt(trick, false, DpiStage.SKIPPED, "нет доступа к TTL")
+        if (trick.needsFake && fake == null) return DpiAttempt(trick, false, DpiStage.SKIPPED, "фейк на этом телефоне не отправить")
         val started = System.nanoTime()
         var stage = DpiStage.CONNECT
         var connectMs = -1L
@@ -479,7 +521,7 @@ class DpiProbe(
             s.tcpNoDelay = true
             s.connect(InetSocketAddress(address, port), connectTimeoutMs)
             connectMs = msSince(started)
-            s.soTimeout = helloTimeoutMs
+            s.soTimeout = trick.strategy.timeoutMs.takeIf { it > 0 } ?: helloTimeoutMs
             stage = DpiStage.HELLO
             val engine = ctx.createSSLEngine(target.host, port)
             engine.useClientMode = true
@@ -492,7 +534,7 @@ class DpiProbe(
             onPump(tls)
             tls.handshake(
                 first = { bytes ->
-                    sendFirst(s, bytes, trick)
+                    sendFirst(s, bytes, trick, group)
                     helloAt = System.nanoTime()
                 },
                 onServerByte = { if (stage == DpiStage.HELLO) stage = DpiStage.TLS }
@@ -533,7 +575,7 @@ class DpiProbe(
         if (helloAt == 0L || p.firstByteAt == 0L) -1 else ((p.firstByteAt - helloAt) / 1_000_000).coerceAtLeast(0)
 
     /** Первый пакет — кусками по плану приёма (см. [TrickSender]). */
-    private fun sendFirst(s: Socket, hello: ByteArray, trick: DpiTrick) = TrickSender.send(s, hello, trick, ttl)
+    private fun sendFirst(s: Socket, hello: ByteArray, trick: DpiTrick, group: Int) = TrickSender.send(s, hello, trick, ttl, fake, group)
 
     private fun reasonOf(e: Throwable, stage: DpiStage): String {
         val msg = (e.message ?: "").lowercase()

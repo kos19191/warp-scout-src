@@ -7,6 +7,7 @@ import dev.warpscout.core.dpi.DpiFamily
 import dev.warpscout.core.dpi.DpiPlan
 import dev.warpscout.core.dpi.DpiRelay
 import dev.warpscout.core.dpi.DpiReport
+import dev.warpscout.core.dpi.DpiServices
 import dev.warpscout.core.dpi.DpiStage
 import dev.warpscout.core.dpi.DpiTarget
 import dev.warpscout.core.dpi.DpiTargetResult
@@ -193,13 +194,21 @@ class DpiRelayChecks(private val check: (String, Boolean, String) -> Unit) {
         val none = listOf("www.google.com", "notyoutube.com", "youtube.com.evil.example", "googleapis.com", "twitter.co", "")
         ok(
             "обход DPI: имена YouTube и X узнаются, чужие и похожие — нет",
-            yt.all { DpiFamilies.ofHost(it) == DpiFamilies.YOUTUBE } && x.all { DpiFamilies.ofHost(it) == DpiFamilies.X } &&
+            yt.all { DpiFamilies.ofHost(it)?.service == "youtube" } && x.all { DpiFamilies.ofHost(it) == DpiFamilies.X } &&
                 none.all { DpiFamilies.ofHost(it) == null },
             none.filter { DpiFamilies.ofHost(it) != null }.joinToString()
         )
         ok(
-            "обход DPI: приложения YouTube и X — в своих сервисах",
-            "com.google.android.youtube" in DpiFamilies.YOUTUBE.packages && "com.twitter.android" in DpiFamilies.X.packages
+            "обход DPI: у YouTube страница, видео и картинки — разные группы сайтов одного сервиса",
+            DpiFamilies.ofHost("www.youtube.com") == DpiFamilies.YOUTUBE &&
+                DpiFamilies.ofHost("rr3---sn-8ph2xajvh-v8ce.googlevideo.com") == DpiFamilies.YT_VIDEO &&
+                DpiFamilies.ofHost("i.ytimg.com") == DpiFamilies.YT_IMG && DpiFamilies.ofHost("yt3.ggpht.com") == DpiFamilies.YT_IMG &&
+                DpiFamilies.ofHost("gateway.discord.gg") == DpiFamilies.DISCORD && DpiFamilies.ofHost("cdn.discordapp.com") == DpiFamilies.DISCORD
+        )
+        ok(
+            "обход DPI: приложения YouTube, X и Discord — в своих сервисах",
+            "com.google.android.youtube" in DpiServices.YOUTUBE.packages && "com.twitter.android" in DpiServices.X.packages &&
+                "com.discord" in DpiServices.DISCORD.packages
         )
         val all5 = listOf(DpiTrick.SPLIT, DpiTrick.TLSREC, DpiTrick.DISORDER, DpiTrick.DISORDER_TLSREC, DpiTrick.OOB)
         val tele2 = DpiReport(
@@ -237,8 +246,9 @@ class DpiRelayChecks(private val check: (String, Boolean, String) -> Unit) {
             1000, true
         )
         ok(
-            "обход DPI: приём для сервиса — тот, что помог и странице, и серверу видео",
-            DpiPlan.of(video).trickFor("youtube") == DpiTrick.OOB, DpiPlan.of(video).encode()
+            "обход DPI: у страницы и у видео — свой приём (страница «две записи», видео «OOB»)",
+            DpiPlan.of(video).trickFor("youtube") == DpiTrick.TLSREC && DpiPlan.of(video).trickFor("ytvideo") == DpiTrick.OOB,
+            DpiPlan.of(video).encode()
         )
         val entries = listOf(DpiPlan.entry("мобильная·25020", plan), DpiPlan.entry("Wi-Fi·192.168.1.1", DpiPlan(mapOf("x" to DpiTrick.TLSREC))))
         ok(
@@ -537,7 +547,7 @@ class DpiRelayChecks(private val check: (String, Boolean, String) -> Unit) {
         val tlsDpi = Srv { tlsEcho(it, dpi = true) }
         val tlsPlain = Srv { tlsEcho(it, dpi = false) }
         val silent = Srv { c -> c.soTimeout = 3000; runCatching { c.getInputStream().read(ByteArray(4096)); Thread.sleep(2500) } }
-        val testFamily = DpiFamily("test", "Тест", listOf("dpi.test"), listOf("dpi"), listOf("test.app"))
+        val testFamily = DpiFamily("test", "Тест", listOf("dpi.test"), listOf("dpi"), service = "test")
         val q = LinkedBlockingQueue<ByteArray>()
         val direct = LocalConnector(tlsDpi.port)
         val tunnel = LocalConnector(tlsPlain.port)
@@ -679,6 +689,43 @@ class DpiRelayChecks(private val check: (String, Boolean, String) -> Unit) {
             uids[40008] = 10123
             val idle = SimApp(relay, q, 40008, srvIp = byteArrayOf(203.toByte(), 0, 113, 99))
             ok("обход DPI: план пустой — ничего не забирается", !idle.syn() && !relay.take(quicMine, quicMine.size))
+
+            // 9. Группы --auto (1.10.49-beta4): первая (только --tlsminor) «эмулятор DPI» сбрасывает,
+            // вторая (--tlsrec) проходит; следующее соединение сразу начинает со второй.
+            val groups = DpiTrick.custom("--tlsminor 1 --auto=torst --tlsrec 1+s")!!
+            val direct2 = LocalConnector(tlsDpi.port)
+            val tunnel2 = LocalConnector(tlsPlain.port)
+            val logs2 = java.util.Collections.synchronizedList(ArrayList<String>())
+            val relay2 = DpiRelay(
+                tunOut = { q.offer(it) }, owner = owner, apps = mapOf(10123 to DpiRelay.App("Тест", "test")),
+                plan = DpiPlan(mapOf("test" to groups)), direct = direct2, tunnel = tunnel2, ttl = null,
+                mtu = 1280, log = { logs2 += it }, families = listOf(testFamily), timing = timing
+            )
+            try {
+                uids[40009] = 10123
+                val g1 = SimApp(relay2, q, 40009, srvIp = byteArrayOf(203.toByte(), 0, 113, 21))
+                g1.syn(); g1.pumpUntil(2000) { g1.synAck }; g1.ack()
+                g1.send(hello)
+                val g1ok = g1.pumpUntil(5000) { g1.got.size() >= 7 }
+                ok(
+                    "обход DPI: группы --auto — первая не прошла «эмулятор DPI», вторая открыла напрямую",
+                    g1ok && direct2.calls.get() == 2 && tunnel2.calls.get() == 0 && relay2.viaDirect.get() == 1L && relay2.fallbacks.get() == 0L,
+                    "напрямую ${direct2.calls.get()}, через туннель ${tunnel2.calls.get()}; ${logs2.joinToString(" | ")}"
+                )
+                g1.reset()
+                uids[40010] = 10123
+                val g2 = SimApp(relay2, q, 40010, srvIp = byteArrayOf(203.toByte(), 0, 113, 22))
+                g2.syn(); g2.pumpUntil(2000) { g2.synAck }; g2.ack()
+                g2.send(hello)
+                val g2ok = g2.pumpUntil(5000) { g2.got.size() >= 7 }
+                ok(
+                    "обход DPI: следующее соединение — сразу с группы, которая открыла в прошлый раз",
+                    g2ok && direct2.calls.get() == 3 && relay2.viaDirect.get() == 2L, "напрямую ${direct2.calls.get()}"
+                )
+                g2.reset()
+            } finally {
+                relay2.stop()
+            }
         } finally {
             relay.stop()
             tlsDpi.close()

@@ -432,8 +432,17 @@ data class ServiceSettings(
      * напрямую с приёмом, где «Проверить DPI» нашла, что приём помогает. По умолчанию включён.
      */
     val dpiBypass: Boolean = true,
-    /** Планы обхода по сетям: строки «ключ сети<TAB>план» (см. DpiPlan.encode). */
+    /** Планы обхода по сетям: строки «ключ сети<TAB>v2:план» (см. DpiPlan.entry). */
     val dpiPlans: List<String> = emptyList(),
+    /**
+     * Общая стратегия обхода (с 1.10.49-beta4, см. DpiPlan.effective): «auto» — по проверке сети,
+     * «off» — не обходить, id приёма или «custom» — этот приём для всех сервисов.
+     */
+    val dpiStrategy: String = "auto",
+    /** Свой выбор сервисов: строки «сервис=выбор» (youtube=oob); нет строки — как общая. */
+    val dpiOverrides: List<String> = emptyList(),
+    /** Своя стратегия — строка ByeDPI (см. DpiStrategy). */
+    val dpiCustom: String = "",
 ) {
 
     fun toJson(): String = JsonVal.obj(
@@ -463,6 +472,9 @@ data class ServiceSettings(
         "appAuto" to JsonVal.bool(appAuto),
         "dpiBypass" to JsonVal.bool(dpiBypass),
         "dpiPlans" to JsonVal.arr(dpiPlans.map { JsonVal.str(it) }),
+        "dpiStrategy" to JsonVal.str(dpiStrategy),
+        "dpiOverrides" to JsonVal.arr(dpiOverrides.map { JsonVal.str(it) }),
+        "dpiCustom" to JsonVal.str(dpiCustom),
     ).render()
 
     companion object {
@@ -512,6 +524,10 @@ data class ServiceSettings(
                 // Нет поля (снимок от прежней версии) — обход включён, но планов нет: ничего не меняется.
                 dpiBypass = obj.bool("dpiBypass") ?: true,
                 dpiPlans = strings(obj, "dpiPlans"),
+                // Нет полей (снимок beta3 и раньше) — по проверке сети, как было.
+                dpiStrategy = obj.str("dpiStrategy")?.takeIf { it.isNotBlank() } ?: "auto",
+                dpiOverrides = strings(obj, "dpiOverrides"),
+                dpiCustom = obj.str("dpiCustom").orEmpty(),
             )
         }
     }

@@ -701,6 +701,42 @@ class Prefs(private val context: Context) {
             pushToService()
         }
 
+    /**
+     * Стратегия обхода DPI для всех сервисов (с 1.10.49-beta4): «auto» — по проверке этой сети,
+     * «off» — не обходить, id встроенного приёма (DpiTrick) или «custom» — своя строка ByeDPI.
+     */
+    var dpiStrategy: String
+        get() = sp.getString("dpiStrategy", null)?.takeIf { it.isNotBlank() } ?: dev.warpscout.core.dpi.DpiPlan.AUTO
+        set(v) {
+            sp.edit().putString("dpiStrategy", v.trim().ifBlank { dev.warpscout.core.dpi.DpiPlan.AUTO }).apply()
+            pushToService()
+        }
+
+    /** Выбор по сервисам (с beta4): «youtube=oob», «discord=off»; нет строки — как для всех. */
+    var dpiOverrides: List<String>
+        get() = sp.getString("dpiOverrides", "").orEmpty().split(',').map { it.trim() }.filter { it.contains('=') && !it.endsWith("=") }
+        set(v) {
+            sp.edit().putString("dpiOverrides", v.map { it.trim() }.filter { it.contains('=') && !it.endsWith("=") }.joinToString(",")).apply()
+            pushToService()
+        }
+
+    /** Выбор сервиса [service] (с beta4); пусто — как для всех. */
+    fun dpiOverride(service: String): String = dev.warpscout.core.dpi.DpiPlan.parseOverrides(dpiOverrides)[service].orEmpty()
+
+    fun setDpiOverride(service: String, choice: String) {
+        val map = LinkedHashMap(dev.warpscout.core.dpi.DpiPlan.parseOverrides(dpiOverrides))
+        if (choice.isBlank()) map.remove(service) else map[service] = choice.trim()
+        dpiOverrides = map.map { (k, v) -> "$k=$v" }
+    }
+
+    /** Своя стратегия — строка ByeDPI (с beta4), например «--split 1+s --disorder 3+s». */
+    var dpiCustom: String
+        get() = sp.getString("dpiCustom", "").orEmpty()
+        set(v) {
+            sp.edit().putString("dpiCustom", v.replace('\n', ' ').replace('\t', ' ').trim()).apply()
+            pushToService()
+        }
+
     /** Перед переключением на выбранную точку спрашивать её пробой (рабочий туннель не трогая). */
     var featProbeBeforeSwitch: Boolean
         get() = sp.getBoolean("featProbeBeforeSwitch", true)
@@ -1124,6 +1160,10 @@ class Prefs(private val context: Context) {
             // Обход DPI в туннеле (с 1.10.49-beta3): переключатель и планы по сетям из «Проверить DPI».
             dpiBypass = featDpiBypass,
             dpiPlans = runCatching { DpiCheck.servicePlans(context) }.getOrDefault(emptyList()),
+            // Выбор стратегии (с 1.10.49-beta4): общая, по сервисам и своя строка ByeDPI.
+            dpiStrategy = dpiStrategy,
+            dpiOverrides = dpiOverrides,
+            dpiCustom = dpiCustom,
         )
     }
 
