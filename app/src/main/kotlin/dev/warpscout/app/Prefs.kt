@@ -765,11 +765,23 @@ class Prefs(private val context: Context) {
 
     /**
      * Дизайн (с 1.10.49-beta7): [DESIGN_PREMIUM] — по умолчанию (так решил человек: «по умолчанию новую
-     * поставь»), [DESIGN_CLASSIC] — прежний вид. Тема (светлая/тёмная) — отдельно, [themeMode].
+     * поставь»), [DESIGN_CLASSIC] — прежний вид; с 1.10.49-beta8 ещё [DESIGN_SOFT] («Нежный») и
+     * [DESIGN_GLASS] («Стекло»). Тема (светлая/тёмная) — отдельно, [themeMode]. Неизвестное значение
+     * (например, после отката на старую версию и обратно) — «Премиум».
      */
     var design: Int
-        get() = sp.getInt("design", DESIGN_PREMIUM).let { if (it == DESIGN_CLASSIC) DESIGN_CLASSIC else DESIGN_PREMIUM }
-        set(v) = sp.edit().putInt("design", if (v == DESIGN_CLASSIC) DESIGN_CLASSIC else DESIGN_PREMIUM).apply()
+        get() = sp.getInt("design", DESIGN_PREMIUM).let { if (it in DESIGN_CLASSIC..DESIGN_GLASS) it else DESIGN_PREMIUM }
+        set(v) = sp.edit().putInt("design", if (v in DESIGN_CLASSIC..DESIGN_GLASS) v else DESIGN_PREMIUM).apply()
+
+    /** Цвет «Нежного» (с 1.10.49-beta8): номер из [Design.SOFT_TONES], по умолчанию лаванда. */
+    var softTone: Int
+        get() = sp.getInt("softTone", 0).coerceIn(0, SOFT_TONES - 1)
+        set(v) = sp.edit().putInt("softTone", v.coerceIn(0, SOFT_TONES - 1)).apply()
+
+    /** Сочетание «Стекла» (с 1.10.49-beta8): номер из [Design.GLASS_TONES], по умолчанию «Киберпанк». */
+    var glassTone: Int
+        get() = sp.getInt("glassTone", 0).coerceIn(0, GLASS_TONES - 1)
+        set(v) = sp.edit().putInt("glassTone", v.coerceIn(0, GLASS_TONES - 1)).apply()
 
     /**
      * Какие разделы «Настроек» раскрыты (с 1.10.49-beta5, см. [SettingsAccordion]): ключи через
@@ -1234,6 +1246,10 @@ class Prefs(private val context: Context) {
 
         const val DESIGN_CLASSIC = 0
         const val DESIGN_PREMIUM = 1
+        const val DESIGN_SOFT = 2
+        const val DESIGN_GLASS = 3
+        const val SOFT_TONES = 6
+        const val GLASS_TONES = 5
         const val THEME_SYSTEM = 0
         const val THEME_LIGHT = 1
         const val THEME_DARK = 2

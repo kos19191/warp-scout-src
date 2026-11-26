@@ -47,8 +47,8 @@ class RouteScreen(private val activity: Activity) {
 
     private var dialog: AppCompatDialog? = null
     private var views: ScreenRouteBinding? = null
-    private val premium = Design.premium(activity)
-    private val pal = Design.palette(activity, premium)
+    private val kind = Design.kind(activity)
+    private val pal = Design.palette(activity)
     private val density = activity.resources.displayMetrics.density
     private var shownKey = ""
     private var shownMode = RouteMapView.MODE_OFF
@@ -65,10 +65,13 @@ class RouteScreen(private val activity: Activity) {
         d.onBackPressedDispatcher.addCallback(object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() = dismiss()
         })
-        if (premium) v.routeRoot.background = PremiumBackdrop(d.context).apply { calm = true }
+        Design.backdrop(d.context, kind)?.let { bg ->
+            (bg as? GlowBackdrop)?.calm = true
+            v.routeRoot.background = bg
+        }
         SystemBars.keepClear(v.routeRoot)
         v.routeBack.setOnClickListener { dismiss() }
-        v.routeMap.premium = premium
+        v.routeMap.design = kind
         v.routeReplay.setOnClickListener {
             if (shownMode == RouteMapView.MODE_OFF) {
                 android.widget.Toast.makeText(activity, R.string.route_replay_off, android.widget.Toast.LENGTH_SHORT).show()

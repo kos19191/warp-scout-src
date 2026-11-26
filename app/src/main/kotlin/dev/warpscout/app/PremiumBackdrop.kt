@@ -24,7 +24,7 @@ import androidx.core.content.ContextCompat
  * сдвигаются — заново ничего не строится. [glowY] — где по высоте центр свечения (центр кнопки упрощённого экрана); [calm] — спокойный
  * вариант для расширенного вида и экрана маршрута: свечение сверху и пара линий по краям.
  */
-class PremiumBackdrop(private val context: Context) : Drawable() {
+class PremiumBackdrop(private val context: Context) : Drawable(), GlowBackdrop {
 
     private fun c(res: Int) = ContextCompat.getColor(context, res)
     private val bg0 = c(R.color.prem_bg0)
@@ -38,14 +38,14 @@ class PremiumBackdrop(private val context: Context) : Drawable() {
     private var builtFor = ""
 
     /** Центр свечения по высоте, px от верха; меньше нуля — 36 % высоты. */
-    var glowY: Float = -1f
+    override var glowY: Float = -1f
         set(value) {
             if (kotlin.math.abs(field - value) < 0.5f) return
             field = value
             if (!calm) invalidateSelf()
         }
 
-    var calm: Boolean = false
+    override var calm: Boolean = false
         set(value) {
             if (field == value) return
             field = value

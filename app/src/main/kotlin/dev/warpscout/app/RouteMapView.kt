@@ -52,8 +52,11 @@ class RouteMapView @JvmOverloads constructor(
     var warpApps: List<Branch> = emptyList()
     var secondApps: List<Branch> = emptyList()
 
-    /** Цвета дизайна: в «Премиуме» — оранжевый на тёмном, в классическом — цвета приложения. */
-    var premium = true
+    /**
+     * Цвета дизайна: в «Премиуме» — оранжевый на тёмном, в классическом — цвета приложения, у «Нежного» и
+     * «Стекла» (с 1.10.49-beta8) — цвета оттенка из темы окна: фон карты, дома, улицы и линия маршрута.
+     */
+    var design = Prefs.DESIGN_PREMIUM
         set(value) {
             if (field == value) return
             field = value
@@ -61,6 +64,10 @@ class RouteMapView @JvmOverloads constructor(
             base = null
             invalidate()
         }
+    private val premium: Boolean get() = design != Prefs.DESIGN_CLASSIC
+
+    /** «Нежный» и «Стекло»: карта своими цветами. */
+    private val custom: Boolean get() = design == Prefs.DESIGN_SOFT || design == Prefs.DESIGN_GLASS
 
     private var mode = MODE_OFF
     private var startedAt = 0L
@@ -79,6 +86,8 @@ class RouteMapView @JvmOverloads constructor(
     private var text = 0
     private var labelBg = 0
     private var labelStroke = 0
+    private var block = 0
+    private var routeCore = 0
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 11.5f * resources.displayMetrics.scaledDensity }
@@ -94,14 +103,40 @@ class RouteMapView @JvmOverloads constructor(
 
     private fun loadColors() {
         fun c(res: Int) = ContextCompat.getColor(context, res)
-        acc = if (premium) c(R.color.prem_accent) else c(R.color.orb_accent)
-        accLight = if (premium) c(R.color.prem_accent_light) else c(R.color.orb_accent)
-        mapBg = c(R.color.prem_map_bg)
-        road = c(R.color.prem_map_road)
-        blue = c(R.color.prem_blue)
-        text = if (premium) c(R.color.prem_on_surface) else c(R.color.colorOnSurface)
-        labelBg = if (dark) Color.argb(210, 14, 10, 8) else Color.argb(235, 255, 255, 255)
+        if (custom) {
+            val l = Design.look(context)
+            acc = l.accent
+            accLight = l.accentLight
+            mapBg = l.mapBg
+            road = l.mapRoad
+            blue = l.blue
+            text = l.onSurface
+            block = l.mapBlock
+            routeCore = l.routeCore
+            labelBg = if (dark) withAlpha(l.bg0, 0.86f) else Color.argb(235, 255, 255, 255)
+        } else {
+            acc = if (premium) c(R.color.prem_accent) else c(R.color.orb_accent)
+            accLight = if (premium) c(R.color.prem_accent_light) else c(R.color.orb_accent)
+            mapBg = c(R.color.prem_map_bg)
+            road = c(R.color.prem_map_road)
+            blue = c(R.color.prem_blue)
+            text = if (premium) c(R.color.prem_on_surface) else c(R.color.colorOnSurface)
+            block = mapBg
+            routeCore = if (dark) Color.rgb(255, 214, 160) else acc
+            labelBg = if (dark) Color.argb(210, 14, 10, 8) else Color.argb(235, 255, 255, 255)
+        }
         labelStroke = withAlpha(acc, if (dark) 0.35f else 0.30f)
+    }
+
+    /** Оттенок цвета домов: светлее (f > 0) или темнее (f < 0) основного. */
+    private fun shade(c: Int, f: Float): Int {
+        val to = if (f > 0f) 255 else 0
+        val k = kotlin.math.abs(f)
+        return Color.rgb(
+            (Color.red(c) + (to - Color.red(c)) * k).toInt(),
+            (Color.green(c) + (to - Color.green(c)) * k).toInt(),
+            (Color.blue(c) + (to - Color.blue(c)) * k).toInt()
+        )
     }
 
     /** Состояние туннеля: выключен — пунктир, подключается — линия бежит до входа, работает — вся. */
@@ -219,7 +254,7 @@ class RouteMapView @JvmOverloads constructor(
         val w = width
         val h = height
         if (w <= 0 || h <= 0) return null
-        val key = "${w}x$h:$premium"
+        val key = "${w}x$h:$design"
         base?.let { if (key == baseFor && !it.isRecycled) return it }
         base?.recycle()
         val bmp = runCatching { Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888) }.getOrNull() ?: return null
@@ -229,7 +264,9 @@ class RouteMapView @JvmOverloads constructor(
         val rnd = java.util.Random(1126L)
         val k = scale() * density
         val m = 64f * k
-        val houses = if (dark) {
+        val houses = if (custom) {
+            intArrayOf(shade(block, 0f), shade(block, 0.12f), shade(block, -0.08f), shade(block, 0.22f), shade(block, -0.15f))
+        } else if (dark) {
             intArrayOf(0xFF2B1D13.toInt(), 0xFF33220F.toInt(), 0xFF3D2914.toInt(), 0xFF241912.toInt(), 0xFF4A2F15.toInt())
         } else {
             intArrayOf(0xFFE3CBB2.toInt(), 0xFFDCC1A6.toInt(), 0xFFEAD6C1.toInt(), 0xFFD6B796.toInt(), 0xFFF0DFCC.toInt())
@@ -274,7 +311,7 @@ class RouteMapView @JvmOverloads constructor(
             }
         }
         val line = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-        line.color = if (dark) withAlpha(Color.rgb(120, 100, 85), 0.22f) else withAlpha(Color.WHITE, 0.95f)
+        line.color = if (custom) road else if (dark) withAlpha(Color.rgb(120, 100, 85), 0.22f) else withAlpha(Color.WHITE, 0.95f)
         line.strokeWidth = 3f * k
         val top = y0
         val bottom = h + pad
@@ -282,18 +319,21 @@ class RouteMapView @JvmOverloads constructor(
         val right = w + pad
         for (vx in xs) g.drawLine(vx, top, vx, bottom, line)
         for (vy in ys) g.drawLine(left, vy, right, vy, line)
-        line.color = if (dark) withAlpha(Color.rgb(120, 100, 85), 0.12f) else withAlpha(Color.WHITE, 0.7f)
+        line.color = if (custom) Color.argb((Color.alpha(road) * 0.55f).toInt(), Color.red(road), Color.green(road), Color.blue(road)) else if (dark) withAlpha(Color.rgb(120, 100, 85), 0.12f) else withAlpha(Color.WHITE, 0.7f)
         line.strokeWidth = 1.2f * k
         for (vx in xs) g.drawLine(vx + m / 2f, top, vx + m / 2f, bottom, line)
         for (vy in ys) g.drawLine(left, vy + m / 2f, right, vy + m / 2f, line)
-        line.color = if (dark) withAlpha(Color.rgb(140, 110, 90), 0.20f) else withAlpha(Color.WHITE, 0.9f)
+        line.color = if (custom) road else if (dark) withAlpha(Color.rgb(140, 110, 90), 0.20f) else withAlpha(Color.WHITE, 0.9f)
         line.strokeWidth = 4f * k
         g.drawLine(left, bottom - 60f * k, right, top + 120f * k, line)
         g.restore()
         val v = Paint().apply {
             shader = RadialGradient(
                 w / 2f, h / 2f, max(w, h) * 0.75f,
-                intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, if (dark) Color.argb(140, 0, 0, 0) else Color.argb(26, 120, 80, 40)),
+                intArrayOf(
+                    Color.TRANSPARENT, Color.TRANSPARENT,
+                    if (dark) Color.argb(140, 0, 0, 0) else if (custom) Color.argb(20, 60, 50, 90) else Color.argb(26, 120, 80, 40)
+                ),
                 floatArrayOf(0f, 0.4f, 1f), Shader.TileMode.CLAMP
             )
         }
@@ -353,7 +393,7 @@ class RouteMapView @JvmOverloads constructor(
             paint.color = withAlpha(acc, if (dark) 0.45f else 0.35f)
             paint.strokeWidth = 7f * k
             polyline(canvas, pts, reach)
-            paint.color = if (dark) Color.rgb(255, 214, 160) else acc
+            paint.color = if (custom) routeCore else if (dark) Color.rgb(255, 214, 160) else acc
             paint.strokeWidth = 2.6f * k
             polyline(canvas, pts, reach)
         }
@@ -430,7 +470,7 @@ class RouteMapView @JvmOverloads constructor(
             canvas.drawCircle(p.x, p.y, r, paint)
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = 2.4f * k
-            paint.color = if (lit) (if (dark) Color.rgb(255, 241, 224) else acc) else withAlpha(acc, 0.4f)
+            paint.color = if (lit) (if (dark) (if (custom) routeCore else Color.rgb(255, 241, 224)) else acc) else withAlpha(acc, 0.4f)
             canvas.drawCircle(p.x, p.y, r, paint)
             paint.style = Paint.Style.FILL
             paint.color = if (lit) acc else withAlpha(acc, 0.4f)
@@ -438,7 +478,7 @@ class RouteMapView @JvmOverloads constructor(
         } else {
             paint.color = if (lit) acc else withAlpha(acc, 0.35f)
             canvas.drawCircle(p.x, p.y, r, paint)
-            paint.color = if (dark) Color.rgb(255, 244, 230) else Color.WHITE
+            paint.color = if (dark) (if (custom) routeCore else Color.rgb(255, 244, 230)) else Color.WHITE
             canvas.drawCircle(p.x, p.y, 2.6f * k, paint)
         }
         if (lit) label(canvas, p, when (p.id) {

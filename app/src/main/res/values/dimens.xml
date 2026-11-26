@@ -22,6 +22,11 @@
     <!-- Дизайн «Премиум» (с 1.10.49-beta7): карточки круглее — стекло с мягкими углами. -->
     <dimen name="radius_card_prem">18dp</dimen>
     <dimen name="radius_panel_prem">22dp</dimen>
+    <!-- «Нежный» — круглее всех, «Стекло» — чуть строже (с 1.10.49-beta8). -->
+    <dimen name="radius_card_soft">22dp</dimen>
+    <dimen name="radius_panel_soft">26dp</dimen>
+    <dimen name="radius_card_glass">20dp</dimen>
+    <dimen name="radius_panel_glass">24dp</dimen>
 
     <!-- Высота кнопок: главная крупнее, второстепенные — 48dp, минимальная цель нажатия. -->
     <dimen name="button_primary">56dp</dimen>

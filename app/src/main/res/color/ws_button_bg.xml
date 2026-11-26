@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Фон обычной кнопки «Нежного» и «Стекла» (с 1.10.49-beta8): цвет оттенка из темы; выключенная — серая. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:alpha="0.12" android:color="?attr/colorOnSurface" android:state_enabled="false" />
+    <item android:color="?attr/wsButtonBg" />
+</selector>

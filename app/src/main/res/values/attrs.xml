@@ -15,4 +15,34 @@
     <attr name="wsPanelRadius" format="dimension|reference" />
     <attr name="wsNavBg" format="color|reference" />
     <attr name="wsSectionHeaderAppearance" format="reference" />
+
+    <!--
+      С 1.10.49-beta8 дизайнов четыре: «Премиум», «Нежный» (6 пастельных цветов), «Стекло» (5 неоновых
+      сочетаний) и «Классический». У «Нежного» и «Стекла» цвет выбирает человек, поэтому то, что код рисует
+      сам (кнопка, фон, схема маршрута, значки), тоже берёт цвета из темы — см. Design.look(). Классическая
+      и премиум-тема задают здесь свои прежние цвета, так что для них ничего не меняется.
+    -->
+    <attr name="wsButtonBg" format="color|reference" />
+    <attr name="wsButtonText" format="color|reference" />
+    <attr name="wsAccent" format="color|reference" />
+    <attr name="wsAccentDeep" format="color|reference" />
+    <attr name="wsAccentLight" format="color|reference" />
+    <attr name="wsPartner" format="color|reference" />
+    <attr name="wsNeonA" format="color|reference" />
+    <attr name="wsNeonB" format="color|reference" />
+    <attr name="wsOnSurface" format="color|reference" />
+    <attr name="wsOnSurfaceVariant" format="color|reference" />
+    <attr name="wsOutline" format="color|reference" />
+    <attr name="wsError" format="color|reference" />
+    <attr name="wsBlue" format="color|reference" />
+    <attr name="wsBg0" format="color|reference" />
+    <attr name="wsBg1" format="color|reference" />
+    <attr name="wsDiscA" format="color|reference" />
+    <attr name="wsDiscB" format="color|reference" />
+    <attr name="wsRingOff" format="color|reference" />
+    <attr name="wsCore" format="color|reference" />
+    <attr name="wsMapBg" format="color|reference" />
+    <attr name="wsMapBlock" format="color|reference" />
+    <attr name="wsMapRoad" format="color|reference" />
+    <attr name="wsRouteCore" format="color|reference" />
 </resources>

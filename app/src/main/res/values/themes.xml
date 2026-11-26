@@ -67,6 +67,31 @@
         <item name="wsPanelRadius">@dimen/radius_panel</item>
         <item name="wsNavBg">@color/colorSurfaceContainerLow</item>
         <item name="wsSectionHeaderAppearance">@style/TextAppearance.WarpScout.SectionHeader</item>
+
+        <!-- Цвета, которые код рисует сам (attrs.xml, с 1.10.49-beta8), — прежние классические. -->
+        <item name="wsButtonBg">@color/colorPrimary</item>
+        <item name="wsButtonText">@color/colorOnPrimary</item>
+        <item name="wsAccent">@color/colorPrimary</item>
+        <item name="wsAccentDeep">@color/colorPrimary</item>
+        <item name="wsAccentLight">@color/orb_accent</item>
+        <item name="wsPartner">@color/orb_accent</item>
+        <item name="wsNeonA">@color/orb_accent</item>
+        <item name="wsNeonB">@color/orb_accent</item>
+        <item name="wsOnSurface">@color/colorOnSurface</item>
+        <item name="wsOnSurfaceVariant">@color/colorOnSurfaceVariant</item>
+        <item name="wsOutline">@color/colorOutline</item>
+        <item name="wsError">@color/colorError</item>
+        <item name="wsBlue">@color/prem_blue</item>
+        <item name="wsBg0">@color/colorSurface</item>
+        <item name="wsBg1">@color/colorSurface</item>
+        <item name="wsDiscA">@color/orb_disc_top</item>
+        <item name="wsDiscB">@color/orb_disc_bottom</item>
+        <item name="wsRingOff">@color/orb_ring_off</item>
+        <item name="wsCore">@android:color/white</item>
+        <item name="wsMapBg">@color/prem_map_bg</item>
+        <item name="wsMapBlock">@color/prem_map_bg</item>
+        <item name="wsMapRoad">@color/prem_map_road</item>
+        <item name="wsRouteCore">@android:color/white</item>
     </style>
 
     <!--
@@ -107,6 +132,57 @@
         <item name="wsPanelStrokeWidth">@dimen/stroke_card</item>
         <item name="wsPanelRadius">@dimen/radius_panel_prem</item>
         <item name="wsNavBg">@color/prem_nav</item>
+        <item name="wsSectionHeaderAppearance">@style/TextAppearance.WarpScout.SectionHeader.Premium</item>
+
+        <!-- Цвета, которые код рисует сам (с 1.10.49-beta8 — из темы), — те же премиум-цвета. -->
+        <item name="wsButtonBg">@color/prem_accent_deep</item>
+        <item name="wsButtonText">@color/prem_on_accent</item>
+        <item name="wsAccent">@color/prem_accent</item>
+        <item name="wsAccentDeep">@color/prem_accent_deep</item>
+        <item name="wsAccentLight">@color/prem_accent_light</item>
+        <item name="wsPartner">@color/prem_accent_light</item>
+        <item name="wsNeonA">@color/prem_accent</item>
+        <item name="wsNeonB">@color/prem_accent_light</item>
+        <item name="wsOnSurface">@color/prem_on_surface</item>
+        <item name="wsOnSurfaceVariant">@color/prem_on_surface_variant</item>
+        <item name="wsOutline">@color/prem_outline</item>
+        <item name="wsError">@color/prem_error</item>
+        <item name="wsBlue">@color/prem_blue</item>
+        <item name="wsBg0">@color/prem_bg0</item>
+        <item name="wsBg1">@color/prem_bg1</item>
+        <item name="wsDiscA">@color/prem_disc_a</item>
+        <item name="wsDiscB">@color/prem_disc_b</item>
+        <item name="wsRingOff">@color/prem_ring_off</item>
+        <item name="wsCore">@color/prem_core</item>
+        <item name="wsMapBg">@color/prem_map_bg</item>
+        <item name="wsMapBlock">@color/prem_map_bg</item>
+        <item name="wsMapRoad">@color/prem_map_road</item>
+        <item name="wsRouteCore">@color/prem_core</item>
+    </style>
+
+    <!--
+      Дизайн «Нежный» (с 1.10.49-beta8): светлая пастель, круглые карточки, мягкие тени. Общая часть —
+      здесь, цвета — у каждого из шести оттенков (themes_designs.xml, его пишет tools/design_palettes.py).
+      Фон с акварельными пятнами и волнами рисует DesignBackdrop, кнопку — SoftOrbPainter.
+    -->
+    <style name="Theme.WarpScout.Soft" parent="Theme.WarpScout">
+        <item name="materialButtonStyle">@style/Widget.WarpScout.Design.Button</item>
+        <item name="wsCardRadius">@dimen/radius_card_soft</item>
+        <item name="wsPanelRadius">@dimen/radius_panel_soft</item>
+        <item name="wsPanelStrokeWidth">@dimen/stroke_card</item>
+        <item name="wsSectionHeaderAppearance">@style/TextAppearance.WarpScout.SectionHeader.Soft</item>
+    </style>
+
+    <!--
+      Дизайн «Стекло» (с 1.10.49-beta8): полупрозрачные карточки поверх неонового света, кольцо из двух
+      неоновых цветов. Цвета — у каждого из пяти сочетаний (themes_designs.xml). Фон — DesignBackdrop,
+      кнопка — GlassOrbPainter.
+    -->
+    <style name="Theme.WarpScout.Glass" parent="Theme.WarpScout">
+        <item name="materialButtonStyle">@style/Widget.WarpScout.Design.Button</item>
+        <item name="wsCardRadius">@dimen/radius_card_glass</item>
+        <item name="wsPanelRadius">@dimen/radius_panel_glass</item>
+        <item name="wsPanelStrokeWidth">@dimen/stroke_card</item>
         <item name="wsSectionHeaderAppearance">@style/TextAppearance.WarpScout.SectionHeader.Premium</item>
     </style>
 

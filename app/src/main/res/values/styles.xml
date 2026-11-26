@@ -11,6 +11,12 @@
 
     <style name="TextAppearance.WarpScout.SectionHeader" parent="TextAppearance.Material3.TitleMedium" />
 
+    <!-- «Нежный» (с 1.10.49-beta8): обычные буквы, полужирный, цветом оттенка. -->
+    <style name="TextAppearance.WarpScout.SectionHeader.Soft" parent="TextAppearance.Material3.TitleSmall">
+        <item name="android:textColor">?attr/colorPrimary</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+
     <style name="TextAppearance.WarpScout.SectionHeader.Premium" parent="TextAppearance.Material3.LabelLarge">
         <item name="android:textColor">?attr/colorPrimary</item>
         <item name="android:textAllCaps">true</item>
@@ -63,6 +69,16 @@
       Обычная кнопка в «Премиуме» (с 1.10.49-beta7): насыщенный оранжевый с белой подписью. Чуть темнее
       акцента — белый текст на нём читается; выключенная кнопка — серая, как у Material.
     -->
+    <!--
+      Обычная кнопка «Нежного» и «Стекла» (с 1.10.49-beta8): цвета берёт из темы оттенка (wsButtonBg,
+      wsButtonText) — пастель с тёмной подписью или неон.
+    -->
+    <style name="Widget.WarpScout.Design.Button" parent="Widget.Material3.Button">
+        <item name="backgroundTint">@color/ws_button_bg</item>
+        <item name="android:textColor">@color/ws_button_text</item>
+        <item name="iconTint">@color/ws_button_text</item>
+    </style>
+
     <style name="Widget.WarpScout.Premium.Button" parent="Widget.Material3.Button">
         <item name="backgroundTint">@color/prem_button_bg</item>
         <item name="android:textColor">@color/prem_button_text</item>

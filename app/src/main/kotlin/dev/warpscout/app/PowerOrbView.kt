@@ -30,11 +30,12 @@ import androidx.core.content.ContextCompat
  * Значок питания, надпись и таймер лежат поверх — обычными View в разметке: так их проще
  * озвучивать TalkBack и менять текстом, не перерисовывая круг.
  *
- * С 1.10.49-beta7 у кнопки два облика: классический (всё сказанное выше) и «Премиум» ([premium],
+ * С 1.10.49-beta7 у кнопки два облика: классический (всё сказанное выше) и «Премиум» ([design],
  * рисует [PremiumOrbPainter]): неоновое кольцо со щитом, «микросхема» при подборе, бегущий свет при
  * подключении, вспышка щита при успехе. В «Премиуме» кадры идут, пока идёт подбор, подключение или
  * вспышка, и только пока кнопка на экране; в покое кадр рисуется один раз. Если в настройках телефона
- * анимации выключены — кадры неподвижные.
+ * анимации выключены — кадры неподвижные. С 1.10.49-beta8 так же устроены «Нежный» ([SoftOrbPainter]) и
+ * «Стекло» ([GlassOrbPainter]) — у них свои картинки подбора, подключения и «подключено».
  */
 class PowerOrbView @JvmOverloads constructor(
     context: Context,
@@ -70,12 +71,21 @@ class PowerOrbView @JvmOverloads constructor(
     /** Шейдеры зависят от размера и цвета: пересобираем только когда меняется одно из двух. */
     private var shadersFor = ""
 
-    /** Облик «Премиум» (с 1.10.49-beta7, выбор — «Оформление»). */
-    var premium: Boolean = false
+    /**
+     * Облик кнопки по дизайну (с 1.10.49-beta7 «Премиум», с 1.10.49-beta8 ещё «Нежный» и «Стекло»; выбор —
+     * «Оформление»): [Prefs.DESIGN_CLASSIC] — прежний вид, остальные рисует свой [OrbPainter] цветами
+     * темы экрана.
+     */
+    var design: Int = Prefs.DESIGN_CLASSIC
         set(value) {
             if (field == value) return
             field = value
-            painter = if (value) PremiumOrbPainter(context) else null
+            painter = when (value) {
+                Prefs.DESIGN_PREMIUM -> PremiumOrbPainter(context)
+                Prefs.DESIGN_SOFT -> SoftOrbPainter(Design.look(context))
+                Prefs.DESIGN_GLASS -> GlassOrbPainter(Design.look(context))
+                else -> null
+            }
             shadersFor = ""
             // У обликов разные аниматоры: старый останавливаем, нужный запустится заново.
             spinner?.cancel()
@@ -83,7 +93,10 @@ class PowerOrbView @JvmOverloads constructor(
             updateSpinner()
             invalidate()
         }
-    private var painter: PremiumOrbPainter? = null
+
+    /** Новый облик (не классический): кадры во время подбора, подключения и вспышки. */
+    private val premium: Boolean get() = painter != null
+    private var painter: OrbPainter? = null
 
     /** Когда началась вспышка «подключено» (uptime, мс); 0 — не было. Только «Премиум». */
     private var flashStart = 0L

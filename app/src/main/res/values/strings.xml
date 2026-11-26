@@ -252,7 +252,8 @@
     <string name="route_preset_dd">Всё, кроме российских сетей (встроенный список)</string>
     <string name="route_lists_dd">Только сайты из списков (кнопка «Списки»)</string>
     <string name="route_manual_dd">Только мои сайты (кнопка «Сайты»)</string>
-    <string name="section_second_exit">Второй выход: свой сервер для сайтов, закрытых для России</string>
+    <!-- С 1.10.49-beta8 — подпись под заголовком «Второй выход» в гармошке «Обхода». -->
+    <string name="section_second_exit">Свой сервер для сайтов и приложений, закрытых для России: Proton, WireGuard/AmneziaWG или ключ vpn://</string>
     <string name="second_switch">Включить второй выход</string>
     <string name="second_hint">Сервисы вроде ChatGPT, Claude, Gemini, Grok, Adobe и Canva не работают с российских адресов, а выход WARP — российский. Второй выход пускает их через ваш сервер WireGuard или AmneziaWG. Какие сайты туда идут, подбирается само по спискам ниже; адреса обновляются раз в сутки. Нужен только конфиг сервера — вставьте его один раз или выберите файл .conf. Бесплатно: Proton VPN Free — шаги по кнопке «Как подключить Proton»; для такого конфига сервер приложение выбирает само и меняет, если он перестал отвечать. Или свой VPS с WireGuard/AmneziaWG.</string>
     <string name="hint_second_conf">Конфиг второго выхода ([Interface]/[Peer]) или ключ AmneziaVPN vpn://…</string>
@@ -928,7 +929,7 @@
     <string name="group_updates_title">Обновления и версия</string>
     <string name="group_updates_summary">Проверить, нет ли новой версии</string>
     <string name="group_theme_title">Оформление</string>
-    <string name="group_theme_summary">Дизайн: премиум или классический; тема: как в системе, светлая или тёмная</string>
+    <string name="group_theme_summary">Дизайн: премиум, нежный, стекло или классический; цвет; тема: светлая или тёмная</string>
     <string name="group_reset_summary">Вернуть всё как после установки</string>
     <string name="group_expanded">развёрнуто</string>
     <string name="group_collapsed">свёрнуто</string>
@@ -946,7 +947,32 @@
     <string name="design_label">Дизайн</string>
     <string name="design_premium">Премиум</string>
     <string name="design_classic">Классический</string>
-    <string name="design_note">Премиум — тёмный с оранжевым свечением, анимацией подбора и подключения и схемой маршрута. Классический — прежний вид. Экран перезапустится; подбор и туннель это переживут.</string>
+    <string name="design_note">Премиум, Нежный и Стекло — с анимацией подбора и подключения и схемой маршрута; у Нежного и Стекла свой выбор цвета. Классический — прежний вид. Экран перезапустится; подбор и туннель это переживут.</string>
+    <!-- С 1.10.49-beta8: ещё два дизайна и их цвета. -->
+    <string name="design_soft">Нежный</string>
+    <string name="design_glass">Стекло</string>
+    <string name="design_premium_long">Премиум — оранжевый неон</string>
+    <string name="design_soft_long">Нежный — пастель, шесть цветов</string>
+    <string name="design_glass_long">Стекло — неон и стекло, пять сочетаний</string>
+    <string name="design_classic_long">Классический — прежний вид</string>
+    <string name="tone_label">Цвет</string>
+    <!-- «Обход» гармошкой (с 1.10.49-beta8): подписи под заголовками разделов. -->
+    <string name="group_avail_summary">Что открывается через туннель и без VPN; проверить сейчас</string>
+    <string name="group_dpi_summary">Проверка провайдера, обход DPI в туннеле, свой приём</string>
+    <string name="group_tg_summary">Найти и проверить прокси MTProto, добавить в Telegram одной кнопкой</string>
+    <string name="group_second_title">Второй выход</string>
+    <string name="tone_selected">выбран</string>
+    <string name="tone_lavender">Лаванда</string>
+    <string name="tone_mint">Мята</string>
+    <string name="tone_peach">Персик</string>
+    <string name="tone_sky">Небо</string>
+    <string name="tone_rose">Роза</string>
+    <string name="tone_vanilla">Ваниль</string>
+    <string name="tone_cyber">Киберпанк</string>
+    <string name="tone_aurora">Аврора</string>
+    <string name="tone_sunset">Закат</string>
+    <string name="tone_violet">Ультрафиолет</string>
+    <string name="tone_acid">Кислота</string>
     <string name="theme_label">Тема</string>
     <string name="route_card_desc">Маршрут: вход и выход. Нажмите — схема маршрута</string>
     <string name="route_open_desc">Открыть схему маршрута</string>

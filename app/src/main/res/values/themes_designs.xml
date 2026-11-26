@@ -1,0 +1,653 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Сгенерировано tools/design_palettes.py — правьте там и запустите скрипт заново. -->
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Нежный · Лаванда -->
+    <style name="Theme.WarpScout.Soft.Lavender" parent="Theme.WarpScout.Soft">
+        <item name="colorPrimary">@color/soft_lavender_accent</item>
+        <item name="colorOnPrimary">@color/soft_lavender_on_accent</item>
+        <item name="colorPrimaryContainer">@color/soft_lavender_accent_container</item>
+        <item name="colorOnPrimaryContainer">@color/soft_lavender_on_accent_container</item>
+        <item name="colorSecondary">@color/soft_lavender_accent_deep</item>
+        <item name="colorSecondaryContainer">@color/soft_lavender_tonal</item>
+        <item name="colorOnSecondaryContainer">@color/soft_lavender_on_tonal</item>
+        <item name="android:colorBackground">@color/soft_lavender_bg0</item>
+        <item name="colorSurface">@color/soft_lavender_surface</item>
+        <item name="colorOnSurface">@color/soft_lavender_on_surface</item>
+        <item name="colorSurfaceVariant">@color/soft_lavender_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/soft_lavender_on_surface_variant</item>
+        <item name="colorSurfaceContainerLowest">@color/soft_lavender_surface_lowest</item>
+        <item name="colorSurfaceContainerLow">@color/soft_lavender_surface_low</item>
+        <item name="colorSurfaceContainer">@color/soft_lavender_surface_cont</item>
+        <item name="colorSurfaceContainerHigh">@color/soft_lavender_surface_high</item>
+        <item name="colorOutline">@color/soft_lavender_outline</item>
+        <item name="colorOutlineVariant">@color/soft_lavender_outline_variant</item>
+        <item name="colorError">@color/soft_lavender_error</item>
+        <item name="android:statusBarColor" tools:targetApi="l">@color/soft_lavender_bg1</item>
+        <item name="android:navigationBarColor" tools:targetApi="l">@color/soft_lavender_bg1</item>
+        <item name="wsCardBg">@color/soft_lavender_card</item>
+        <item name="wsCardStroke">@color/soft_lavender_card_stroke</item>
+        <item name="wsPanelBg">@color/soft_lavender_card</item>
+        <item name="wsPanelStroke">@color/soft_lavender_card_stroke</item>
+        <item name="wsNavBg">@color/soft_lavender_nav</item>
+        <item name="wsButtonBg">@color/soft_lavender_button_bg</item>
+        <item name="wsButtonText">@color/soft_lavender_button_text</item>
+        <item name="wsAccent">@color/soft_lavender_accent</item>
+        <item name="wsAccentDeep">@color/soft_lavender_accent_deep</item>
+        <item name="wsAccentLight">@color/soft_lavender_accent_light</item>
+        <item name="wsPartner">@color/soft_lavender_partner</item>
+        <item name="wsNeonA">@color/soft_lavender_neon_a</item>
+        <item name="wsNeonB">@color/soft_lavender_neon_b</item>
+        <item name="wsOnSurface">@color/soft_lavender_on_surface</item>
+        <item name="wsOnSurfaceVariant">@color/soft_lavender_on_surface_variant</item>
+        <item name="wsOutline">@color/soft_lavender_outline</item>
+        <item name="wsError">@color/soft_lavender_error</item>
+        <item name="wsBlue">@color/soft_lavender_blue</item>
+        <item name="wsBg0">@color/soft_lavender_bg0</item>
+        <item name="wsBg1">@color/soft_lavender_bg1</item>
+        <item name="wsDiscA">@color/soft_lavender_disc_a</item>
+        <item name="wsDiscB">@color/soft_lavender_disc_b</item>
+        <item name="wsRingOff">@color/soft_lavender_ring_off</item>
+        <item name="wsCore">@color/soft_lavender_core</item>
+        <item name="wsMapBg">@color/soft_lavender_map_bg</item>
+        <item name="wsMapBlock">@color/soft_lavender_map_block</item>
+        <item name="wsMapRoad">@color/soft_lavender_map_road</item>
+        <item name="wsRouteCore">@color/soft_lavender_route_core</item>
+    </style>
+    <style name="Theme.WarpScout.Soft.Lavender.Welcome" parent="Theme.WarpScout.Soft.Lavender">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowBackground">@color/soft_lavender_bg0</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
+
+    <!-- Нежный · Мята -->
+    <style name="Theme.WarpScout.Soft.Mint" parent="Theme.WarpScout.Soft">
+        <item name="colorPrimary">@color/soft_mint_accent</item>
+        <item name="colorOnPrimary">@color/soft_mint_on_accent</item>
+        <item name="colorPrimaryContainer">@color/soft_mint_accent_container</item>
+        <item name="colorOnPrimaryContainer">@color/soft_mint_on_accent_container</item>
+        <item name="colorSecondary">@color/soft_mint_accent_deep</item>
+        <item name="colorSecondaryContainer">@color/soft_mint_tonal</item>
+        <item name="colorOnSecondaryContainer">@color/soft_mint_on_tonal</item>
+        <item name="android:colorBackground">@color/soft_mint_bg0</item>
+        <item name="colorSurface">@color/soft_mint_surface</item>
+        <item name="colorOnSurface">@color/soft_mint_on_surface</item>
+        <item name="colorSurfaceVariant">@color/soft_mint_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/soft_mint_on_surface_variant</item>
+        <item name="colorSurfaceContainerLowest">@color/soft_mint_surface_lowest</item>
+        <item name="colorSurfaceContainerLow">@color/soft_mint_surface_low</item>
+        <item name="colorSurfaceContainer">@color/soft_mint_surface_cont</item>
+        <item name="colorSurfaceContainerHigh">@color/soft_mint_surface_high</item>
+        <item name="colorOutline">@color/soft_mint_outline</item>
+        <item name="colorOutlineVariant">@color/soft_mint_outline_variant</item>
+        <item name="colorError">@color/soft_mint_error</item>
+        <item name="android:statusBarColor" tools:targetApi="l">@color/soft_mint_bg1</item>
+        <item name="android:navigationBarColor" tools:targetApi="l">@color/soft_mint_bg1</item>
+        <item name="wsCardBg">@color/soft_mint_card</item>
+        <item name="wsCardStroke">@color/soft_mint_card_stroke</item>
+        <item name="wsPanelBg">@color/soft_mint_card</item>
+        <item name="wsPanelStroke">@color/soft_mint_card_stroke</item>
+        <item name="wsNavBg">@color/soft_mint_nav</item>
+        <item name="wsButtonBg">@color/soft_mint_button_bg</item>
+        <item name="wsButtonText">@color/soft_mint_button_text</item>
+        <item name="wsAccent">@color/soft_mint_accent</item>
+        <item name="wsAccentDeep">@color/soft_mint_accent_deep</item>
+        <item name="wsAccentLight">@color/soft_mint_accent_light</item>
+        <item name="wsPartner">@color/soft_mint_partner</item>
+        <item name="wsNeonA">@color/soft_mint_neon_a</item>
+        <item name="wsNeonB">@color/soft_mint_neon_b</item>
+        <item name="wsOnSurface">@color/soft_mint_on_surface</item>
+        <item name="wsOnSurfaceVariant">@color/soft_mint_on_surface_variant</item>
+        <item name="wsOutline">@color/soft_mint_outline</item>
+        <item name="wsError">@color/soft_mint_error</item>
+        <item name="wsBlue">@color/soft_mint_blue</item>
+        <item name="wsBg0">@color/soft_mint_bg0</item>
+        <item name="wsBg1">@color/soft_mint_bg1</item>
+        <item name="wsDiscA">@color/soft_mint_disc_a</item>
+        <item name="wsDiscB">@color/soft_mint_disc_b</item>
+        <item name="wsRingOff">@color/soft_mint_ring_off</item>
+        <item name="wsCore">@color/soft_mint_core</item>
+        <item name="wsMapBg">@color/soft_mint_map_bg</item>
+        <item name="wsMapBlock">@color/soft_mint_map_block</item>
+        <item name="wsMapRoad">@color/soft_mint_map_road</item>
+        <item name="wsRouteCore">@color/soft_mint_route_core</item>
+    </style>
+    <style name="Theme.WarpScout.Soft.Mint.Welcome" parent="Theme.WarpScout.Soft.Mint">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowBackground">@color/soft_mint_bg0</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
+
+    <!-- Нежный · Персик -->
+    <style name="Theme.WarpScout.Soft.Peach" parent="Theme.WarpScout.Soft">
+        <item name="colorPrimary">@color/soft_peach_accent</item>
+        <item name="colorOnPrimary">@color/soft_peach_on_accent</item>
+        <item name="colorPrimaryContainer">@color/soft_peach_accent_container</item>
+        <item name="colorOnPrimaryContainer">@color/soft_peach_on_accent_container</item>
+        <item name="colorSecondary">@color/soft_peach_accent_deep</item>
+        <item name="colorSecondaryContainer">@color/soft_peach_tonal</item>
+        <item name="colorOnSecondaryContainer">@color/soft_peach_on_tonal</item>
+        <item name="android:colorBackground">@color/soft_peach_bg0</item>
+        <item name="colorSurface">@color/soft_peach_surface</item>
+        <item name="colorOnSurface">@color/soft_peach_on_surface</item>
+        <item name="colorSurfaceVariant">@color/soft_peach_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/soft_peach_on_surface_variant</item>
+        <item name="colorSurfaceContainerLowest">@color/soft_peach_surface_lowest</item>
+        <item name="colorSurfaceContainerLow">@color/soft_peach_surface_low</item>
+        <item name="colorSurfaceContainer">@color/soft_peach_surface_cont</item>
+        <item name="colorSurfaceContainerHigh">@color/soft_peach_surface_high</item>
+        <item name="colorOutline">@color/soft_peach_outline</item>
+        <item name="colorOutlineVariant">@color/soft_peach_outline_variant</item>
+        <item name="colorError">@color/soft_peach_error</item>
+        <item name="android:statusBarColor" tools:targetApi="l">@color/soft_peach_bg1</item>
+        <item name="android:navigationBarColor" tools:targetApi="l">@color/soft_peach_bg1</item>
+        <item name="wsCardBg">@color/soft_peach_card</item>
+        <item name="wsCardStroke">@color/soft_peach_card_stroke</item>
+        <item name="wsPanelBg">@color/soft_peach_card</item>
+        <item name="wsPanelStroke">@color/soft_peach_card_stroke</item>
+        <item name="wsNavBg">@color/soft_peach_nav</item>
+        <item name="wsButtonBg">@color/soft_peach_button_bg</item>
+        <item name="wsButtonText">@color/soft_peach_button_text</item>
+        <item name="wsAccent">@color/soft_peach_accent</item>
+        <item name="wsAccentDeep">@color/soft_peach_accent_deep</item>
+        <item name="wsAccentLight">@color/soft_peach_accent_light</item>
+        <item name="wsPartner">@color/soft_peach_partner</item>
+        <item name="wsNeonA">@color/soft_peach_neon_a</item>
+        <item name="wsNeonB">@color/soft_peach_neon_b</item>
+        <item name="wsOnSurface">@color/soft_peach_on_surface</item>
+        <item name="wsOnSurfaceVariant">@color/soft_peach_on_surface_variant</item>
+        <item name="wsOutline">@color/soft_peach_outline</item>
+        <item name="wsError">@color/soft_peach_error</item>
+        <item name="wsBlue">@color/soft_peach_blue</item>
+        <item name="wsBg0">@color/soft_peach_bg0</item>
+        <item name="wsBg1">@color/soft_peach_bg1</item>
+        <item name="wsDiscA">@color/soft_peach_disc_a</item>
+        <item name="wsDiscB">@color/soft_peach_disc_b</item>
+        <item name="wsRingOff">@color/soft_peach_ring_off</item>
+        <item name="wsCore">@color/soft_peach_core</item>
+        <item name="wsMapBg">@color/soft_peach_map_bg</item>
+        <item name="wsMapBlock">@color/soft_peach_map_block</item>
+        <item name="wsMapRoad">@color/soft_peach_map_road</item>
+        <item name="wsRouteCore">@color/soft_peach_route_core</item>
+    </style>
+    <style name="Theme.WarpScout.Soft.Peach.Welcome" parent="Theme.WarpScout.Soft.Peach">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowBackground">@color/soft_peach_bg0</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
+
+    <!-- Нежный · Небо -->
+    <style name="Theme.WarpScout.Soft.Sky" parent="Theme.WarpScout.Soft">
+        <item name="colorPrimary">@color/soft_sky_accent</item>
+        <item name="colorOnPrimary">@color/soft_sky_on_accent</item>
+        <item name="colorPrimaryContainer">@color/soft_sky_accent_container</item>
+        <item name="colorOnPrimaryContainer">@color/soft_sky_on_accent_container</item>
+        <item name="colorSecondary">@color/soft_sky_accent_deep</item>
+        <item name="colorSecondaryContainer">@color/soft_sky_tonal</item>
+        <item name="colorOnSecondaryContainer">@color/soft_sky_on_tonal</item>
+        <item name="android:colorBackground">@color/soft_sky_bg0</item>
+        <item name="colorSurface">@color/soft_sky_surface</item>
+        <item name="colorOnSurface">@color/soft_sky_on_surface</item>
+        <item name="colorSurfaceVariant">@color/soft_sky_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/soft_sky_on_surface_variant</item>
+        <item name="colorSurfaceContainerLowest">@color/soft_sky_surface_lowest</item>
+        <item name="colorSurfaceContainerLow">@color/soft_sky_surface_low</item>
+        <item name="colorSurfaceContainer">@color/soft_sky_surface_cont</item>
+        <item name="colorSurfaceContainerHigh">@color/soft_sky_surface_high</item>
+        <item name="colorOutline">@color/soft_sky_outline</item>
+        <item name="colorOutlineVariant">@color/soft_sky_outline_variant</item>
+        <item name="colorError">@color/soft_sky_error</item>
+        <item name="android:statusBarColor" tools:targetApi="l">@color/soft_sky_bg1</item>
+        <item name="android:navigationBarColor" tools:targetApi="l">@color/soft_sky_bg1</item>
+        <item name="wsCardBg">@color/soft_sky_card</item>
+        <item name="wsCardStroke">@color/soft_sky_card_stroke</item>
+        <item name="wsPanelBg">@color/soft_sky_card</item>
+        <item name="wsPanelStroke">@color/soft_sky_card_stroke</item>
+        <item name="wsNavBg">@color/soft_sky_nav</item>
+        <item name="wsButtonBg">@color/soft_sky_button_bg</item>
+        <item name="wsButtonText">@color/soft_sky_button_text</item>
+        <item name="wsAccent">@color/soft_sky_accent</item>
+        <item name="wsAccentDeep">@color/soft_sky_accent_deep</item>
+        <item name="wsAccentLight">@color/soft_sky_accent_light</item>
+        <item name="wsPartner">@color/soft_sky_partner</item>
+        <item name="wsNeonA">@color/soft_sky_neon_a</item>
+        <item name="wsNeonB">@color/soft_sky_neon_b</item>
+        <item name="wsOnSurface">@color/soft_sky_on_surface</item>
+        <item name="wsOnSurfaceVariant">@color/soft_sky_on_surface_variant</item>
+        <item name="wsOutline">@color/soft_sky_outline</item>
+        <item name="wsError">@color/soft_sky_error</item>
+        <item name="wsBlue">@color/soft_sky_blue</item>
+        <item name="wsBg0">@color/soft_sky_bg0</item>
+        <item name="wsBg1">@color/soft_sky_bg1</item>
+        <item name="wsDiscA">@color/soft_sky_disc_a</item>
+        <item name="wsDiscB">@color/soft_sky_disc_b</item>
+        <item name="wsRingOff">@color/soft_sky_ring_off</item>
+        <item name="wsCore">@color/soft_sky_core</item>
+        <item name="wsMapBg">@color/soft_sky_map_bg</item>
+        <item name="wsMapBlock">@color/soft_sky_map_block</item>
+        <item name="wsMapRoad">@color/soft_sky_map_road</item>
+        <item name="wsRouteCore">@color/soft_sky_route_core</item>
+    </style>
+    <style name="Theme.WarpScout.Soft.Sky.Welcome" parent="Theme.WarpScout.Soft.Sky">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowBackground">@color/soft_sky_bg0</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
+
+    <!-- Нежный · Роза -->
+    <style name="Theme.WarpScout.Soft.Rose" parent="Theme.WarpScout.Soft">
+        <item name="colorPrimary">@color/soft_rose_accent</item>
+        <item name="colorOnPrimary">@color/soft_rose_on_accent</item>
+        <item name="colorPrimaryContainer">@color/soft_rose_accent_container</item>
+        <item name="colorOnPrimaryContainer">@color/soft_rose_on_accent_container</item>
+        <item name="colorSecondary">@color/soft_rose_accent_deep</item>
+        <item name="colorSecondaryContainer">@color/soft_rose_tonal</item>
+        <item name="colorOnSecondaryContainer">@color/soft_rose_on_tonal</item>
+        <item name="android:colorBackground">@color/soft_rose_bg0</item>
+        <item name="colorSurface">@color/soft_rose_surface</item>
+        <item name="colorOnSurface">@color/soft_rose_on_surface</item>
+        <item name="colorSurfaceVariant">@color/soft_rose_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/soft_rose_on_surface_variant</item>
+        <item name="colorSurfaceContainerLowest">@color/soft_rose_surface_lowest</item>
+        <item name="colorSurfaceContainerLow">@color/soft_rose_surface_low</item>
+        <item name="colorSurfaceContainer">@color/soft_rose_surface_cont</item>
+        <item name="colorSurfaceContainerHigh">@color/soft_rose_surface_high</item>
+        <item name="colorOutline">@color/soft_rose_outline</item>
+        <item name="colorOutlineVariant">@color/soft_rose_outline_variant</item>
+        <item name="colorError">@color/soft_rose_error</item>
+        <item name="android:statusBarColor" tools:targetApi="l">@color/soft_rose_bg1</item>
+        <item name="android:navigationBarColor" tools:targetApi="l">@color/soft_rose_bg1</item>
+        <item name="wsCardBg">@color/soft_rose_card</item>
+        <item name="wsCardStroke">@color/soft_rose_card_stroke</item>
+        <item name="wsPanelBg">@color/soft_rose_card</item>
+        <item name="wsPanelStroke">@color/soft_rose_card_stroke</item>
+        <item name="wsNavBg">@color/soft_rose_nav</item>
+        <item name="wsButtonBg">@color/soft_rose_button_bg</item>
+        <item name="wsButtonText">@color/soft_rose_button_text</item>
+        <item name="wsAccent">@color/soft_rose_accent</item>
+        <item name="wsAccentDeep">@color/soft_rose_accent_deep</item>
+        <item name="wsAccentLight">@color/soft_rose_accent_light</item>
+        <item name="wsPartner">@color/soft_rose_partner</item>
+        <item name="wsNeonA">@color/soft_rose_neon_a</item>
+        <item name="wsNeonB">@color/soft_rose_neon_b</item>
+        <item name="wsOnSurface">@color/soft_rose_on_surface</item>
+        <item name="wsOnSurfaceVariant">@color/soft_rose_on_surface_variant</item>
+        <item name="wsOutline">@color/soft_rose_outline</item>
+        <item name="wsError">@color/soft_rose_error</item>
+        <item name="wsBlue">@color/soft_rose_blue</item>
+        <item name="wsBg0">@color/soft_rose_bg0</item>
+        <item name="wsBg1">@color/soft_rose_bg1</item>
+        <item name="wsDiscA">@color/soft_rose_disc_a</item>
+        <item name="wsDiscB">@color/soft_rose_disc_b</item>
+        <item name="wsRingOff">@color/soft_rose_ring_off</item>
+        <item name="wsCore">@color/soft_rose_core</item>
+        <item name="wsMapBg">@color/soft_rose_map_bg</item>
+        <item name="wsMapBlock">@color/soft_rose_map_block</item>
+        <item name="wsMapRoad">@color/soft_rose_map_road</item>
+        <item name="wsRouteCore">@color/soft_rose_route_core</item>
+    </style>
+    <style name="Theme.WarpScout.Soft.Rose.Welcome" parent="Theme.WarpScout.Soft.Rose">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowBackground">@color/soft_rose_bg0</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
+
+    <!-- Нежный · Ваниль -->
+    <style name="Theme.WarpScout.Soft.Vanilla" parent="Theme.WarpScout.Soft">
+        <item name="colorPrimary">@color/soft_vanilla_accent</item>
+        <item name="colorOnPrimary">@color/soft_vanilla_on_accent</item>
+        <item name="colorPrimaryContainer">@color/soft_vanilla_accent_container</item>
+        <item name="colorOnPrimaryContainer">@color/soft_vanilla_on_accent_container</item>
+        <item name="colorSecondary">@color/soft_vanilla_accent_deep</item>
+        <item name="colorSecondaryContainer">@color/soft_vanilla_tonal</item>
+        <item name="colorOnSecondaryContainer">@color/soft_vanilla_on_tonal</item>
+        <item name="android:colorBackground">@color/soft_vanilla_bg0</item>
+        <item name="colorSurface">@color/soft_vanilla_surface</item>
+        <item name="colorOnSurface">@color/soft_vanilla_on_surface</item>
+        <item name="colorSurfaceVariant">@color/soft_vanilla_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/soft_vanilla_on_surface_variant</item>
+        <item name="colorSurfaceContainerLowest">@color/soft_vanilla_surface_lowest</item>
+        <item name="colorSurfaceContainerLow">@color/soft_vanilla_surface_low</item>
+        <item name="colorSurfaceContainer">@color/soft_vanilla_surface_cont</item>
+        <item name="colorSurfaceContainerHigh">@color/soft_vanilla_surface_high</item>
+        <item name="colorOutline">@color/soft_vanilla_outline</item>
+        <item name="colorOutlineVariant">@color/soft_vanilla_outline_variant</item>
+        <item name="colorError">@color/soft_vanilla_error</item>
+        <item name="android:statusBarColor" tools:targetApi="l">@color/soft_vanilla_bg1</item>
+        <item name="android:navigationBarColor" tools:targetApi="l">@color/soft_vanilla_bg1</item>
+        <item name="wsCardBg">@color/soft_vanilla_card</item>
+        <item name="wsCardStroke">@color/soft_vanilla_card_stroke</item>
+        <item name="wsPanelBg">@color/soft_vanilla_card</item>
+        <item name="wsPanelStroke">@color/soft_vanilla_card_stroke</item>
+        <item name="wsNavBg">@color/soft_vanilla_nav</item>
+        <item name="wsButtonBg">@color/soft_vanilla_button_bg</item>
+        <item name="wsButtonText">@color/soft_vanilla_button_text</item>
+        <item name="wsAccent">@color/soft_vanilla_accent</item>
+        <item name="wsAccentDeep">@color/soft_vanilla_accent_deep</item>
+        <item name="wsAccentLight">@color/soft_vanilla_accent_light</item>
+        <item name="wsPartner">@color/soft_vanilla_partner</item>
+        <item name="wsNeonA">@color/soft_vanilla_neon_a</item>
+        <item name="wsNeonB">@color/soft_vanilla_neon_b</item>
+        <item name="wsOnSurface">@color/soft_vanilla_on_surface</item>
+        <item name="wsOnSurfaceVariant">@color/soft_vanilla_on_surface_variant</item>
+        <item name="wsOutline">@color/soft_vanilla_outline</item>
+        <item name="wsError">@color/soft_vanilla_error</item>
+        <item name="wsBlue">@color/soft_vanilla_blue</item>
+        <item name="wsBg0">@color/soft_vanilla_bg0</item>
+        <item name="wsBg1">@color/soft_vanilla_bg1</item>
+        <item name="wsDiscA">@color/soft_vanilla_disc_a</item>
+        <item name="wsDiscB">@color/soft_vanilla_disc_b</item>
+        <item name="wsRingOff">@color/soft_vanilla_ring_off</item>
+        <item name="wsCore">@color/soft_vanilla_core</item>
+        <item name="wsMapBg">@color/soft_vanilla_map_bg</item>
+        <item name="wsMapBlock">@color/soft_vanilla_map_block</item>
+        <item name="wsMapRoad">@color/soft_vanilla_map_road</item>
+        <item name="wsRouteCore">@color/soft_vanilla_route_core</item>
+    </style>
+    <style name="Theme.WarpScout.Soft.Vanilla.Welcome" parent="Theme.WarpScout.Soft.Vanilla">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowBackground">@color/soft_vanilla_bg0</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
+
+    <!-- Стекло · Киберпанк -->
+    <style name="Theme.WarpScout.Glass.Cyber" parent="Theme.WarpScout.Glass">
+        <item name="colorPrimary">@color/glass_cyber_accent</item>
+        <item name="colorOnPrimary">@color/glass_cyber_on_accent</item>
+        <item name="colorPrimaryContainer">@color/glass_cyber_accent_container</item>
+        <item name="colorOnPrimaryContainer">@color/glass_cyber_on_accent_container</item>
+        <item name="colorSecondary">@color/glass_cyber_accent_deep</item>
+        <item name="colorSecondaryContainer">@color/glass_cyber_tonal</item>
+        <item name="colorOnSecondaryContainer">@color/glass_cyber_on_tonal</item>
+        <item name="android:colorBackground">@color/glass_cyber_bg0</item>
+        <item name="colorSurface">@color/glass_cyber_surface</item>
+        <item name="colorOnSurface">@color/glass_cyber_on_surface</item>
+        <item name="colorSurfaceVariant">@color/glass_cyber_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/glass_cyber_on_surface_variant</item>
+        <item name="colorSurfaceContainerLowest">@color/glass_cyber_surface_lowest</item>
+        <item name="colorSurfaceContainerLow">@color/glass_cyber_surface_low</item>
+        <item name="colorSurfaceContainer">@color/glass_cyber_surface_cont</item>
+        <item name="colorSurfaceContainerHigh">@color/glass_cyber_surface_high</item>
+        <item name="colorOutline">@color/glass_cyber_outline</item>
+        <item name="colorOutlineVariant">@color/glass_cyber_outline_variant</item>
+        <item name="colorError">@color/glass_cyber_error</item>
+        <item name="android:statusBarColor" tools:targetApi="l">@color/glass_cyber_bg1</item>
+        <item name="android:navigationBarColor" tools:targetApi="l">@color/glass_cyber_bg1</item>
+        <item name="wsCardBg">@color/glass_cyber_card</item>
+        <item name="wsCardStroke">@color/glass_cyber_card_stroke</item>
+        <item name="wsPanelBg">@color/glass_cyber_card</item>
+        <item name="wsPanelStroke">@color/glass_cyber_card_stroke</item>
+        <item name="wsNavBg">@color/glass_cyber_nav</item>
+        <item name="wsButtonBg">@color/glass_cyber_button_bg</item>
+        <item name="wsButtonText">@color/glass_cyber_button_text</item>
+        <item name="wsAccent">@color/glass_cyber_accent</item>
+        <item name="wsAccentDeep">@color/glass_cyber_accent_deep</item>
+        <item name="wsAccentLight">@color/glass_cyber_accent_light</item>
+        <item name="wsPartner">@color/glass_cyber_partner</item>
+        <item name="wsNeonA">@color/glass_cyber_neon_a</item>
+        <item name="wsNeonB">@color/glass_cyber_neon_b</item>
+        <item name="wsOnSurface">@color/glass_cyber_on_surface</item>
+        <item name="wsOnSurfaceVariant">@color/glass_cyber_on_surface_variant</item>
+        <item name="wsOutline">@color/glass_cyber_outline</item>
+        <item name="wsError">@color/glass_cyber_error</item>
+        <item name="wsBlue">@color/glass_cyber_blue</item>
+        <item name="wsBg0">@color/glass_cyber_bg0</item>
+        <item name="wsBg1">@color/glass_cyber_bg1</item>
+        <item name="wsDiscA">@color/glass_cyber_disc_a</item>
+        <item name="wsDiscB">@color/glass_cyber_disc_b</item>
+        <item name="wsRingOff">@color/glass_cyber_ring_off</item>
+        <item name="wsCore">@color/glass_cyber_core</item>
+        <item name="wsMapBg">@color/glass_cyber_map_bg</item>
+        <item name="wsMapBlock">@color/glass_cyber_map_block</item>
+        <item name="wsMapRoad">@color/glass_cyber_map_road</item>
+        <item name="wsRouteCore">@color/glass_cyber_route_core</item>
+    </style>
+    <style name="Theme.WarpScout.Glass.Cyber.Welcome" parent="Theme.WarpScout.Glass.Cyber">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowBackground">@color/glass_cyber_bg0</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
+
+    <!-- Стекло · Аврора -->
+    <style name="Theme.WarpScout.Glass.Aurora" parent="Theme.WarpScout.Glass">
+        <item name="colorPrimary">@color/glass_aurora_accent</item>
+        <item name="colorOnPrimary">@color/glass_aurora_on_accent</item>
+        <item name="colorPrimaryContainer">@color/glass_aurora_accent_container</item>
+        <item name="colorOnPrimaryContainer">@color/glass_aurora_on_accent_container</item>
+        <item name="colorSecondary">@color/glass_aurora_accent_deep</item>
+        <item name="colorSecondaryContainer">@color/glass_aurora_tonal</item>
+        <item name="colorOnSecondaryContainer">@color/glass_aurora_on_tonal</item>
+        <item name="android:colorBackground">@color/glass_aurora_bg0</item>
+        <item name="colorSurface">@color/glass_aurora_surface</item>
+        <item name="colorOnSurface">@color/glass_aurora_on_surface</item>
+        <item name="colorSurfaceVariant">@color/glass_aurora_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/glass_aurora_on_surface_variant</item>
+        <item name="colorSurfaceContainerLowest">@color/glass_aurora_surface_lowest</item>
+        <item name="colorSurfaceContainerLow">@color/glass_aurora_surface_low</item>
+        <item name="colorSurfaceContainer">@color/glass_aurora_surface_cont</item>
+        <item name="colorSurfaceContainerHigh">@color/glass_aurora_surface_high</item>
+        <item name="colorOutline">@color/glass_aurora_outline</item>
+        <item name="colorOutlineVariant">@color/glass_aurora_outline_variant</item>
+        <item name="colorError">@color/glass_aurora_error</item>
+        <item name="android:statusBarColor" tools:targetApi="l">@color/glass_aurora_bg1</item>
+        <item name="android:navigationBarColor" tools:targetApi="l">@color/glass_aurora_bg1</item>
+        <item name="wsCardBg">@color/glass_aurora_card</item>
+        <item name="wsCardStroke">@color/glass_aurora_card_stroke</item>
+        <item name="wsPanelBg">@color/glass_aurora_card</item>
+        <item name="wsPanelStroke">@color/glass_aurora_card_stroke</item>
+        <item name="wsNavBg">@color/glass_aurora_nav</item>
+        <item name="wsButtonBg">@color/glass_aurora_button_bg</item>
+        <item name="wsButtonText">@color/glass_aurora_button_text</item>
+        <item name="wsAccent">@color/glass_aurora_accent</item>
+        <item name="wsAccentDeep">@color/glass_aurora_accent_deep</item>
+        <item name="wsAccentLight">@color/glass_aurora_accent_light</item>
+        <item name="wsPartner">@color/glass_aurora_partner</item>
+        <item name="wsNeonA">@color/glass_aurora_neon_a</item>
+        <item name="wsNeonB">@color/glass_aurora_neon_b</item>
+        <item name="wsOnSurface">@color/glass_aurora_on_surface</item>
+        <item name="wsOnSurfaceVariant">@color/glass_aurora_on_surface_variant</item>
+        <item name="wsOutline">@color/glass_aurora_outline</item>
+        <item name="wsError">@color/glass_aurora_error</item>
+        <item name="wsBlue">@color/glass_aurora_blue</item>
+        <item name="wsBg0">@color/glass_aurora_bg0</item>
+        <item name="wsBg1">@color/glass_aurora_bg1</item>
+        <item name="wsDiscA">@color/glass_aurora_disc_a</item>
+        <item name="wsDiscB">@color/glass_aurora_disc_b</item>
+        <item name="wsRingOff">@color/glass_aurora_ring_off</item>
+        <item name="wsCore">@color/glass_aurora_core</item>
+        <item name="wsMapBg">@color/glass_aurora_map_bg</item>
+        <item name="wsMapBlock">@color/glass_aurora_map_block</item>
+        <item name="wsMapRoad">@color/glass_aurora_map_road</item>
+        <item name="wsRouteCore">@color/glass_aurora_route_core</item>
+    </style>
+    <style name="Theme.WarpScout.Glass.Aurora.Welcome" parent="Theme.WarpScout.Glass.Aurora">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowBackground">@color/glass_aurora_bg0</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
+
+    <!-- Стекло · Закат -->
+    <style name="Theme.WarpScout.Glass.Sunset" parent="Theme.WarpScout.Glass">
+        <item name="colorPrimary">@color/glass_sunset_accent</item>
+        <item name="colorOnPrimary">@color/glass_sunset_on_accent</item>
+        <item name="colorPrimaryContainer">@color/glass_sunset_accent_container</item>
+        <item name="colorOnPrimaryContainer">@color/glass_sunset_on_accent_container</item>
+        <item name="colorSecondary">@color/glass_sunset_accent_deep</item>
+        <item name="colorSecondaryContainer">@color/glass_sunset_tonal</item>
+        <item name="colorOnSecondaryContainer">@color/glass_sunset_on_tonal</item>
+        <item name="android:colorBackground">@color/glass_sunset_bg0</item>
+        <item name="colorSurface">@color/glass_sunset_surface</item>
+        <item name="colorOnSurface">@color/glass_sunset_on_surface</item>
+        <item name="colorSurfaceVariant">@color/glass_sunset_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/glass_sunset_on_surface_variant</item>
+        <item name="colorSurfaceContainerLowest">@color/glass_sunset_surface_lowest</item>
+        <item name="colorSurfaceContainerLow">@color/glass_sunset_surface_low</item>
+        <item name="colorSurfaceContainer">@color/glass_sunset_surface_cont</item>
+        <item name="colorSurfaceContainerHigh">@color/glass_sunset_surface_high</item>
+        <item name="colorOutline">@color/glass_sunset_outline</item>
+        <item name="colorOutlineVariant">@color/glass_sunset_outline_variant</item>
+        <item name="colorError">@color/glass_sunset_error</item>
+        <item name="android:statusBarColor" tools:targetApi="l">@color/glass_sunset_bg1</item>
+        <item name="android:navigationBarColor" tools:targetApi="l">@color/glass_sunset_bg1</item>
+        <item name="wsCardBg">@color/glass_sunset_card</item>
+        <item name="wsCardStroke">@color/glass_sunset_card_stroke</item>
+        <item name="wsPanelBg">@color/glass_sunset_card</item>
+        <item name="wsPanelStroke">@color/glass_sunset_card_stroke</item>
+        <item name="wsNavBg">@color/glass_sunset_nav</item>
+        <item name="wsButtonBg">@color/glass_sunset_button_bg</item>
+        <item name="wsButtonText">@color/glass_sunset_button_text</item>
+        <item name="wsAccent">@color/glass_sunset_accent</item>
+        <item name="wsAccentDeep">@color/glass_sunset_accent_deep</item>
+        <item name="wsAccentLight">@color/glass_sunset_accent_light</item>
+        <item name="wsPartner">@color/glass_sunset_partner</item>
+        <item name="wsNeonA">@color/glass_sunset_neon_a</item>
+        <item name="wsNeonB">@color/glass_sunset_neon_b</item>
+        <item name="wsOnSurface">@color/glass_sunset_on_surface</item>
+        <item name="wsOnSurfaceVariant">@color/glass_sunset_on_surface_variant</item>
+        <item name="wsOutline">@color/glass_sunset_outline</item>
+        <item name="wsError">@color/glass_sunset_error</item>
+        <item name="wsBlue">@color/glass_sunset_blue</item>
+        <item name="wsBg0">@color/glass_sunset_bg0</item>
+        <item name="wsBg1">@color/glass_sunset_bg1</item>
+        <item name="wsDiscA">@color/glass_sunset_disc_a</item>
+        <item name="wsDiscB">@color/glass_sunset_disc_b</item>
+        <item name="wsRingOff">@color/glass_sunset_ring_off</item>
+        <item name="wsCore">@color/glass_sunset_core</item>
+        <item name="wsMapBg">@color/glass_sunset_map_bg</item>
+        <item name="wsMapBlock">@color/glass_sunset_map_block</item>
+        <item name="wsMapRoad">@color/glass_sunset_map_road</item>
+        <item name="wsRouteCore">@color/glass_sunset_route_core</item>
+    </style>
+    <style name="Theme.WarpScout.Glass.Sunset.Welcome" parent="Theme.WarpScout.Glass.Sunset">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowBackground">@color/glass_sunset_bg0</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
+
+    <!-- Стекло · Ультрафиолет -->
+    <style name="Theme.WarpScout.Glass.Violet" parent="Theme.WarpScout.Glass">
+        <item name="colorPrimary">@color/glass_violet_accent</item>
+        <item name="colorOnPrimary">@color/glass_violet_on_accent</item>
+        <item name="colorPrimaryContainer">@color/glass_violet_accent_container</item>
+        <item name="colorOnPrimaryContainer">@color/glass_violet_on_accent_container</item>
+        <item name="colorSecondary">@color/glass_violet_accent_deep</item>
+        <item name="colorSecondaryContainer">@color/glass_violet_tonal</item>
+        <item name="colorOnSecondaryContainer">@color/glass_violet_on_tonal</item>
+        <item name="android:colorBackground">@color/glass_violet_bg0</item>
+        <item name="colorSurface">@color/glass_violet_surface</item>
+        <item name="colorOnSurface">@color/glass_violet_on_surface</item>
+        <item name="colorSurfaceVariant">@color/glass_violet_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/glass_violet_on_surface_variant</item>
+        <item name="colorSurfaceContainerLowest">@color/glass_violet_surface_lowest</item>
+        <item name="colorSurfaceContainerLow">@color/glass_violet_surface_low</item>
+        <item name="colorSurfaceContainer">@color/glass_violet_surface_cont</item>
+        <item name="colorSurfaceContainerHigh">@color/glass_violet_surface_high</item>
+        <item name="colorOutline">@color/glass_violet_outline</item>
+        <item name="colorOutlineVariant">@color/glass_violet_outline_variant</item>
+        <item name="colorError">@color/glass_violet_error</item>
+        <item name="android:statusBarColor" tools:targetApi="l">@color/glass_violet_bg1</item>
+        <item name="android:navigationBarColor" tools:targetApi="l">@color/glass_violet_bg1</item>
+        <item name="wsCardBg">@color/glass_violet_card</item>
+        <item name="wsCardStroke">@color/glass_violet_card_stroke</item>
+        <item name="wsPanelBg">@color/glass_violet_card</item>
+        <item name="wsPanelStroke">@color/glass_violet_card_stroke</item>
+        <item name="wsNavBg">@color/glass_violet_nav</item>
+        <item name="wsButtonBg">@color/glass_violet_button_bg</item>
+        <item name="wsButtonText">@color/glass_violet_button_text</item>
+        <item name="wsAccent">@color/glass_violet_accent</item>
+        <item name="wsAccentDeep">@color/glass_violet_accent_deep</item>
+        <item name="wsAccentLight">@color/glass_violet_accent_light</item>
+        <item name="wsPartner">@color/glass_violet_partner</item>
+        <item name="wsNeonA">@color/glass_violet_neon_a</item>
+        <item name="wsNeonB">@color/glass_violet_neon_b</item>
+        <item name="wsOnSurface">@color/glass_violet_on_surface</item>
+        <item name="wsOnSurfaceVariant">@color/glass_violet_on_surface_variant</item>
+        <item name="wsOutline">@color/glass_violet_outline</item>
+        <item name="wsError">@color/glass_violet_error</item>
+        <item name="wsBlue">@color/glass_violet_blue</item>
+        <item name="wsBg0">@color/glass_violet_bg0</item>
+        <item name="wsBg1">@color/glass_violet_bg1</item>
+        <item name="wsDiscA">@color/glass_violet_disc_a</item>
+        <item name="wsDiscB">@color/glass_violet_disc_b</item>
+        <item name="wsRingOff">@color/glass_violet_ring_off</item>
+        <item name="wsCore">@color/glass_violet_core</item>
+        <item name="wsMapBg">@color/glass_violet_map_bg</item>
+        <item name="wsMapBlock">@color/glass_violet_map_block</item>
+        <item name="wsMapRoad">@color/glass_violet_map_road</item>
+        <item name="wsRouteCore">@color/glass_violet_route_core</item>
+    </style>
+    <style name="Theme.WarpScout.Glass.Violet.Welcome" parent="Theme.WarpScout.Glass.Violet">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowBackground">@color/glass_violet_bg0</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
+
+    <!-- Стекло · Кислота -->
+    <style name="Theme.WarpScout.Glass.Acid" parent="Theme.WarpScout.Glass">
+        <item name="colorPrimary">@color/glass_acid_accent</item>
+        <item name="colorOnPrimary">@color/glass_acid_on_accent</item>
+        <item name="colorPrimaryContainer">@color/glass_acid_accent_container</item>
+        <item name="colorOnPrimaryContainer">@color/glass_acid_on_accent_container</item>
+        <item name="colorSecondary">@color/glass_acid_accent_deep</item>
+        <item name="colorSecondaryContainer">@color/glass_acid_tonal</item>
+        <item name="colorOnSecondaryContainer">@color/glass_acid_on_tonal</item>
+        <item name="android:colorBackground">@color/glass_acid_bg0</item>
+        <item name="colorSurface">@color/glass_acid_surface</item>
+        <item name="colorOnSurface">@color/glass_acid_on_surface</item>
+        <item name="colorSurfaceVariant">@color/glass_acid_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/glass_acid_on_surface_variant</item>
+        <item name="colorSurfaceContainerLowest">@color/glass_acid_surface_lowest</item>
+        <item name="colorSurfaceContainerLow">@color/glass_acid_surface_low</item>
+        <item name="colorSurfaceContainer">@color/glass_acid_surface_cont</item>
+        <item name="colorSurfaceContainerHigh">@color/glass_acid_surface_high</item>
+        <item name="colorOutline">@color/glass_acid_outline</item>
+        <item name="colorOutlineVariant">@color/glass_acid_outline_variant</item>
+        <item name="colorError">@color/glass_acid_error</item>
+        <item name="android:statusBarColor" tools:targetApi="l">@color/glass_acid_bg1</item>
+        <item name="android:navigationBarColor" tools:targetApi="l">@color/glass_acid_bg1</item>
+        <item name="wsCardBg">@color/glass_acid_card</item>
+        <item name="wsCardStroke">@color/glass_acid_card_stroke</item>
+        <item name="wsPanelBg">@color/glass_acid_card</item>
+        <item name="wsPanelStroke">@color/glass_acid_card_stroke</item>
+        <item name="wsNavBg">@color/glass_acid_nav</item>
+        <item name="wsButtonBg">@color/glass_acid_button_bg</item>
+        <item name="wsButtonText">@color/glass_acid_button_text</item>
+        <item name="wsAccent">@color/glass_acid_accent</item>
+        <item name="wsAccentDeep">@color/glass_acid_accent_deep</item>
+        <item name="wsAccentLight">@color/glass_acid_accent_light</item>
+        <item name="wsPartner">@color/glass_acid_partner</item>
+        <item name="wsNeonA">@color/glass_acid_neon_a</item>
+        <item name="wsNeonB">@color/glass_acid_neon_b</item>
+        <item name="wsOnSurface">@color/glass_acid_on_surface</item>
+        <item name="wsOnSurfaceVariant">@color/glass_acid_on_surface_variant</item>
+        <item name="wsOutline">@color/glass_acid_outline</item>
+        <item name="wsError">@color/glass_acid_error</item>
+        <item name="wsBlue">@color/glass_acid_blue</item>
+        <item name="wsBg0">@color/glass_acid_bg0</item>
+        <item name="wsBg1">@color/glass_acid_bg1</item>
+        <item name="wsDiscA">@color/glass_acid_disc_a</item>
+        <item name="wsDiscB">@color/glass_acid_disc_b</item>
+        <item name="wsRingOff">@color/glass_acid_ring_off</item>
+        <item name="wsCore">@color/glass_acid_core</item>
+        <item name="wsMapBg">@color/glass_acid_map_bg</item>
+        <item name="wsMapBlock">@color/glass_acid_map_block</item>
+        <item name="wsMapRoad">@color/glass_acid_map_road</item>
+        <item name="wsRouteCore">@color/glass_acid_route_core</item>
+    </style>
+    <style name="Theme.WarpScout.Glass.Acid.Welcome" parent="Theme.WarpScout.Glass.Acid">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowBackground">@color/glass_acid_bg0</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
+</resources>

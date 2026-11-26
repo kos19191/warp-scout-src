@@ -210,11 +210,20 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     /** Пока true — переподключение по настройкам не затевается (идёт заполнение экрана из Prefs). */
     private var suppressSettingsReconnect = false
 
-    /** Экран в дизайне «Премиум» (с 1.10.49-beta7) — решено в onCreate вместе с темой окна. */
+    /**
+     * Экран в новом облике — «Премиум» (с 1.10.49-beta7), «Нежный» или «Стекло» (с 1.10.49-beta8):
+     * кнопка-кольцо, карточка маршрута, значки вкладок. Решено в onCreate вместе с темой окна.
+     */
     private var premium = false
 
-    /** Фон со свечением («Премиум»); null — классический дизайн. */
-    private var backdrop: PremiumBackdrop? = null
+    /** Какой именно дизайн (Prefs.DESIGN_*) — тоже решено в onCreate. */
+    private var designKind = Prefs.DESIGN_CLASSIC
+
+    /** Цвета, которые экран рисует сам, — из темы выбранного дизайна и оттенка (см. [Design.look]). */
+    private val look: Design.Look by lazy { Design.look(this) }
+
+    /** Фон со свечением (новый облик); null — классический дизайн. */
+    private var backdrop: GlowBackdrop? = null
 
     /** Открытый экран «Маршрут» (с 1.10.49-beta7). */
     private var routeScreen: RouteScreen? = null
@@ -223,10 +232,14 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         // Тема — до super.onCreate: экран сразу создаётся светлым или тёмным, без пересоздания и
         // мигания. Ошибка чтения настроек темы не должна мешать запуску — тогда просто как в системе.
         runCatching { applyThemeMode(Prefs(this).themeMode) }
-        // Дизайн (с 1.10.49-beta7): «Премиум» — своя тема окна, и задать её можно только до создания
-        // экрана. Не прочиталось — классическая тема из манифеста.
-        premium = runCatching { Prefs(this).design == Prefs.DESIGN_PREMIUM }.getOrDefault(false)
-        if (premium) runCatching { setTheme(R.style.Theme_WarpScout_Premium) }.onFailure { premium = false }
+        // Дизайн (с 1.10.49-beta7; с 1.10.49-beta8 их четыре, у «Нежного» и «Стекла» ещё и цвет): своя тема
+        // окна, и задать её можно только до создания экрана. Не прочиталось — классическая тема из манифеста.
+        designKind = runCatching { Prefs(this).design }.getOrDefault(Prefs.DESIGN_CLASSIC)
+        premium = designKind != Prefs.DESIGN_CLASSIC
+        if (premium) runCatching { setTheme(Design.theme(this, designKind)) }.onFailure {
+            premium = false
+            designKind = Prefs.DESIGN_CLASSIC
+        }
         super.onCreate(savedInstanceState)
         // Первым делом: если приложение падало, это должно попасть в журнал, а не исчезнуть.
         CrashLog.install(this)
@@ -267,6 +280,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             TunnelStatusBus.install(this)
             setupNav(savedInstanceState?.getInt(STATE_TAB) ?: 0)
             setupSettingsGroups()
+            setupBypassGroups()
             setupAppsListFold()
             fillFromPrefs()
             buildJunkChecks()
@@ -758,15 +772,12 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             navButtons().forEachIndexed { i, button ->
                 val active = i == safe
                 button.isSelected = active
-                val color = ContextCompat.getColor(
-                    this,
-                    when {
-                        premium && active -> R.color.prem_accent
-                        premium -> R.color.prem_on_surface_variant
-                        active -> R.color.colorPrimary
-                        else -> R.color.colorOnSurfaceVariant
-                    }
-                )
+                val color = when {
+                    premium && active -> look.accent
+                    premium -> look.onSurfaceVariant
+                    active -> ContextCompat.getColor(this, R.color.colorPrimary)
+                    else -> ContextCompat.getColor(this, R.color.colorOnSurfaceVariant)
+                }
                 button.setTextColor(color)
                 if (premium) button.iconTint = android.content.res.ColorStateList.valueOf(color)
             }
@@ -911,6 +922,31 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             })
             scroll.requestLayout()
         }.onFailure { scroll.post(go) }
+    }
+
+    /** Разделы «Обхода» гармошкой (с 1.10.49-beta8); null — не собрались, всё раскрыто. */
+    private var bypassGroups: SettingsAccordion? = null
+
+    /**
+     * «Обход» гармошкой, как «Настройки» (с 1.10.49-beta8, человек попросил «компактнее с раскрытием»):
+     * видны заголовки «Доступность», «Режут DPI или адрес?», «Прокси для Telegram» и «Второй выход»,
+     * нажатие раскрывает раздел, раскрытые запоминаются (тот же [Prefs.settingsOpen]). Сначала всё
+     * свёрнуто. Не собралось — разделы остаются раскрытыми, как в разметке.
+     */
+    private fun setupBypassGroups() {
+        val accordion = SettingsAccordion(prefs) { open ->
+            getString(if (open) R.string.group_expanded else R.string.group_collapsed)
+        }
+        runCatching {
+            accordion.add(GROUP_BYPASS_AVAIL, binding.bypassAvailHead, binding.bypassAvailBody, binding.bypassAvailArrow)
+            accordion.add(GROUP_BYPASS_DPI, binding.bypassDpiHead, binding.bypassDpiBody, binding.bypassDpiArrow)
+            accordion.add(GROUP_BYPASS_TG, binding.bypassTgHead, binding.bypassTgBody, binding.bypassTgArrow)
+            accordion.add(GROUP_BYPASS_SECOND, binding.bypassSecondHead, binding.bypassSecondBody, binding.bypassSecondArrow)
+            bypassGroups = accordion
+        }.onFailure { t ->
+            runCatching { accordion.showAll() }
+            TunnelDebug.error("разделы обхода: " + SafeMode.describe(t))
+        }
     }
 
     /** Свёрнутый список приложений в «Маршрутах» (с 1.10.49-beta6); null — не собрался, список раскрыт. */
@@ -5443,16 +5479,16 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     }
 
     /** Цвет значка питания на кнопке по состоянию — у каждого дизайна свой. */
-    private fun powerTint(state: Int): Int = ContextCompat.getColor(
+    private fun powerTint(state: Int): Int = if (premium) {
+        when (state) {
+            PowerOrbView.STATE_ON -> look.accent
+            PowerOrbView.STATE_ERROR -> look.error
+            PowerOrbView.STATE_CONNECTING -> look.accentLight
+            else -> look.outline
+        }
+    } else ContextCompat.getColor(
         this,
-        if (premium) {
-            when (state) {
-                PowerOrbView.STATE_ON -> R.color.prem_accent
-                PowerOrbView.STATE_ERROR -> R.color.prem_error
-                PowerOrbView.STATE_CONNECTING -> R.color.prem_accent_light
-                else -> R.color.prem_outline
-            }
-        } else {
+        run {
             when (state) {
                 PowerOrbView.STATE_ON -> R.color.orb_accent
                 PowerOrbView.STATE_ERROR -> R.color.orb_error
@@ -5599,10 +5635,14 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         val text = getString(R.string.simple_rate, SpeedTest.human(down), SpeedTest.human(upRate))
         if (s.simpleRate.text.toString() != text) {
             val styled = android.text.SpannableString(text)
-            val accent = ContextCompat.getColor(this, if (premium) R.color.prem_accent else R.color.orb_accent)
+            val accent = if (premium) look.accent else ContextCompat.getColor(this, R.color.orb_accent)
+            val upColor = if (designKind == Prefs.DESIGN_GLASS) look.partner else accent
             text.forEachIndexed { i, c ->
                 if (c == '↓' || c == '↑') {
-                    styled.setSpan(android.text.style.ForegroundColorSpan(accent), i, i + 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    styled.setSpan(
+                        android.text.style.ForegroundColorSpan(if (c == '↑') upColor else accent),
+                        i, i + 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                    )
                     styled.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), i, i + 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 }
             }
@@ -7348,43 +7388,122 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         }
     }
 
-    // ------------------------------------------------ дизайн (с 1.10.49-beta7)
+    // ------------------------------------------------ дизайн (с 1.10.49-beta7; «Нежный» и «Стекло» — с beta8)
 
     /**
-     * «Дизайн» в «Оформлении»: «Премиум» или «Классический». Тема окна задаётся до создания экрана,
-     * поэтому выбор пересоздаёт его — как смена светлой и тёмной темы: вкладка, подбор и туннель это
-     * переживают, раздел «Оформление» остаётся раскрытым.
+     * «Оформление» → «Дизайн» и «Цвет» (с 1.10.49-beta7; с 1.10.49-beta8 дизайнов четыре, а у «Нежного» и
+     * «Стекла» ещё и цвет). Выбор сохраняется сразу, экран пересоздаётся чуть позже: тема окна задаётся
+     * только при создании экрана. Туннель и подбор это переживают, открытая вкладка остаётся.
      */
     private fun setupDesignToggle() {
-        binding.designGroup.check(if (prefs.design == Prefs.DESIGN_CLASSIC) R.id.btnDesignClassic else R.id.btnDesignPremium)
-        binding.designGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
-            if (!isChecked) return@addOnButtonCheckedListener
-            val design = if (checkedId == R.id.btnDesignClassic) Prefs.DESIGN_CLASSIC else Prefs.DESIGN_PREMIUM
-            if (design == prefs.design) return@addOnButtonCheckedListener
+        val radios = mapOf(
+            Prefs.DESIGN_PREMIUM to binding.rbDesignPremium,
+            Prefs.DESIGN_SOFT to binding.rbDesignSoft,
+            Prefs.DESIGN_GLASS to binding.rbDesignGlass,
+            Prefs.DESIGN_CLASSIC to binding.rbDesignClassic,
+        )
+        radios[prefs.design]?.isChecked = true
+        renderTones(prefs.design)
+        binding.designRadios.setOnCheckedChangeListener { _, checkedId ->
+            val design = radios.entries.firstOrNull { it.value.id == checkedId }?.key ?: return@setOnCheckedChangeListener
+            if (design == prefs.design) return@setOnCheckedChangeListener
             prefs.design = design
-            TunnelDebug.stage(
-                "дизайн оформления: " +
-                    getString(if (design == Prefs.DESIGN_CLASSIC) R.string.design_classic else R.string.design_premium).lowercase()
-            )
-            // Чуть позже: чтобы было видно, как выбор переключился, а не мгновенный скачок.
-            tunnelHandler.postDelayed({
-                runCatching { if (!isFinishing && !isDestroyed) recreate() }.onFailure { t ->
-                    TunnelDebug.error("смена дизайна: экран не пересоздался — " + SafeMode.describe(t))
-                }
-            }, MODE_SWITCH_DELAY_MS)
+            renderTones(design)
+            TunnelDebug.stage("дизайн оформления: " + getString(Design.nameOf(design)).lowercase() + toneNote(design))
+            restartForDesign()
         }
+    }
+
+    /** « · лаванда» — цвет дизайна для журнала; у дизайнов без выбора цвета пусто. */
+    private fun toneNote(design: Int): String {
+        val tones = Design.tones(design) ?: return ""
+        return " · " + getString(tones[Design.toneIndex(prefs, design).coerceIn(0, tones.size - 1)].name).lowercase()
+    }
+
+    /** Пересоздать экран в новом дизайне или цвете — чуть позже, чтобы было видно, как выбор переключился. */
+    private fun restartForDesign() {
+        tunnelHandler.removeCallbacks(designRestart)
+        tunnelHandler.postDelayed(designRestart, MODE_SWITCH_DELAY_MS)
+    }
+
+    private val designRestart = Runnable {
+        runCatching { if (!isFinishing && !isDestroyed) recreate() }.onFailure { t ->
+            TunnelDebug.error("смена дизайна: экран не пересоздался — " + SafeMode.describe(t))
+        }
+    }
+
+    /**
+     * Кружки цветов дизайна [design] (с 1.10.49-beta8): у «Нежного» — шесть пастельных, у «Стекла» — пять
+     * переливов двух неонов. У «Премиума» и «Классического» строки нет.
+     */
+    private fun renderTones(design: Int) {
+        val tones = Design.tones(design)
+        binding.toneBox.visibility = if (tones == null) View.GONE else View.VISIBLE
+        val row = binding.toneRow
+        row.removeAllViews()
+        if (tones == null) return
+        val current = Design.toneIndex(prefs, design).coerceIn(0, tones.size - 1)
+        binding.textToneName.text = getString(tones[current].name)
+        val ring = if (premium) look.onSurface else ContextCompat.getColor(this, R.color.colorOnSurface)
+        val faint = android.graphics.Color.argb(40, android.graphics.Color.red(ring), android.graphics.Color.green(ring), android.graphics.Color.blue(ring))
+        val size = dp(38f)
+        tones.forEachIndexed { i, tone ->
+            val selected = i == current
+            val swatch = View(this)
+            swatch.background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                if (tone.swatch.size > 1) {
+                    orientation = android.graphics.drawable.GradientDrawable.Orientation.TL_BR
+                    colors = tone.swatch
+                } else {
+                    setColor(tone.swatch[0])
+                }
+                setStroke(dp(if (selected) 3f else 1f), if (selected) ring else faint)
+            }
+            if (selected) {
+                ContextCompat.getDrawable(this, R.drawable.ic_tone_check)?.mutate()?.let { check ->
+                    swatch.foreground = check
+                    swatch.foregroundGravity = android.view.Gravity.CENTER
+                }
+            }
+            swatch.contentDescription = getString(tone.name) + if (selected) ", " + getString(R.string.tone_selected) else ""
+            swatch.isClickable = true
+            swatch.isFocusable = true
+            swatch.setOnClickListener { pickTone(design, i) }
+            val lp = LinearLayout.LayoutParams(size, size)
+            lp.marginEnd = dp(10f)
+            row.addView(swatch, lp)
+        }
+    }
+
+    /** Выбрали цвет: сохранить; если этот дизайн уже на экране — пересоздать экран в новом цвете. */
+    private fun pickTone(design: Int, index: Int) {
+        if (Design.toneIndex(prefs, design) == index) return
+        when (design) {
+            Prefs.DESIGN_SOFT -> prefs.softTone = index
+            Prefs.DESIGN_GLASS -> prefs.glassTone = index
+            else -> return
+        }
+        renderTones(design)
+        val tones = Design.tones(design) ?: return
+        TunnelDebug.stage("цвет оформления: " + getString(tones[index.coerceIn(0, tones.size - 1)].name).lowercase())
+        if (prefs.design == design) restartForDesign()
     }
 
     private fun dp(v: Float): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
 
-    /** Цвет классической темы, заданный кодом, — в «Премиуме» его оттенок (см. [Design.premiumOf]). */
-    private fun col(res: Int): Int = ContextCompat.getColor(this, if (premium) Design.premiumOf(res) else res)
+    /** Цвет классической темы, заданный кодом, — в новом облике его оттенок того же назначения (см. [Design.lookColor]). */
+    private fun col(res: Int): Int {
+        val classic = ContextCompat.getColor(this, res)
+        return if (premium) Design.lookColor(look, res, classic) else classic
+    }
 
     /**
-     * Облик «Премиум» — то, чего тема сама не меняет: фон со свечением, крупнее кнопка и логотип, имя
-     * двумя цветами, карточка маршрута вместо строки «где мы», значки карточек, вкладок и разделов
-     * «Настроек», кольцо на «Главной». Строка «где мы» и «Точка входа» открывают «Маршрут» в обоих
-     * дизайнах; остальное в классическом не трогаем — он остаётся прежним.
+     * Новый облик («Премиум», с 1.10.49-beta8 — и «Нежный», «Стекло») — то, чего тема сама не меняет: фон
+     * со свечением, крупнее кнопка и логотип, имя двумя цветами, карточка маршрута вместо строки «где мы»,
+     * значки карточек, вкладок и разделов «Настроек» и «Обхода», кольцо на «Главной». Строка «где мы» и
+     * «Точка входа» открывают «Маршрут» во всех дизайнах; остальное в классическом не трогаем — он
+     * остаётся прежним.
      */
     private fun applyDesign() {
         val s = binding.simple
@@ -7398,16 +7517,27 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         if (!premium) return
 
         val sp = android.util.TypedValue.COMPLEX_UNIT_SP
-        val accent = ContextCompat.getColor(this, R.color.prem_accent)
-        backdrop = PremiumBackdrop(this).also { binding.root.background = it }
+        val accent = look.accent
+        Design.backdrop(this, designKind)?.let { bg ->
+            binding.root.background = bg
+            backdrop = bg as? GlowBackdrop
+        }
 
         // Упрощённый экран.
-        s.simpleOrbView.premium = true
+        s.simpleOrbView.design = designKind
         val orb = if (resources.configuration.screenWidthDp >= 380) 300f else 264f
         s.simpleOrb.layoutParams = s.simpleOrb.layoutParams.apply { width = dp(orb); height = dp(orb) }
         s.simpleLogo.layoutParams = s.simpleLogo.layoutParams.apply { width = dp(44f); height = dp(44f) }
-        s.simpleBrand.text = brandText()
         s.simpleBrand.setTextSize(sp, 25f)
+        s.simpleBrand.text = brandText(s.simpleBrand)
+        if (designKind == Prefs.DESIGN_SOFT) {
+            // «Нежный»: знак в белом кружке, как на макете.
+            s.simpleLogo.background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(if (look.dark) android.graphics.Color.argb(20, 255, 255, 255) else android.graphics.Color.argb(217, 255, 255, 255))
+            }
+            s.simpleLogo.setPadding(dp(5f), dp(5f), dp(5f), dp(5f))
+        }
         s.simplePowerIcon.layoutParams = s.simplePowerIcon.layoutParams.apply { width = dp(56f); height = dp(56f) }
         s.simpleState.setTextSize(sp, 23f)
         s.simpleRate.setTextSize(sp, 14f)
@@ -7441,7 +7571,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         binding.connLogo.visibility = View.VISIBLE
         binding.imageShield.visibility = View.GONE
         binding.advOrb.visibility = View.VISIBLE
-        binding.advOrbView.premium = true
+        binding.advOrbView.design = designKind
         binding.advOrb.setOnClickListener { onSimpleOrbClick() }
         val route = ContextCompat.getDrawable(this, R.drawable.ic_route)?.mutate()?.apply {
             setBounds(0, 0, dp(24f), dp(24f))
@@ -7459,16 +7589,34 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         runCatching { settingsIcons(accent) }
     }
 
-    /** «Wily» цветом текста, «Scout» — оранжевым, как на макете. */
-    private fun brandText(): CharSequence {
+    /**
+     * «Wily» цветом текста, «Scout» — цветом дизайна, как на макете: оранжевым в «Премиуме», оттенком в
+     * «Нежном», переливом двух неоновых цветов в «Стекле».
+     */
+    private fun brandText(view: android.widget.TextView): CharSequence {
         val name = getString(R.string.simple_brand)
         val i = name.indexOf("Scout")
         if (i <= 0) return name
+        val span: Any = if (designKind == Prefs.DESIGN_GLASS) {
+            val paint = view.paint
+            GradientSpan(paint.measureText(name, 0, i), paint.measureText(name), look.accent, look.partner)
+        } else {
+            android.text.style.ForegroundColorSpan(look.accent)
+        }
         return android.text.SpannableString(name).apply {
-            setSpan(
-                android.text.style.ForegroundColorSpan(ContextCompat.getColor(this@MainActivity, R.color.prem_accent)),
-                i, name.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-            )
+            setSpan(span, i, name.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+    }
+
+    /** Перелив двух цветов по буквам (имя в «Стекле»): градиент от [x0] до [x1] по строке. */
+    private class GradientSpan(
+        private val x0: Float,
+        private val x1: Float,
+        private val from: Int,
+        private val to: Int,
+    ) : android.text.style.CharacterStyle(), android.text.style.UpdateAppearance {
+        override fun updateDrawState(tp: android.text.TextPaint) {
+            tp.shader = android.graphics.LinearGradient(x0, 0f, x1, 0f, from, to, android.graphics.Shader.TileMode.CLAMP)
         }
     }
 
@@ -7489,7 +7637,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         showPage(selectedTab)
     }
 
-    /** Значки слева от заголовков разделов «Настроек» («Премиум»). */
+    /** Значки слева от заголовков разделов «Настроек» и (с 1.10.49-beta8) «Обхода» — в новом облике. */
     private fun settingsIcons(tint: Int) {
         val heads = listOf(
             binding.groupConnHead to R.drawable.ic_set_conn,
@@ -7499,6 +7647,10 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             binding.groupUpdatesHead to R.drawable.ic_update,
             binding.groupThemeHead to R.drawable.ic_set_theme,
             binding.groupResetHead to R.drawable.ic_set_reset,
+            binding.bypassAvailHead to R.drawable.ic_byp_avail,
+            binding.bypassDpiHead to R.drawable.ic_byp_dpi,
+            binding.bypassTgHead to R.drawable.ic_byp_tg,
+            binding.bypassSecondHead to R.drawable.ic_server,
         )
         for ((head, icon) in heads) {
             val image = android.widget.ImageView(this)
@@ -7559,7 +7711,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     /** Значения в строке — цветом основного текста и жирным, как на макете («вход **188.114.97.6:890**»). */
     private fun emphasized(text: String, vararg values: String): CharSequence {
         val out = android.text.SpannableString(text)
-        val color = ContextCompat.getColor(this, R.color.prem_on_surface)
+        val color = look.onSurface
         for (v in values) {
             if (v.isBlank()) continue
             val i = text.indexOf(v)
@@ -7645,7 +7797,7 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             engine.running || connecting || waiting -> RouteMapView.MODE_CONNECTING
             else -> RouteMapView.MODE_OFF
         }
-        val pal = Design.palette(this, premium)
+        val pal = Design.palette(this)
         val stateText: String
         val stateColor: Int
         when {
@@ -7808,6 +7960,12 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
 
         /** Список приложений в «Маршрутах» (с 1.10.49-beta6) — тот же Prefs.settingsOpen, не переименовывать. */
         const val GROUP_APPS_LIST = "apps_list"
+
+        /** Разделы «Обхода» (с 1.10.49-beta8) — тот же Prefs.settingsOpen, не переименовывать. */
+        const val GROUP_BYPASS_AVAIL = "bypass_avail"
+        const val GROUP_BYPASS_DPI = "bypass_dpi"
+        const val GROUP_BYPASS_TG = "bypass_tg"
+        const val GROUP_BYPASS_SECOND = "bypass_second"
 
         /** Что настраивается на вкладке «Туннелирование» и в шторке (с 1.10.31). */
         const val KIND_APPS = 0

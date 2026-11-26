@@ -33,7 +33,7 @@ import kotlin.math.sin
  * без видеокарты и тормозит. Всё, что зависит только от размера (дорожки, щит, шкала, градиенты),
  * строится один раз на размер; в кадре — повороты и альфа.
  */
-internal class PremiumOrbPainter(private val context: Context) {
+internal class PremiumOrbPainter(private val context: Context) : OrbPainter {
 
     private fun c(res: Int) = ContextCompat.getColor(context, res)
     private val acc = c(R.color.prem_accent)
@@ -85,7 +85,7 @@ internal class PremiumOrbPainter(private val context: Context) {
     private var traceBase = 0f
 
     /** Радиус, внутри которого помещается текст кнопки (диск минус поле). */
-    fun innerRadius(size: Float, density: Float): Float = size / 2f * DISC - 4f * density
+    override fun innerRadius(size: Float, density: Float): Float = size / 2f * DISC - 4f * density
 
     private fun withAlpha(color: Int, a: Float): Int =
         Color.argb((Color.alpha(color) * a.coerceIn(0f, 1f)).toInt(), Color.red(color), Color.green(color), Color.blue(color))
@@ -228,7 +228,7 @@ internal class PremiumOrbPainter(private val context: Context) {
      * (uptime, мс), [flashStart] — когда началась вспышка «подключено» (0 — не было), [animate] —
      * анимации включены в системе (иначе — неподвижный кадр).
      */
-    fun draw(canvas: Canvas, w: Int, h: Int, state: Int, progress: Float, now: Long, flashStart: Long, animate: Boolean) {
+    override fun draw(canvas: Canvas, w: Int, h: Int, state: Int, progress: Float, now: Long, flashStart: Long, animate: Boolean) {
         if (min(w, h) <= 0) return
         build(w, h)
         val t = if (animate) (now % 3_600_000L) / 1000f else 0f
