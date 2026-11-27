@@ -286,11 +286,11 @@ class NativeWintunTunnelManagerTest {
 
     @Test
     fun `second exit automatically falls back to Double-Hop over WARP when direct WireGuard is blocked`() {
-        val warpSrvPriv = Crypto.generatePrivateKey()
-        val warpSrvPub = Crypto.publicKey(warpSrvPriv)
-        val protonSrvPriv = Crypto.generatePrivateKey()
-        val protonSrvPub = Crypto.publicKey(protonSrvPriv)
-        val protonClientPriv = Crypto.generatePrivateKey()
+        val warpSrvPriv = ByteArray(32) { (it * 3 + 7).toByte() }
+        val warpSrvPub = Crypto.publicOf(warpSrvPriv)
+        val protonSrvPriv = ByteArray(32) { (it * 5 + 13).toByte() }
+        val protonSrvPub = Crypto.publicOf(protonSrvPriv)
+        val protonClientPriv = ByteArray(32) { (it * 7 + 19).toByte() }
 
         val warpEp = Endpoint("188.114.96.4", 854)
         val protonEp = Endpoint("217.138.213.2", 51820)
