@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WilyDiag</string>
+    <string name="subtitle">Диагностика Wi-Fi, DNS, Telegram, Meta и YouTube</string>
+    <string name="btn_check">Проверка</string>
+    <string name="btn_stop">Остановить</string>
+    <string name="btn_share">Отправить отчёт (.txt)</string>
+    <string name="status_idle">Нажмите «Проверка», чтобы просканировать сеть и сервисы.</string>
+    <string name="share_chooser_title">Отправить отчёт диагностики</string>
+</resources>

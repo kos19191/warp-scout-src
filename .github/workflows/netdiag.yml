@@ -1,0 +1,82 @@
+name: netdiag-android
+
+on:
+  push:
+    branches:
+      - main
+      - 'arena/**'
+    paths:
+      - 'netdiag/**'
+      - 'settings.gradle.kts'
+      - '.github/workflows/netdiag.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: netdiag-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-netdiag:
+    name: "WilyDiag Android APK: тесты и сборка"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: "Юнит-тесты :netdiag"
+        run: ./gradlew --no-daemon :netdiag:testDebugUnitTest --stacktrace
+
+      - name: "Сборка подписанного APK WilyDiag"
+        run: ./gradlew --no-daemon :netdiag:assembleDebug --stacktrace
+
+      - name: "Подготовка артефактов и SHA-256"
+        run: |
+          mkdir -p out-netdiag
+          cp netdiag/build/outputs/apk/debug/netdiag-debug.apk out-netdiag/WilyDiag-1.0.0.apk
+          (cd out-netdiag && sha256sum WilyDiag-1.0.0.apk > SHA256SUMS.txt)
+          ls -lh out-netdiag/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WilyDiag-Android-APK
+          path: out-netdiag/*
+          retention-days: 30
+
+      - name: "Публикация APK в GitHub Release (netdiag-android)"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="netdiag-android"
+          TITLE="WilyDiag 1.0.0 (Android — диагностика Wi-Fi, Telegram, Meta, YouTube)"
+          NOTES=$(cat <<'EOF'
+          Небольшое диагностическое Android-приложение **WilyDiag 1.0.0** для проверки сети Wi-Fi / мобильного интернета и поиска причин проблем с **Telegram, Meta (WhatsApp / Instagram / Facebook) и YouTube**.
+
+          ### Как пользоваться
+          1. Скачайте и установите **`WilyDiag-1.0.0.apk`**.
+          2. Откройте приложение и нажмите **«Проверка»** (~10–20 секунд).
+          3. После завершения нажмите **«Отправить отчёт (.txt)»** и выберите, куда отправить текстовый отчёт.
+
+          ### Что проверяет
+          - Wi-Fi (диапазон 2.4/5/6 ГГц, сигнал, скорость линка), IPv4/IPv6, MTU, системные DNS, Private DNS (DoT), HTTP-прокси, активный VPN, внешний выход.
+          - Сравнение системного DNS с DoH (`1.1.1.1` и `dns.google`) для поиска подмены/заглушек DNS.
+          - Пошаговую проверку **Telegram** (сайты + прямые DC1/DC2/DC4/DC5 + CDN), **Meta** (WhatsApp 443/5222, Instagram, Facebook) и **YouTube** (сайт, API, googlevideo, 64 КБ тест на ТСПУ-обрыв после ~16 КБ).
+          - Проверку **UDP**, **DNS UDP 53**, **STUN NAT (UDP 19302)** и **QUIC (UDP 443)**.
+          EOF
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes --cleanup-tag || true
+          fi
+          gh release create "$TAG" out-netdiag/WilyDiag-1.0.0.apk out-netdiag/SHA256SUMS.txt \
+            --target "${{ github.sha }}" \
+            --prerelease \
+            --title "$TITLE" \
+            --notes "$NOTES"
