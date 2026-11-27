@@ -33,15 +33,6 @@ import javax.net.ssl.SSLSocketFactory
 object TelegramMedia {
 
     /**
-     * Адрес из стандартного диапазона FakeIP sing-box, который использует Podkop по умолчанию.
-     * Признаём его только для отдельной проверки через физическую сеть роутера, не для туннеля WilyScout.
-     */
-    fun isSingBoxFakeIp(ip: String?): Boolean {
-        val value = ipv4(ip) ?: return false
-        return inPrefix(value, "198.18.0.0/15")
-    }
-
-    /**
      * IPv4-сети Telegram (haritos90/allow-domains, Subnets/IPv4/04-telegram.lst, ноябрь 2026). Они же
      * идут во второй выход, когда WARP выходит через Россию (см. WarpVpnService.applyTelegramRoute).
      * IPv6 не берём: свой сервер второго выхода и Proton Free часто без IPv6, а Telegram сам ходит по
