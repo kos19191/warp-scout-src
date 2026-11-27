@@ -107,7 +107,7 @@ object AndroidNetworkCollector {
         val routes = lp?.routes?.map { r ->
             val dst = r.destination.toString()
             val gw = r.gateway?.hostAddress?.substringBefore('%') ?: "direct"
-            val iface = r.interfaceName ?: "?"
+            val iface = r.`interface` ?: "?"
             "$dst -> $gw ($iface)"
         }.orEmpty()
 
