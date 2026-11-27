@@ -829,8 +829,7 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         // Диспетчер: закреплённые соединения IPv4/IPv6 идут по выбранной дорожке; соседнее соединение — по адресу.
         val q = ArrayDeque(listOf(
             syn(43000, "157.240.1.174"), syn(43001, "157.240.1.174"),
-            tcpSyn6("2001:db8::1", "2a03:2880::1"),
-            tcpSyn6("2001:db8::2", "2a03:2880::1").also { PacketMath.put16(it, 40, 40002) }
+            tcpSyn6("2001:db8::1", "2a03:2880::1"), tcpSyn6("2001:db8::2", "2a03:2880::1")
         ))
         val tunIn = object : java.io.InputStream() {
             override fun read(): Int = -1
