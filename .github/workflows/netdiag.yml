@@ -32,8 +32,12 @@ jobs:
 
       - name: "Установка Android SDK 35 и build-tools"
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SM="$(command -v sdkmanager || find "$SDK" -name sdkmanager -type f 2>/dev/null | head -n 1 || true)"
+          if [ -n "$SM" ]; then
+            yes | "$SM" --licenses > /dev/null 2>&1 || true
+            "$SM" --install "platforms;android-35" "build-tools;35.0.0" || true
+          fi
 
       - uses: gradle/actions/setup-gradle@v4
 
