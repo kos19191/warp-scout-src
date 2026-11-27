@@ -2232,19 +2232,10 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         focusScanProgress()
     }
 
-    /** Поднять к индикатору подбора после запуска: длинная страница не должна скрывать обратную связь. */
+    /** Поднять к индикатору, если подбор начат на «Главной» расширенного экрана. */
     private fun focusScanProgress() {
-        if (!::binding.isInitialized) return
-        if (simpleShown()) {
-            val scroll = binding.simple.root
-            scroll.post {
-                val y = (binding.simple.simpleOrb.top - dp(16f)).coerceAtLeast(0)
-                scroll.smoothScrollTo(0, y)
-            }
-        } else if (selectedTab == TAB_START) {
-            val scroll = binding.pageStart
-            scroll.post { scroll.smoothScrollTo(0, 0) }
-        }
+        if (!::binding.isInitialized || simpleShown() || selectedTab != TAB_START) return
+        binding.pageStart.post { binding.pageStart.smoothScrollTo(0, 0) }
     }
 
     /**
@@ -5541,18 +5532,49 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         // Пустая строка не должна занимать место: надпись «Выключено» стоит ровно по центру кнопки.
         val timerVisibility = if (sub.isBlank()) View.GONE else View.VISIBLE
         if (s.simpleTimer.visibility != timerVisibility) s.simpleTimer.visibility = timerVisibility
-        // В «нажал и забыл» подробные шаги не нужны: состояние и процент подбора видны на самой кнопке.
-        // Не меняем высоту блока при переходе к подробным пробам (около 45%), чтобы кольцо не прыгало.
-        s.simpleOrbView.setProgress(if (engine.running && scanFraction >= 0f) scanFraction else null)
-        s.simpleActivity.visibility = View.GONE
-        s.simpleWhere.visibility = View.GONE
-        s.simpleRouteCard.visibility = View.GONE
-        s.simpleTunnelSub.visibility = View.GONE
-        s.simpleBackupState.visibility = View.GONE
+        // Кольцо-прогресс и строка «что сейчас делаю» (с 1.10.30): пока идёт подбор — доля кольца
+        // и шаг подбора; пока подключаемся — светлая дуга бежит по кольцу, а под кнопкой видно,
+        // к какой точке и что именно проверяется.
+        runCatching {
+            s.simpleOrbView.setProgress(if (engine.running && scanFraction >= 0f) scanFraction else null)
+            val activity = when {
+                engine.running -> scanActivityText
+                connecting -> serviceActivity(snap).ifBlank { connectActivityText }
+                state == PowerOrbView.STATE_CONNECTING -> serviceActivity(snap)
+                else -> ""
+            }
+            if (s.simpleActivity.text.toString() != activity) s.simpleActivity.text = activity
+            s.simpleActivity.visibility = if (activity.isBlank()) View.GONE else View.VISIBLE
+        }
         s.simplePowerIcon.imageTintList = android.content.res.ColorStateList.valueOf(powerTint(state))
 
-        // Подробные адреса и выходы оставляем на экране «Маршруты» в расширенном режиме.
+        // Где мы: вид сети, точка входа, страна выхода WARP (если проверка связи прошла) и страна второго
+        // выхода (если он поднят): «мобильная · вход 8.35.211.3:864 · выход RU · второй выход NL». Так
+        // попросил человек 23.11: «просто мобильная, какой вход, какой выход, какой выход у второго;
+        // если второго нет — просто не пиши». Страной, а не площадкой Cloudflare: «выход HEL» читалось
+        // как Финляндия; город и предупреждение про Telegram — только в журнале.
         val endpoint = if (up) TunnelDebug.endpoint.trim().ifBlank { snap?.endpoint.orEmpty() } else ""
+        val net = netKindNow().ifBlank { "сеть" }
+        val exitSummary = snap?.takeIf { linkFresh && it.linkWeb == TunnelStatus.LINK_OK }?.linkExit
+        val country = exitPlace(exitSummary)
+        val where = if (endpoint.isBlank()) {
+            ""
+        } else {
+            val parts = arrayListOf(getString(R.string.simple_where, net, endpoint))
+            if (country.isNotBlank()) parts += getString(R.string.where_exit, country)
+            secondExitCountry(snap)?.let { second ->
+                parts += if (second.isBlank()) getString(R.string.where_second_plain) else getString(R.string.where_second, second)
+            }
+            parts.joinToString(" · ")
+        }
+        if (premium) {
+            // «Премиум» (с 1.10.49-beta7): то же самое — карточкой маршрута над карточками.
+            if (s.simpleWhere.visibility != View.GONE) s.simpleWhere.visibility = View.GONE
+            runCatching { renderRouteCard(state, net, endpoint, country, secondExitCountry(snap)) }
+        } else {
+            s.simpleWhere.text = where
+            s.simpleWhere.visibility = if (where.isBlank()) View.INVISIBLE else View.VISIBLE
+        }
 
         // Скорость — на самой кнопке (живой поток раз в секунду, см. updateLiveRate); ручного
         // замера больше нет (с 1.10.31). На месте её карточки — «Туннелирование».
@@ -6675,11 +6697,15 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
 
         fun visibleList(): List<AppEntry> {
             val q = sheet.appsSearch.text?.toString()?.trim()?.lowercase().orEmpty()
-            // Отмеченные приложения остаются наверху, затем список идёт по алфавиту — так проще
-            // проверить выбор и найти следующую строку.
+            // Отмеченные — наверху: их ищут, чтобы снять, и они не должны теряться в сотне строк. В
+            // «Все приложения» отметок нет — наверху те, у кого свой выход (с 1.10.39).
             return apps.filter { app ->
                 q.isEmpty() || app.label.lowercase().contains(q) || app.pkg.lowercase().contains(q)
-            }.sortedWith(compareByDescending<AppEntry> { it.pkg in selected }.thenBy { it.label.lowercase() })
+            }.sortedWith(
+                compareByDescending<AppEntry> {
+                    if (mode == Prefs.APPS_ALL) it.pkg in exits else it.pkg in selected || it.pkg in exits
+                }.thenBy { it.label.lowercase() }
+            )
         }
 
         val adapter = object : android.widget.BaseAdapter() {
@@ -7495,12 +7521,8 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         binding.textEndpointNow.setOnClickListener { showRouteScreen() }
         binding.textEndpointNow.setBackgroundResource(ripple.resourceId)
         s.simpleRouteCard.setOnClickListener { showRouteScreen() }
-        if (!premium) {
-            // В классическом облике нет кольца-кнопки: сканирование остаётся первой кнопкой,
-            // а отдельное включение/выключение туннеля сохраняем сразу под ней.
-            binding.btnTunnel.visibility = View.VISIBLE
-            return
-        }
+        binding.btnTunnel.visibility = if (premium) View.GONE else View.VISIBLE
+        if (!premium) return
 
         val sp = android.util.TypedValue.COMPLEX_UNIT_SP
         val accent = look.accent

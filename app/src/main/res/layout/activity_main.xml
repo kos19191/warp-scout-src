@@ -182,10 +182,9 @@
                             android:layout_width="match_parent"
                             android:layout_height="@dimen/button_primary"
                             android:layout_marginTop="@dimen/space_m"
-                            android:text="@string/btn_run"
-                            android:visibility="visible" />
+                            android:text="@string/btn_run" />
 
-                        <!-- В «Классическом» кольца нет — оставляем отдельное управление туннелем. -->
+                        <!-- В «Классическом» нет кольца-кнопки, поэтому сохраняем отдельный тумблер. -->
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/btnTunnel"
                             android:layout_width="match_parent"

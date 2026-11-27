@@ -17,8 +17,8 @@ import dev.warpscout.app.databinding.ScreenRouteBinding
 
 /**
  * Экран «Маршрут» (с 1.10.49-beta7): окно во весь экран поверх главного — схема на карте, шаги
- * маршрута и какие приложения через какой выход идут. Только показывает: всё, что здесь видно,
- * считает главный экран ([Info]) — тем же кодом, что и строку «где мы».
+ * маршрута и какие приложения через какой выход идут. Кнопка на схеме запускает новый подбор;
+ * состояние маршрута считает главный экран ([Info]) — тем же кодом, что и строку «где мы».
  */
 class RouteScreen(private val activity: Activity, private val onScan: () -> Unit) {
 
@@ -69,7 +69,6 @@ class RouteScreen(private val activity: Activity, private val onScan: () -> Unit
             v.routeRoot.background = bg
         }
         SystemBars.keepClear(v.routeRoot)
-        v.routeBack.setOnClickListener { dismiss() }
         v.routeMap.design = kind
         v.routeReplay.setOnClickListener {
             onScan()

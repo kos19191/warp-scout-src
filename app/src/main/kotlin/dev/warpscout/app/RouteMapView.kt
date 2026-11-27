@@ -149,7 +149,7 @@ class RouteMapView @JvmOverloads constructor(
         invalidate()
     }
 
-    /** Прорисовать линию заново (кнопка «Ещё раз»). */
+    /** Повторно запустить прорисовку линии маршрута. */
     fun play() {
         startedAt = SystemClock.uptimeMillis()
         updateTicker()

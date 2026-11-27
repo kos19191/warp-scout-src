@@ -29,15 +29,6 @@
             android:textAppearance="?attr/textAppearanceTitleLarge"
             android:textStyle="bold" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/routeBack"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="wrap_content"
-            android:layout_height="48dp"
-            android:contentDescription="@string/route_close"
-            android:minWidth="0dp"
-            android:text="@string/route_close" />
-
         <TextView
             android:id="@+id/routeState"
             android:layout_width="wrap_content"
