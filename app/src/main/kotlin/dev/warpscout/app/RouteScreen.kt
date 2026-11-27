@@ -70,9 +70,9 @@ class RouteScreen(private val activity: Activity, private val onScan: () -> Unit
         }
         SystemBars.keepClear(v.routeRoot)
         v.routeMap.design = kind
-        v.routeReplay.setOnClickListener {
+        v.routeScan.setOnClickListener {
+            dismiss()
             onScan()
-            v.routeMap.play()
         }
         render(info, first = true)
         d.setOnDismissListener {

@@ -5312,10 +5312,8 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         // «Туннелирование» (с 1.10.31) — на месте карточки скорости: приложения, сайты, списки.
         s.simpleCardTunnel.setOnClickListener { showAppsSheet() }
         s.simpleCardBackup.setOnClickListener { showBackupSheet() }
-        // Шапка: два частых действия — подобрать точку заново (на Wi-Fi заодно и для мобильной
-        // сети, не уходя с Wi-Fi) и проверить обновления (с 1.10.31; журнал выгружается только
-        // в расширенном виде).
-        s.simpleRescan.setOnClickListener { onSimpleRescanClick() }
+        // Проверка обновлений остаётся в шапке; подбор доступен на главной странице расширенного
+        // режима и со схемы маршрута.
         s.simpleUpdate.setOnClickListener { checkForUpdate() }
         s.simpleVersion.text = binding.textVersion.text
         // Один и тот же тумблер «Расширенный режим» в обоих видах (с 1.10.30): в упрощённом он
@@ -5417,25 +5415,6 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
             updateSimple()
         }.onFailure { t ->
             TunnelDebug.error("кнопка упрощённого экрана: " + SafeMode.describe(t))
-            banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
-        }
-    }
-
-    /**
-     * «Подобрать точку заново» из шапки. На Wi-Fi с SIM-картой — заодно и тройку для мобильной сети
-     * (через неё же, не уходя с Wi-Fi). Туннель на время замеров гаснет и возвращается сам.
-     */
-    private fun onSimpleRescanClick() {
-        runCatching {
-            if (engine.running) {
-                banner(getString(R.string.scan_busy_scan))
-                return
-            }
-            val onWifi = ConfigShortlist.group(TuningCache.transportOf(this)) == ConfigShortlist.GROUP_WIFI
-            val both = onWifi && CellularNetwork.maybeAvailable(this)
-            startScan(autoConnect = false, mode = if (both) Engine.SCAN_BOTH else Engine.SCAN_CURRENT)
-        }.onFailure { t ->
-            TunnelDebug.error("подбор из шапки: " + SafeMode.describe(t))
             banner(getString(R.string.banner_ui_error, SafeMode.describe(t)), error = true)
         }
     }
@@ -7775,8 +7754,8 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         runCatching {
             routeScreen?.dismiss()
             val screen = RouteScreen(this) {
+                showPage(TAB_START)
                 startScan(autoConnect = true)
-                refreshRouteScreen()
             }
             routeScreen = screen
             screen.show(routeInfo())

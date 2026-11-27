@@ -154,7 +154,7 @@
                 android:layout_weight="1"
                 android:divider="@android:color/transparent"
                 android:dividerHeight="0dp"
-                android:fastScrollEnabled="true" />
+                android:fastScrollEnabled="false" />
         </LinearLayout>
     </LinearLayout>
 

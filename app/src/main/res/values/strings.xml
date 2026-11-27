@@ -424,7 +424,6 @@
     <string name="backup_set">Резервная точка: %1$s</string>
     <string name="backup_cleared">Резервная точка не выбрана</string>
     <!-- 1.10.28: скорость, приложения и две тройки точек на упрощённом экране -->
-    <string name="simple_rescan_desc">Подобрать точку заново</string>
     <string name="simple_backup_title_net">Резервная · %1$s</string>
     <string name="net_wifi">Wi-Fi</string>
     <string name="net_mobile">мобильная</string>

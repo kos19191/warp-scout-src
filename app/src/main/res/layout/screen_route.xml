@@ -72,18 +72,18 @@
                         android:layout_width="match_parent"
                         android:layout_height="match_parent" />
 
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/routeReplay"
-                        style="@style/Widget.Material3.Button.TonalButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_gravity="bottom|end"
-                        android:layout_margin="10dp"
-                        android:text="@string/btn_run"
-                        app:icon="@drawable/ic_rescan"
-                        app:iconSize="18dp" />
                 </FrameLayout>
             </com.google.android.material.card.MaterialCardView>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/routeScan"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/button_secondary"
+                android:layout_marginTop="@dimen/space_s"
+                android:text="@string/btn_run"
+                app:icon="@drawable/ic_rescan"
+                app:iconSize="18dp" />
 
             <com.google.android.material.card.MaterialCardView
                 style="@style/Card.Section"
