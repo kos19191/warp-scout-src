@@ -3448,6 +3448,7 @@ class WarpVpnService : VpnService() {
         maxBytes: Int
     ): TelegramMedia.Fetch = TelegramMedia.fetch(
         resolve = { host -> network.getAllByName(host).mapNotNull { it.hostAddress } },
+        accept = { ip -> TelegramMedia.isTelegramIp(ip) || TelegramMedia.isSingBoxFakeIp(ip) },
         connector = TelegramMedia.Connector { ip, host, port, timeoutMs ->
             val raw = network.socketFactory.createSocket()
             try {
@@ -3537,10 +3538,10 @@ class WarpVpnService : VpnService() {
     }
 
     /**
-     * В бете 1.10.50-beta2 — ночной снимок только на Wi-Fi. Android не может увидеть из телефона,
-     * какой VPN или правила стоят в роутере; фиксируем доступный факт: сеть/шлюз, WARP-выход
-     * Cloudflare и загрузку медиа Telegram отдельно через WARP и второй выход. Пробы не меняют
-     * выбранный маршрут Telegram и ограничены 128 КБ на каждый путь.
+     * В бете 1.10.50-beta2/3 — ночной снимок только на Wi-Fi. Android не может увидеть из телефона,
+     * какой VPN или правила стоят в роутере; фиксируем доступный факт: сеть/шлюз, прямой Cloudflare trace,
+     * FakeIP DNS и загрузку медиа Telegram через роутер, WARP и второй выход. Пробы не меняют маршрут
+     * Telegram и ограничены 128 КБ на каждый путь; sing-box FakeIP принимается только в прямой пробе.
      */
     private val wifiDiagnosticBusy = java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -3620,6 +3621,17 @@ class WarpVpnService : VpnService() {
                 // обойдя VPN WilyScout. Это отделяет неисправность Podkop/роутера от проблем WARP.
                 val underlay = baselineNetwork
                 if (underlay != null) {
+                    val routerTelegramIp = runCatching {
+                        underlay.getAllByName("telegram.org").mapNotNull { it.hostAddress }
+                            .firstOrNull { ':' !in it }
+                    }.getOrNull()
+                    val routerDnsText = when {
+                        routerTelegramIp == null -> "DNS telegram.org через Wi-Fi-роутер: IPv4 не получен"
+                        dev.warpscout.core.net.TelegramMedia.isSingBoxFakeIp(routerTelegramIp) ->
+                            "DNS telegram.org через Wi-Fi-роутер: $routerTelegramIp (FakeIP sing-box/Podkop; проверяю с TLS-именем telegram.org)"
+                        else -> "DNS telegram.org через Wi-Fi-роутер: $routerTelegramIp"
+                    }
+                    TunnelDebug.stage(routerDnsText)
                     val routerTrace = cloudflareTraceOnNetwork(underlay)
                     val routerWarp = when {
                         routerTrace == null -> "роутерный Cloudflare trace: не ответил или ответ не распознан"
