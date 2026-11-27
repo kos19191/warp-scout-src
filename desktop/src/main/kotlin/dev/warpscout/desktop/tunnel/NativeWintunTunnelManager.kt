@@ -356,8 +356,33 @@ class NativeWintunTunnelManager(
         val secondParsed = if (secondExit.activeCandidate) {
             WgConf.toWarpConfig("second-exit", secondExit.confText)
         } else null
-        val secondCidrs = if (secondParsed != null) ExitRouter.parse(secondExit.cidrsCsv) else emptyList()
-        val exitRouter = if (secondParsed != null && secondCidrs.isNotEmpty()) ExitRouter.of(secondCidrs) else ExitRouter.EMPTY
+        val secondBypassIps = if (secondParsed != null) resolveIpv4s(secondParsed.endpoint.host) else emptyList()
+        val rawSecondCidrs = if (secondParsed != null) ExitRouter.parse(secondExit.cidrsCsv) else emptyList()
+        val isAllForeignSecond = rawSecondCidrs.any { it.trim() == "0.0.0.0/0" }
+        val secondHasIpv6 = secondParsed != null && secondParsed.account.ipv6.isNotBlank()
+        // Защита от петли в Double-Hop и защита от отправки IPv6 в IPv4-only второй туннель (ProtonVPN):
+        //  1. Если у второго выхода нет IPv6 — фильтруем IPv6 CIDR.
+        //  2. Всегда вырезаем IP самого сервера второго выхода из ExitRouter, чтобы даже с 0.0.0.0/0
+        //     UDP-пакеты к серверу второго выхода шли в lane0 (WARP), а не зацикливались в lane1.
+        val sanitizedSecondCidrs = if (secondParsed != null && rawSecondCidrs.isNotEmpty()) {
+            val filtered = rawSecondCidrs.filter { secondHasIpv6 || ':' !in it }
+            val afterExclude = if (secondBypassIps.isNotEmpty()) {
+                ExitRouter.parse(CidrMath.excludeIpv4(filtered.joinToString(", "), secondBypassIps))
+            } else {
+                filtered
+            }
+            afterExclude
+        } else {
+            emptyList()
+        }
+        val exitRouter = if (secondParsed != null && sanitizedSecondCidrs.isNotEmpty()) {
+            ExitRouter.of(sanitizedSecondCidrs)
+        } else {
+            ExitRouter.EMPTY
+        }
+        // При пресете «Весь зарубежный трафик» (0.0.0.0/0) не прокидываем 0.0.0.0/0 в extraCidrs Wintun,
+        // чтобы режим «Обход РФ» сохранялся: российские сайты идут напрямую, зарубежные — в Wintun → Второй выход.
+        val secondExtraRouteCidrs = if (isAllForeignSecond) emptyList() else exitRouter.cidrs
 
         for (offset in 0 until total) {
             if (cancelRequested.get()) {
@@ -389,12 +414,10 @@ class NativeWintunTunnelManager(
             teardownActiveSession()
 
             // 1. Определяем IP текущей точки WARP (и Второго выхода) и добавляем /32 bypass-маршруты через физический шлюз.
-            val bypassTargets = buildList {
-                addAll(resolveIpv4s(cfg.endpoint.host))
-                if (secondParsed != null) addAll(resolveIpv4s(secondParsed.endpoint.host))
-            }
+            val warpBypassIps = resolveIpv4s(cfg.endpoint.host)
+            val initialBypassTargets = (warpBypassIps + secondBypassIps).distinct()
             if (!skipNetConfig) {
-                val added = netConfig.addBypassHostRoutes(bypassTargets, physicalGateway)
+                val added = netConfig.addBypassHostRoutes(initialBypassTargets, physicalGateway)
                 bypassRoutesAdded.addAll(added)
             }
 
@@ -419,7 +442,14 @@ class NativeWintunTunnelManager(
             }
             activeTun = tun
 
-            val useIpv6 = !skipNetConfig && netConfig.shouldEnableIpv6(cfg.allowedIps, cfg.enableIpv6Address)
+            val useSecondExit = !exitRouter.isEmpty && secondParsed != null
+            // Если Второй выход работает только по IPv4 (например ProtonVPN 10.2.0.2/32), отключаем IPv6
+            // на Wintun-адаптере, чтобы браузер не уходил на ChatGPT/AI по IPv6 через WARP в обход Второго выхода.
+            val disableIpv6ForSecond = useSecondExit && !secondHasIpv6
+            val useIpv6 = !skipNetConfig && !disableIpv6ForSecond && netConfig.shouldEnableIpv6(cfg.allowedIps, cfg.enableIpv6Address)
+            if (disableIpv6ForSecond) {
+                onLog("[Второй выход] Сервер только IPv4 — отключаю IPv6 на адаптере, чтобы исключить утечку в WARP")
+            }
             if (!skipNetConfig) {
                 val cfgRes = netConfig.configureAdapter(
                     adapterName = ADAPTER_NAME,
@@ -440,7 +470,6 @@ class NativeWintunTunnelManager(
             // 3. Подключаем DataPlane (один выход или два выхода через ExitRouter + TunDispatcher).
             val upLatch = CountDownLatch(1)
             val fatalTriggered = AtomicBoolean(false)
-            val useSecondExit = !exitRouter.isEmpty && secondParsed != null
 
             val lane0: PacketQueueIn?
             val lane1: PacketQueueIn?
@@ -497,8 +526,13 @@ class NativeWintunTunnelManager(
             }
 
             // 4. Если настроен Второй выход — запускаем TunDispatcher и второй DataPlane на том же адаптере!
+            //    Сначала пробуем прямой WireGuard; если ТСПУ режет UDP 51820 — автоматически переключаемся
+            //    на Double-Hop поверх уже работающего WARP (с TCP MSS clamping 1160 и ICMP PMTU 1200).
             var secondUp = false
+            var secondViaWarp = false
             var secondServer = ""
+            var secondError = ""
+            var routesApplied = false
             if (useSecondExit && secondParsed != null && lane0 != null && lane1 != null) {
                 val dispatcher = TunDispatcher(
                     tun = tun.input,
@@ -509,71 +543,139 @@ class NativeWintunTunnelManager(
                 activeDispatcher = dispatcher
                 Thread(dispatcher, "ws-desktop-dispatch").apply { isDaemon = true; start() }
 
-                val secondLatch = CountDownLatch(1)
-                val udp2 = runCatching { udpFactory(secondParsed.endpoint) }.getOrNull()
-                if (udp2 != null) {
-                    val primaryIpBytes = Ipv4Nat.ipv4Bytes(cfg.account.ipv4)
-                    val secondaryIpBytes = Ipv4Nat.ipv4Bytes(secondParsed.account.ipv4)
-                    val needNat = primaryIpBytes != null && secondaryIpBytes != null && !primaryIpBytes.contentEquals(secondaryIpBytes)
-                    val secondIn = if (needNat) NatRewriteInputStream(lane1, primaryIpBytes!!, secondaryIpBytes!!) else lane1
-                    val secondOut = if (needNat) NatRewriteOutputStream(tunOutShared, primaryIpBytes!!, secondaryIpBytes!!) else tunOutShared
-                    if (needNat) {
-                        onLog("[Второй выход] 1:1 IPv4 NAT активен (${cfg.account.ipv4} ↔ ${secondParsed.account.ipv4})")
-                    }
+                val primaryIpBytes = Ipv4Nat.ipv4Bytes(cfg.account.ipv4)
+                val secondaryIpBytes = Ipv4Nat.ipv4Bytes(secondParsed.account.ipv4)
+                val needNat = primaryIpBytes != null && secondaryIpBytes != null && !primaryIpBytes.contentEquals(secondaryIpBytes)
+                if (needNat) {
+                    onLog("[Второй выход] 1:1 IPv4 NAT активен (${cfg.account.ipv4} ↔ ${secondParsed.account.ipv4})")
+                }
+
+                fun launchSecondAttempt(viaWarp: Boolean, timeoutMs: Long): Boolean {
+                    val latch = CountDownLatch(1)
+                    val udp2 = runCatching { udpFactory(secondParsed.endpoint) }.getOrNull() ?: return false
+                    val maxMss = if (viaWarp) Ipv4Nat.DOUBLE_HOP_MAX_TCP_MSS else 0
+                    val pmtu = if (viaWarp) Ipv4Nat.DOUBLE_HOP_PMTU else 0
+                    val secondIn = if (needNat || viaWarp) {
+                        NatRewriteInputStream(
+                            delegate = lane1,
+                            primaryIpv4 = primaryIpBytes,
+                            secondaryIpv4 = secondaryIpBytes,
+                            maxTcpMss = maxMss,
+                            pmtuLimit = pmtu,
+                            pmtuFeedbackOut = if (viaWarp) tunOutShared else null
+                        )
+                    } else lane1
+                    val secondOut = if (needNat || viaWarp) {
+                        NatRewriteOutputStream(
+                            delegate = tunOutShared,
+                            primaryIpv4 = primaryIpBytes,
+                            secondaryIpv4 = secondaryIpBytes,
+                            maxTcpMss = maxMss
+                        )
+                    } else tunOutShared
+
                     val plane2 = DataPlane(
                         udp = udp2,
                         tunInput = secondIn,
                         tunOutput = secondOut,
                         config = secondParsed,
-                        settings = NetSettings(attempts = 3, timeoutMs = 1500),
-                        onTunnelUp = { secondLatch.countDown() },
+                        settings = NetSettings(attempts = 3, timeoutMs = 1300),
+                        onTunnelUp = { latch.countDown() },
                         screenOn = { true },
                         log = { msg -> onLog("[Второй выход] $msg") },
                         onFatal = { reason ->
                             onLog("Второй выход отключился ($reason) — трафик возвращён в WARP")
                             runCatching { lane1.close() }
-                            update { it.copy(secondExitActive = false, secondExitServer = "") }
+                            update {
+                                it.copy(
+                                    secondExitActive = false,
+                                    secondExitServer = "",
+                                    secondExitViaWarp = false,
+                                    secondExitError = "Сессия прервалась ($reason)"
+                                )
+                            }
                         }
                     )
                     secondaryPlane = plane2
-                    Thread({
-                        val ok2 = plane2.run()
-                        secondLatch.countDown()
-                        if (!ok2) {
-                            runCatching { lane1.close() }
-                        }
-                    }, "ws-desktop-plane2").apply { isDaemon = true; start() }
+                    val attemptThread = Thread({
+                        plane2.run()
+                        latch.countDown()
+                    }, if (viaWarp) "ws-desktop-plane2-warp" else "ws-desktop-plane2-direct").apply {
+                        isDaemon = true
+                        start()
+                    }
 
-                    val hs2 = runCatching { secondLatch.await(minOf(handshakeWaitMs, 6000L), TimeUnit.MILLISECONDS) }.getOrDefault(false)
-                    if (hs2 && plane2.handshakeOk) {
+                    val hsOk = runCatching { latch.await(timeoutMs, TimeUnit.MILLISECONDS) }.getOrDefault(false)
+                    if (hsOk && plane2.handshakeOk) {
+                        return true
+                    }
+                    runCatching { plane2.stop() }
+                    runCatching { attemptThread.join(400) }
+                    if (secondaryPlane === plane2) secondaryPlane = null
+                    return false
+                }
+
+                // Попытка 1: прямой WireGuard (быстрый таймаут 3.5 с).
+                val directOk = launchSecondAttempt(viaWarp = false, timeoutMs = minOf(handshakeWaitMs, 3500L))
+                if (directOk) {
+                    secondUp = true
+                    secondViaWarp = false
+                    secondServer = secondParsed.endpoint.render()
+                    onLog("Второй выход активен напрямую: $secondServer (${exitRouter.size} подсетей)")
+                } else if (!cancelRequested.get()) {
+                    // Попытка 2: Double-Hop поверх уже работающего AmneziaWG/WARP (обход блокировки ТСПУ на UDP 51820!).
+                    onLog("[Второй выход] Прямой WireGuard к ${secondParsed.endpoint.render()} не ответил (вероятно, блокировка ТСПУ) — запускаю поверх WARP (Double-Hop)…")
+                    if (!skipNetConfig) {
+                        if (secondBypassIps.isNotEmpty()) {
+                            netConfig.removeBypassHostRoutes(secondBypassIps, physicalGateway)
+                            bypassRoutesAdded.removeAll(secondBypassIps.toSet())
+                        }
+                        val routeRes = netConfig.applyRoutes(
+                            adapterName = ADAPTER_NAME,
+                            allowedIpsCsv = cfg.allowedIps,
+                            extraCidrs = (secondExtraRouteCidrs + secondBypassIps.map { "$it/32" }).distinct(),
+                            enableIpv6 = useIpv6,
+                            adapterLuid = tun.adapterLuid,
+                            excludeIpv4s = warpBypassIps
+                        )
+                        routesApplied = true
+                        if (!routeRes.ok) {
+                            onLog("Предупреждение при установке маршрутов Double-Hop: ${routeRes.combined.take(160)}")
+                        }
+                    }
+
+                    val warpHopOk = launchSecondAttempt(viaWarp = true, timeoutMs = minOf(handshakeWaitMs, 6500L))
+                    if (warpHopOk) {
                         secondUp = true
+                        secondViaWarp = true
                         secondServer = secondParsed.endpoint.render()
-                        onLog("Второй выход активен: $secondServer (${exitRouter.size} подсетей)")
+                        onLog("Второй выход активен поверх WARP (Double-Hop): $secondServer (${exitRouter.size} подсетей, MSS=${Ipv4Nat.DOUBLE_HOP_MAX_TCP_MSS})")
                     } else {
-                        onLog("Второй выход (${secondParsed.endpoint.render()}) не ответил — маршруты идут через WARP")
-                        runCatching { plane2.stop() }
+                        secondError = "Сервер ${secondParsed.endpoint.render()} не ответил ни напрямую, ни через WARP — проверьте ключи или скачайте новый .conf"
+                        onLog("Второй выход (${secondParsed.endpoint.render()}) не ответил даже поверх WARP — маршруты идут через WARP")
                         runCatching { lane1.close() }
-                        secondaryPlane = null
                     }
                 } else {
                     runCatching { lane1.close() }
                 }
             }
 
-            // 5. Handshake подтверждён — накатываем маршруты туннеля на Wintun-адаптер!
-            // Обязательно вырезаем IP точек (bypassTargets) из маршрутов Wintun — петля невозможна.
-            if (!skipNetConfig) {
+            // 5. Handshake подтверждён — накатываем маршруты туннеля на Wintun-адаптер (если ещё не накатили для Double-Hop)!
+            if (!skipNetConfig && !routesApplied) {
                 val routeRes = netConfig.applyRoutes(
                     adapterName = ADAPTER_NAME,
                     allowedIpsCsv = cfg.allowedIps,
-                    extraCidrs = if (secondUp) exitRouter.cidrs else emptyList(),
+                    extraCidrs = if (secondUp) secondExtraRouteCidrs else emptyList(),
                     enableIpv6 = useIpv6,
                     adapterLuid = tun.adapterLuid,
-                    excludeIpv4s = bypassTargets
+                    excludeIpv4s = if (secondUp && !secondViaWarp) initialBypassTargets else warpBypassIps
                 )
                 if (!routeRes.ok) {
                     onLog("Предупреждение при установке маршрутов: ${routeRes.combined.take(160)}")
                 }
+            }
+            if (!skipNetConfig) {
+                runCatching { netConfig.flushDns() }
             }
 
             resetCounters()
@@ -594,6 +696,8 @@ class NativeWintunTunnelManager(
                     handshakeAgeSec = 0L,
                     secondExitActive = secondUp,
                     secondExitServer = secondServer,
+                    secondExitViaWarp = secondViaWarp,
+                    secondExitError = secondError,
                     statusMessage = "Туннель работает: ${cfg.endpoint.render()}",
                     lastError = null,
                     advice = null,

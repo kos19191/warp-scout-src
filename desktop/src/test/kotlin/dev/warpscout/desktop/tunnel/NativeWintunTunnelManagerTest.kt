@@ -283,4 +283,76 @@ class NativeWintunTunnelManagerTest {
         win.mark(4999L)
         assertFalse(win.isAcceptable(4999L))
     }
+
+    @Test
+    fun `second exit automatically falls back to Double-Hop over WARP when direct WireGuard is blocked`() {
+        val warpSrvPriv = Crypto.generatePrivateKey()
+        val warpSrvPub = Crypto.publicKey(warpSrvPriv)
+        val protonSrvPriv = Crypto.generatePrivateKey()
+        val protonSrvPub = Crypto.publicKey(protonSrvPriv)
+        val protonClientPriv = Crypto.generatePrivateKey()
+
+        val warpEp = Endpoint("188.114.96.4", 854)
+        val protonEp = Endpoint("217.138.213.2", 51820)
+        val primaryCfg = testConfig(warpEp, warpSrvPub)
+
+        val protonConfText = """
+            [Interface]
+            PrivateKey = ${Base64.getEncoder().encodeToString(protonClientPriv)}
+            Address = 10.2.0.2/32
+            DNS = 10.2.0.1
+
+            [Peer]
+            # CA-FREE#20
+            PublicKey = ${Base64.getEncoder().encodeToString(protonSrvPub)}
+            AllowedIPs = 0.0.0.0/0
+            Endpoint = ${protonEp.render()}
+        """.trimIndent()
+
+        var protonAttempts = 0
+        val manager = NativeWintunTunnelManager(
+            nativeDir = File(System.getProperty("java.io.tmpdir")),
+            runner = FakeCommandRunner(elevated = true),
+            tunFactory = { name -> InMemoryTunDevice(name) },
+            udpFactory = { ep ->
+                when (ep) {
+                    warpEp -> ResponderUdpChannel(ep, warpEp, warpSrvPriv)
+                    protonEp -> {
+                        protonAttempts++
+                        if (protonAttempts == 1) {
+                            // 1-я попытка (прямой WireGuard): имитируем блокировку ТСПУ (полная тишина).
+                            ResponderUdpChannel(ep, Endpoint("0.0.0.0", 1), protonSrvPriv)
+                        } else {
+                            // 2-я попытка (Double-Hop поверх WARP): сервер ProtonVPN отвечает!
+                            ResponderUdpChannel(ep, protonEp, protonSrvPriv)
+                        }
+                    }
+                    else -> ResponderUdpChannel(ep, Endpoint("0.0.0.0", 1), warpSrvPriv)
+                }
+            },
+            exitProber = { ExitInfo(ip = "217.138.213.2", colo = "YYZ", country = "CA", warpOn = false) },
+            handshakeWaitMs = 2000L,
+            statsPollMs = 5000L,
+            requireElevationCheck = false,
+            skipNetConfig = true
+        )
+
+        try {
+            val ok = manager.connect(
+                primary = primaryCfg,
+                secondExit = SecondExitSpec(
+                    enabled = true,
+                    confText = protonConfText,
+                    cidrsCsv = "0.0.0.0/0"
+                )
+            )
+            assertTrue(ok, "Tunnel must connect")
+            assertEquals(2, protonAttempts, "Must try direct first, then Double-Hop over WARP")
+            assertTrue(manager.snapshot.secondExitActive, "Second exit must be active via Double-Hop")
+            assertTrue(manager.snapshot.secondExitViaWarp, "secondExitViaWarp must be true")
+            assertEquals(protonEp.render(), manager.snapshot.secondExitServer)
+        } finally {
+            manager.shutdown()
+        }
+    }
 }

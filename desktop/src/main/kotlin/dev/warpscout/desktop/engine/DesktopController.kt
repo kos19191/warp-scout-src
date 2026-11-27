@@ -1138,20 +1138,25 @@ class DesktopController(
         _state.update { it.copy(secondExitBusy = true, secondExitStatus = "Разворачиваю ${domains.size} доменов через DoH…") }
         auxWorker.execute {
             try {
+                val secondParsed = WgConf.toWarpConfig("second-exit", _state.value.settings.secondExitConf)
+                val includeIpv6 = secondParsed == null || secondParsed.account.ipv6.isNotBlank()
                 val resolved = AllowListPlanner.resolveAll(domains)
                 val cidrs = LinkedHashSet<String>()
                 var unresolvedCount = 0
                 for ((_, ips) in resolved) {
                     if (ips.isEmpty()) unresolvedCount++
                     for (ip in ips) {
-                        if (':' in ip) cidrs.add("$ip/128")
-                        else if (Regex("""^\d+\.\d+\.\d+\.\d+$""").matches(ip)) cidrs.add("$ip/32")
+                        if (':' in ip) {
+                            if (includeIpv6) cidrs.add("$ip/128")
+                        } else if (Regex("""^\d+\.\d+\.\d+\.\d+$""").matches(ip)) {
+                            cidrs.add("$ip/32")
+                        }
                     }
                 }
                 val csv = cidrs.joinToString(", ")
                 updateSettings { it.copy(secondExitCidrs = csv) }
                 val msg = if (cidrs.isEmpty()) "Адреса не найдены (проверьте интернет)"
-                else "Найдено подсетей: ${cidrs.size} (доменов: ${domains.size}" +
+                else "Найдено IPv4-адресов: ${cidrs.size} (доменов: ${domains.size}" +
                     if (unresolvedCount > 0) ", не разрешилось: $unresolvedCount)" else ")"
                 appendLog("Второй выход: $msg", if (cidrs.isNotEmpty()) LogLevel.OK else LogLevel.WARN)
                 _state.update { it.copy(secondExitBusy = false, secondExitStatus = msg) }
@@ -1263,7 +1268,11 @@ class DesktopController(
         }
         if (preset.builtInCidrs.isNotBlank()) {
             val count = SplitRoutes.prefixesOf(preset.builtInCidrs).size
-            val msg = "Пресет «${preset.title}»: добавлено $count готовых официальных подсетей — можно нажимать «Применить»"
+            val msg = if (preset == SecondExitPreset.ALL_FOREIGN) {
+                "Пресет «${preset.title}»: весь зарубежный трафик пойдёт через 2-й выход (при «Обходе РФ» российские сайты остаются напрямую) — нажмите «Применить»"
+            } else {
+                "Пресет «${preset.title}»: добавлено $count готовых официальных подсетей — нажмите «Применить»"
+            }
             appendLog(msg, LogLevel.OK)
             _state.update { it.copy(secondExitStatus = msg) }
             showBanner(msg)

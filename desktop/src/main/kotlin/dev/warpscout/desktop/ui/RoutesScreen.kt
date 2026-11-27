@@ -289,6 +289,34 @@ fun RoutesScreen(state: DesktopUiState, controller: DesktopController) {
                     }
                 }
 
+                // Живой статус подключения Второго выхода (напрямую, через WARP Double-Hop или отказ).
+                if (state.tunnel.isUp && s.secondExitEnabled) {
+                    val active = state.tunnel.secondExitActive
+                    val badgeColor = if (active) warp.ok else warp.warn
+                    val liveText = when {
+                        active && state.tunnel.secondExitViaWarp ->
+                            "● Активен через WARP (Double-Hop · обход ТСПУ): ${state.tunnel.secondExitServer}"
+                        active ->
+                            "● Активен напрямую: ${state.tunnel.secondExitServer}"
+                        state.tunnel.secondExitError.isNotBlank() ->
+                            "⚠ Второй выход не поднялся — трафик идёт через WARP. ${state.tunnel.secondExitError}"
+                        else ->
+                            "⚠ Второй выход не активен — нажмите «Применить» для переподключения"
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = badgeColor.copy(alpha = 0.13f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = liveText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = badgeColor,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+
                 OutlinedTextField(
                     value = s.secondExitConf,
                     onValueChange = { v -> controller.updateSettings { it.copy(secondExitConf = v) } },
@@ -357,9 +385,16 @@ fun RoutesScreen(state: DesktopUiState, controller: DesktopController) {
                 }
 
                 val cidrCount = SplitRoutes.prefixesOf(s.secondExitCidrs).size
+                val isAllForeign = SplitRoutes.prefixesOf(s.secondExitCidrs).any { it == "0.0.0.0/0" }
                 Text(
-                    if (cidrCount > 0) "Собрано подсетей для второго выхода: $cidrCount. Если сервер не ответит (например, порт 51820 режется провайдером), трафик автоматически вернётся в WARP."
-                    else "Адреса ещё не собраны — нажмите «Telegram (готовые IP)» или «Собрать IP через DoH».",
+                    when {
+                        isAllForeign ->
+                            "Выбран режим «Весь зарубежный трафик» (при «Обходе РФ» российские сайты идут напрямую). Если ТСПУ блокирует UDP 51820, WilyScout автоматически запустит второй выход поверх WARP (Double-Hop)."
+                        cidrCount > 0 ->
+                            "Собрано подсетей для второго выхода: $cidrCount. Если ТСПУ режет прямой WireGuard (UDP 51820), WilyScout автоматически пустит второй выход поверх WARP (Double-Hop)."
+                        else ->
+                            "Адреса ещё не собраны — выберите «Весь зарубежный трафик», «Telegram (готовые IP)» или нажмите «Собрать IP через DoH»."
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

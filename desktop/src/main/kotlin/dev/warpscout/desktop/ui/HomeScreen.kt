@@ -486,10 +486,30 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Icon(Icons.Rounded.AltRoute, contentDescription = null, tint = warp.ok, modifier = Modifier.size(16.dp))
+                            val modeTag = if (state.tunnel.secondExitViaWarp) " · через WARP (обход ТСПУ)" else " · напрямую"
                             Text(
-                                "Второй выход активен: ${state.tunnel.secondExitServer}",
+                                "Второй выход активен: ${state.tunnel.secondExitServer}$modeTag",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = warp.ok
+                            )
+                        }
+                    }
+                } else if (state.tunnel.secondExitError.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = warp.warn.copy(alpha = 0.12f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(Icons.Rounded.AltRoute, contentDescription = null, tint = warp.warn, modifier = Modifier.size(16.dp))
+                            Text(
+                                "Второй выход не ответил — трафик идёт через WARP",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = warp.warn
                             )
                         }
                     }

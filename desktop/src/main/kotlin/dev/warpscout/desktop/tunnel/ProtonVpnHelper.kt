@@ -20,6 +20,14 @@ enum class SecondExitPreset(
     val domains: String,
     val builtInCidrs: String = ""
 ) {
+    ALL_FOREIGN(
+        id = "all_foreign",
+        title = "Весь зарубежный трафик",
+        domains = "",
+        // 0.0.0.0/0 внутри ExitRouter (с автоматическим вырезанием IP сервера ProtonVPN) направляет
+        // весь зарубежный трафик из Wintun в ProtonVPN (при «Обходе РФ» российские сайты остаются напрямую!).
+        builtInCidrs = "0.0.0.0/0"
+    ),
     TELEGRAM(
         id = "telegram",
         title = "Telegram",
@@ -42,7 +50,7 @@ enum class SecondExitPreset(
     AI(
         id = "ai",
         title = "ChatGPT / AI",
-        domains = "chatgpt.com, openai.com, api.openai.com, auth.openai.com, claude.ai, gemini.google.com, aistudio.google.com"
+        domains = "chatgpt.com, chat.openai.com, openai.com, api.openai.com, auth.openai.com, auth0.openai.com, ab.chatgpt.com, ws.chatgpt.com, cdn.oaistatic.com, oaiusercontent.com, claude.ai, anthropic.com, gemini.google.com, aistudio.google.com"
     ),
     SOCIAL_MEDIA(
         id = "social",
@@ -54,10 +62,9 @@ enum class SecondExitPreset(
 /**
  * Помощник для простого добавления ProtonVPN (и любых других WireGuard `.conf`):
  *  • распознаёт официальные конфиги ProtonVPN (`# NL-FREE#123`, `10.2.0.2`, `NetShield`, `Bouncing`);
- *  • даёт готовые пресеты маршрутов для Второго выхода (включая официальные CIDR Telegram без DoH);
- *  • реализует 1:1 IPv4 NAT (`Ipv4AddressRewriter`) с инкрементальным пересчётом IPv4/TCP/UDP checksums
- *    (RFC 1624), чтобы Второй выход с собственным внутренним IP (например `10.2.0.2` у ProtonVPN)
- *    корректно работал поверх Wintun-адаптера WARP (`172.16.0.2`).
+ *  • даёт готовые пресеты маршрутов для Второго выхода (включая «Весь зарубежный трафик» и Telegram CIDR);
+ *  • реализует 1:1 IPv4 NAT, TCP MSS clamping (RFC 1624) и ICMPv4 Fragmentation Needed (PMTU)
+ *    для стабильной работы ProtonVPN как напрямую, так и в режиме Double-Hop поверх WARP.
  */
 object ProtonVpnHelper {
     const val PROTON_WG_DOWNLOADS_URL = "https://account.protonvpn.com/downloads#wireguard-configuration"
@@ -83,7 +90,7 @@ object ProtonVpnHelper {
         )
     }
 
-    /** Извлекает имя сервера из комментариев ProtonVPN (например `# NL-FREE#123` или `# CH-DE#1`). */
+    /** Извлекает имя сервера из комментариев ProtonVPN (например `# NL-FREE#123` или `# CA-FREE#20`). */
     internal fun extractServerLabel(confText: String): String? {
         val serverRx = Regex("""^\s*#\s*([A-Z]{2}(?:-[A-Z]{2})?(?:-FREE)?#\d+(?:-[A-Z0-9]+)?)\s*$""")
         var inPeer = false
@@ -109,14 +116,21 @@ object ProtonVpnHelper {
 }
 
 /**
- * 1:1 IPv4 NAT для Второго выхода на одном Wintun-адаптере:
+ * 1:1 IPv4 NAT + TCP MSS clamping + ICMPv4 PMTU для Второго выхода на одном Wintun-адаптере:
  *  • исходящие пакеты (Wintun → второй DataPlane): переписывает `src IP` с IP основного туннеля (`172.16.0.2`)
  *    на IP второго туннеля (`10.2.0.2` у ProtonVPN);
- *  • входящие пакеты (второй DataPlane → Wintun): переписывает `dst IP` обратно (`10.2.0.2` → `172.16.0.2`).
- *
- * Контрольные суммы IPv4-заголовка, TCP и UDP (если ненулевая) пересчитываются инкрементально по RFC 1624.
+ *  • входящие пакеты (второй DataPlane → Wintun): переписывает `dst IP` обратно (`10.2.0.2` → `172.16.0.2`);
+ *  • в Double-Hop режиме (WARP → ProtonVPN): зажимает TCP MSS до 1160 байт (и шлёт ICMP Type 3 Code 4 MTU=1200
+ *    для негабаритных IPv4-пакетов), чтобы зашифрованные пакеты второго туннеля гарантированно
+ *    помещались в MTU Wintun (1280) без фрагментации.
  */
 object Ipv4Nat {
+    /** Безопасный TCP MSS для Double-Hop (1160 + 40 IP/TCP + 60 WG2 = 1260 <= 1280 Wintun MTU). */
+    const val DOUBLE_HOP_MAX_TCP_MSS = 1160
+
+    /** Максимальный размер внутреннего IPv4-пакета в Double-Hop до шифрования вторым WireGuard. */
+    const val DOUBLE_HOP_PMTU = 1200
+
     fun ipv4Bytes(ip: String): ByteArray? = runCatching {
         val b = InetAddress.getByName(ip.substringBefore('/').trim()).address
         if (b.size == 4) b else null
@@ -179,9 +193,135 @@ object Ipv4Nat {
         return true
     }
 
+    /**
+     * Зажимает TCP опцию MSS (Kind=2, Len=4) на IPv4 TCP SYN / SYN-ACK пакетах до [maxMss]
+     * с инкрементальным пересчётом TCP checksum (корректно для чётного и нечётного выравнивания).
+     */
+    fun clampTcpMss(packet: ByteArray, offset: Int, length: Int, maxMss: Int = DOUBLE_HOP_MAX_TCP_MSS): Boolean {
+        if (maxMss <= 0 || length < 44) return false
+        val version = (packet[offset].toInt() ushr 4) and 0x0F
+        if (version != 4) return false
+        val ihl = (packet[offset].toInt() and 0x0F) * 4
+        if (ihl < 20 || length < ihl + 24) return false
+        val proto = packet[offset + 9].toInt() and 0xFF
+        if (proto != 6) return false
+
+        val l4Pos = offset + ihl
+        val flags = packet[l4Pos + 13].toInt() and 0xFF
+        if ((flags and 0x02) == 0) return false // только SYN / SYN-ACK
+
+        val tcpHeaderLen = ((packet[l4Pos + 12].toInt() ushr 4) and 0x0F) * 4
+        if (tcpHeaderLen <= 20 || length < ihl + tcpHeaderLen) return false
+
+        var pos = l4Pos + 20
+        val end = l4Pos + tcpHeaderLen
+        while (pos < end) {
+            val kind = packet[pos].toInt() and 0xFF
+            if (kind == 0) break // EOL
+            if (kind == 1) { // NOP
+                pos += 1
+                continue
+            }
+            if (pos + 1 >= end) break
+            val optLen = packet[pos + 1].toInt() and 0xFF
+            if (optLen < 2 || pos + optLen > end) break
+            if (kind == 2 && optLen == 4) {
+                val valPos = pos + 2
+                val curMss = u16(packet, valPos)
+                if (curMss <= maxMss) return false
+
+                val rel = valPos - l4Pos
+                var tcpSum = u16(packet, l4Pos + 16)
+                if (rel % 2 == 0) {
+                    put16(packet, valPos, maxMss)
+                    tcpSum = updateChecksum16(tcpSum, curMss, maxMss)
+                } else {
+                    // Нечётное смещение относительно начала TCP-заголовка: затрагивает 2 выровненных 16-битных слова.
+                    val word1Pos = valPos - 1
+                    val word2Pos = valPos + 1
+                    val oldW1 = u16(packet, word1Pos)
+                    val oldW2 = if (word2Pos + 1 < offset + length) u16(packet, word2Pos)
+                    else ((packet[word2Pos].toInt() and 0xFF) shl 8)
+                    put16(packet, valPos, maxMss)
+                    val newW1 = u16(packet, word1Pos)
+                    val newW2 = if (word2Pos + 1 < offset + length) u16(packet, word2Pos)
+                    else ((packet[word2Pos].toInt() and 0xFF) shl 8)
+                    tcpSum = updateChecksum16(updateChecksum16(tcpSum, oldW1, newW1), oldW2, newW2)
+                }
+                put16(packet, l4Pos + 16, tcpSum)
+                return true
+            }
+            pos += optLen
+        }
+        return false
+    }
+
+    /**
+     * Формирует стандартный ICMPv4 Type 3 Code 4 (Fragmentation Needed, Next-Hop MTU = [nextHopMtu])
+     * в ответ на слишком большой исходящий IPv4-пакет в Double-Hop режиме.
+     */
+    fun buildIcmpFragNeeded(
+        origPacket: ByteArray,
+        offset: Int,
+        length: Int,
+        nextHopMtu: Int = DOUBLE_HOP_PMTU,
+        gatewayIpv4: ByteArray = byteArrayOf(172.toByte(), 16, 0, 1)
+    ): ByteArray? {
+        if (length < 20) return null
+        val version = (origPacket[offset].toInt() ushr 4) and 0x0F
+        if (version != 4) return null
+        val origIhl = (origPacket[offset].toInt() and 0x0F) * 4
+        if (origIhl < 20 || length < origIhl) return null
+        val origProto = origPacket[offset + 9].toInt() and 0xFF
+        if (origProto == 1) return null // не отвечаем ICMP на ICMP
+
+        val quotedLen = minOf(length, origIhl + 8)
+        val totalLen = 20 + 8 + quotedLen
+        val out = ByteArray(totalLen)
+
+        // IPv4 header
+        out[0] = 0x45
+        out[1] = 0
+        put16(out, 2, totalLen)
+        put16(out, 4, 0)
+        put16(out, 6, 0)
+        out[8] = 64
+        out[9] = 1 // ICMP
+        // src = gatewayIpv4, dst = origPacket.src
+        System.arraycopy(gatewayIpv4, 0, out, 12, 4)
+        System.arraycopy(origPacket, offset + 12, out, 16, 4)
+        put16(out, 10, checksum16(out, 0, 20))
+
+        // ICMP header: Type=3 (Dest Unreachable), Code=4 (Frag Needed), Next-Hop MTU
+        out[20] = 3
+        out[21] = 4
+        put16(out, 22, 0)
+        put16(out, 24, 0)
+        put16(out, 26, nextHopMtu)
+        System.arraycopy(origPacket, offset, out, 28, quotedLen)
+        put16(out, 22, checksum16(out, 20, 8 + quotedLen))
+        return out
+    }
+
     /** RFC 1624 инкрементальный пересчёт 16-битной контрольной суммы 1's complement. */
     internal fun updateChecksum16(oldSum: Int, oldWord: Int, newWord: Int): Int {
         var sum = (oldSum.inv() and 0xFFFF) + (oldWord.inv() and 0xFFFF) + (newWord and 0xFFFF)
+        while ((sum ushr 16) != 0) {
+            sum = (sum and 0xFFFF) + (sum ushr 16)
+        }
+        return sum.inv() and 0xFFFF
+    }
+
+    internal fun checksum16(buf: ByteArray, off: Int, len: Int): Int {
+        var sum = 0
+        var i = 0
+        while (i + 1 < len) {
+            sum += u16(buf, off + i)
+            i += 2
+        }
+        if (i < len) {
+            sum += (buf[off + i].toInt() and 0xFF) shl 8
+        }
         while ((sum ushr 16) != 0) {
             sum = (sum and 0xFFFF) + (sum ushr 16)
         }
@@ -197,37 +337,82 @@ object Ipv4Nat {
     }
 }
 
-/** Обёртка [InputStream] для второго DataPlane: переписывает `src IP` (primary → secondary). */
+/**
+ * Обёртка [InputStream] для второго DataPlane:
+ *  • опционально проверяет PMTU (для Double-Hop поверх WARP) и шлёт ICMP Fragmentation Needed;
+ *  • опционально зажимает TCP MSS на исходящих SYN;
+ *  • опционально переписывает `src IP` (primary → secondary, 1:1 NAT).
+ */
 class NatRewriteInputStream(
     private val delegate: InputStream,
-    private val primaryIpv4: ByteArray,
-    private val secondaryIpv4: ByteArray
+    private val primaryIpv4: ByteArray? = null,
+    private val secondaryIpv4: ByteArray? = null,
+    private val maxTcpMss: Int = 0,
+    private val pmtuLimit: Int = 0,
+    private val pmtuFeedbackOut: OutputStream? = null
 ) : InputStream() {
+    private val needNat = primaryIpv4 != null && secondaryIpv4 != null && !primaryIpv4.contentEquals(secondaryIpv4)
+
     override fun read(): Int = delegate.read()
 
     override fun read(b: ByteArray, off: Int, len: Int): Int {
-        val n = delegate.read(b, off, len)
-        if (n >= 20) {
-            Ipv4Nat.rewriteIpv4Address(b, off, n, addrFieldOffset = 12, expectedOld = primaryIpv4, replacementNew = secondaryIpv4)
+        while (true) {
+            val n = delegate.read(b, off, len)
+            if (n < 20) return n
+            if (pmtuLimit > 0 && n > pmtuLimit) {
+                val icmp = Ipv4Nat.buildIcmpFragNeeded(b, off, n, nextHopMtu = pmtuLimit)
+                if (icmp != null) {
+                    runCatching { pmtuFeedbackOut?.write(icmp) }
+                    continue
+                }
+            }
+            if (maxTcpMss > 0) {
+                Ipv4Nat.clampTcpMss(b, off, n, maxTcpMss)
+            }
+            if (needNat) {
+                Ipv4Nat.rewriteIpv4Address(
+                    b, off, n,
+                    addrFieldOffset = 12,
+                    expectedOld = primaryIpv4!!,
+                    replacementNew = secondaryIpv4!!
+                )
+            }
+            return n
         }
-        return n
     }
 
     override fun close() = delegate.close()
 }
 
-/** Обёртка [OutputStream] для второго DataPlane: переписывает `dst IP` (secondary → primary) перед записью в Wintun. */
+/**
+ * Обёртка [OutputStream] для второго DataPlane:
+ *  • опционально зажимает TCP MSS на входящих SYN-ACK;
+ *  • опционально переписывает `dst IP` (secondary → primary) перед записью в Wintun.
+ */
 class NatRewriteOutputStream(
     private val delegate: OutputStream,
-    private val primaryIpv4: ByteArray,
-    private val secondaryIpv4: ByteArray
+    private val primaryIpv4: ByteArray? = null,
+    private val secondaryIpv4: ByteArray? = null,
+    private val maxTcpMss: Int = 0
 ) : OutputStream() {
+    private val needNat = primaryIpv4 != null && secondaryIpv4 != null && !primaryIpv4.contentEquals(secondaryIpv4)
+
     override fun write(b: Int) = delegate.write(b)
 
     override fun write(b: ByteArray, off: Int, len: Int) {
-        if (len >= 20) {
+        if (len >= 20 && (needNat || maxTcpMss > 0)) {
             val copy = b.copyOfRange(off, off + len)
-            Ipv4Nat.rewriteIpv4Address(copy, 0, len, addrFieldOffset = 16, expectedOld = secondaryIpv4, replacementNew = primaryIpv4)
+            if (maxTcpMss > 0) {
+                Ipv4Nat.clampTcpMss(copy, 0, len, maxTcpMss)
+            }
+            if (needNat) {
+                Ipv4Nat.rewriteIpv4Address(
+                    copy, 0, len,
+                    addrFieldOffset = 16,
+                    expectedOld = secondaryIpv4!!,
+                    replacementNew = primaryIpv4!!
+                )
+            }
             delegate.write(copy, 0, len)
         } else {
             delegate.write(b, off, len)

@@ -47,6 +47,8 @@ data class TunnelSnapshot(
     val handshakeAgeSec: Long = -1L,
     val secondExitActive: Boolean = false,
     val secondExitServer: String = "",
+    val secondExitViaWarp: Boolean = false,
+    val secondExitError: String = "",
     val statusMessage: String = "Туннель выключен",
     val lastError: String? = null,
     val advice: String? = null,
