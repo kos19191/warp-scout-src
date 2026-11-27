@@ -60,7 +60,11 @@ class DpiRelay(
     private val timing: Timing = Timing(),
     /** Фейк (с 1.10.49-beta4, см. [FakeSender]); null — приёмы с фейком напрямую не открываются. */
     private val fake: FakeSender? = null,
-    /** Внешняя сеть имеет рабочий IPv6; при отсутствии соединения идут через туннель без DPI-разбора. */
+    /**
+     * У сети есть IPv6 напрямую (с 1.10.50-beta1). Нет — соединения по IPv6 не разбираем: напрямую им
+     * не открыться (журнал 26.11, Tele2: «нет маршрута до сервера» к адресам Google по IPv6 — 43 раза за
+     * день), а через туннель они и так идут сами, как до обхода.
+     */
     directV6: Boolean = true
 ) : PacketTap {
 
@@ -169,7 +173,7 @@ class DpiRelay(
 
     private val planGen = AtomicInteger(0)
 
-    /** Выключается также при обнаружении отсутствующего IPv6-маршрута напрямую. */
+    /** Разбирать ли соединения по IPv6 (см. directV6): выключается и сам — при «нет маршрута» по IPv6. */
     @Volatile
     private var v6Direct = directV6
 
@@ -292,7 +296,7 @@ class DpiRelay(
             return clock() - closedAt < LINGER_MS
         }
         if (key.sport in ownPorts) return false
-        // Без внешнего IPv6 такие соединения должны идти обычным путём через туннель.
+        // IPv6 напрямую нет — соединение идёт через туннель само, как до обхода (с 1.10.50-beta1).
         if (!v6Direct && ((packet[0].toInt() ushr 4) and 0x0F) == 6) return false
         val dst = key.dst
         val until = badIp[ipText(dst)]
@@ -727,7 +731,8 @@ class DpiRelay(
         } catch (e: Exception) {
             runCatching { s?.close() }
             if (stage == 0) lastConnectFailed.set(true)
-            // Нет маршрута для IPv6 — внешнего IPv6 у сети нет, это не ошибка DPI. Отключаем разбор IPv6.
+            // По IPv6 напрямую нет маршрута — у сети нет IPv6. Это не неудача приёма: сервис за неё не
+            // наказываем, а IPv6 дальше не разбираем (с 1.10.50-beta1).
             if (f.v6 && stage == 0 && noRoute(e)) {
                 noDirectV6(e)
                 return null

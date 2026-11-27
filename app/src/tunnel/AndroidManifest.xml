@@ -10,6 +10,11 @@
          поднимается сам (см. tunnel/TunnelAutoStart.kt). -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- С 1.10.50-beta1: туннель лёг, и сервис подбирает новую точку — на это время (не дольше двух
+         минут) телефону не дают уснуть, иначе с погашенным экраном подбор растягивался на десять
+         (см. WarpVpnService.acquireRescueWake). Работающий туннель так не держат. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <application>
         <!-- Туннель живёт в СВОЁМ процессе. Причина: интерфейс и VPN были в одном процессе,
              и любое падение экрана (а он тяжёлый: списки приложений, подбор, экспорт) гасило

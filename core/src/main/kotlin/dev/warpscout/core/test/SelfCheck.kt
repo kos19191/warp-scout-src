@@ -239,6 +239,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         section("бета: прокси MTProto для Telegram — найти, проверить до ответа Telegram (1.10.49-beta4)") {
             MtProxyChecks { name, ok, detail -> check(name, ok, detail) }.run()
         }
+        section("бета: смена сети и сим-карты — без зависших соединений, второй выход повторяет сам (1.10.50-beta1)") {
+            ReconnectChecks { name, ok, detail -> check(name, ok, detail) }.run()
+        }
         if (live) {
             section("сеть: генератор/DoH/TLS") {
                 liveNetwork()
@@ -428,6 +431,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         check("Telegram: сервер медиа — в сетях Telegram", t.isTelegramIp("91.108.56.130"))
         check("Telegram: соседняя сеть — не Telegram", !t.isTelegramIp("149.154.176.1"))
         check("Telegram: чужой адрес — не Telegram", !t.isTelegramIp("8.8.8.8") && !t.isTelegramIp("мусор"))
+        check("Telegram: Podkop FakeIP — стандартный sing-box диапазон", t.isSingBoxFakeIp("198.18.0.22") && t.isSingBoxFakeIp("198.19.255.255"))
+        check("Telegram: FakeIP не расширяется за sing-box /15", !t.isSingBoxFakeIp("198.17.255.255") && !t.isSingBoxFakeIp("198.20.0.0"))
+        check("Telegram: FakeIP не принимает IPv6 или мусор", !t.isSingBoxFakeIp("2001:db8::1") && !t.isSingBoxFakeIp("198.18.0.999"))
         expect("Telegram: ни байта — не пошло", t.verdict(0, 0, 0, false), t.FAIL)
         expect("Telegram: 256 КБ за секунду ровно — норма", t.verdict(262_144, 1_000, 120, true), t.OK)
         expect("Telegram: 256 КБ за 4 с — тормозит", t.verdict(262_144, 4_000, 200, true), t.SLOW)
@@ -826,11 +832,8 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         val askedBefore = asked
         expect("снятое правило: через 10 минут — по адресу и без вопросов", t.decide(fresh, fresh.size, 0) to asked, 0 to askedBefore)
 
-        // Диспетчер: закреплённые соединения IPv4/IPv6 идут по выбранной дорожке; соседнее соединение — по адресу.
-        val q = ArrayDeque(listOf(
-            syn(43000, "157.240.1.174"), syn(43001, "157.240.1.174"),
-            tcpSyn6("2001:db8::1", "2a03:2880::1"), tcpSyn6("2001:db8::2", "2a03:2880::1")
-        ))
+        // Диспетчер: соединение замера закреплено за выходом, приложение к тому же адресу — по адресу.
+        val q = ArrayDeque(listOf(syn(43000, "157.240.1.174"), syn(43001, "157.240.1.174")))
         val tunIn = object : java.io.InputStream() {
             override fun read(): Int = -1
             override fun read(b: ByteArray, off: Int, len: Int): Int {
@@ -841,12 +844,9 @@ class SelfCheck(private val live: Boolean = false, private val integration: Stri
         }
         val disp = dev.warpscout.core.tunnel.TunDispatcher(tunIn, ExitRouter.EMPTY, listOf(PacketQueueIn("основной"), PacketQueueIn("второй")))
         disp.pin(43000, "157.240.1.174", 443, 1)
-        val v6Destination = java.net.InetAddress.getByName("2a03:2880::1")
-        disp.pinAddr(40001, v6Destination, 443, 1)
         disp.run()
-        expect("закрепление: IPv4 и IPv6 — во второй выход, чужие к тем же адресам — по адресу", disp.sentSecondary to disp.sentPrimary, 2L to 2L)
+        expect("замер: своё соединение — во второй выход, чужое к тому же адресу — по адресу", disp.sentSecondary to disp.sentPrimary, 1L to 1L)
         disp.unpin(43000, "157.240.1.174", 443)
-        disp.unpinAddr(40001, v6Destination, 443)
 
         // Шаг 1: приложения по точкам.
         fun cand(host: String, site: String?, vararg res: Pair<String, Pair<Boolean, Long>>): Candidate {

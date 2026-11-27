@@ -176,8 +176,7 @@ object TunnelDebug {
             while (lines.size > MAX_LINES) lines.removeFirst()
         }
         appendToJournal(full)
-        // В стабильной сборке подробный журнал остаётся в файле приложения; не дублируем каждую
-        // строку в системный logcat, чтобы не засорять общий журнал устройства.
+        runCatching { android.util.Log.i(TAG, line) }
     }
 
     /** Дописать строку в общий журнал. Ошибки записи не должны влиять на туннель. */
@@ -316,6 +315,7 @@ object TunnelDebug {
         file.absolutePath
     }.getOrNull()
 
+    private const val TAG = "WarpScout/tunnel"
 }
 
 /**

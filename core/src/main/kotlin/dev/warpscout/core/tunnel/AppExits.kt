@@ -360,6 +360,9 @@ class AppExitTable(
     /** Названия приложений «только второй выход» — для строки журнала диспетчера. */
     fun strictNames(): String = strict.mapNotNull { names[it] }.distinct().sorted().joinToString(", ").ifBlank { "TikTok" }
 
+    /** Правило приложения, выбранное человеком ([AppExit.WARP] / [AppExit.SECOND]); нет — [AppExit.AUTO]. */
+    fun manualRuleOf(uid: Int): Int = rules[uid] ?: AppExit.AUTO
+
     /**
      * Что ушло во второй выход по правилу приложения: (название, пакетов, байт), больше всего — первым.
      * [sinceLast] — за интервал с прошлого такого вызова (строка статистики раз в 5 минут), иначе — за сессию.
