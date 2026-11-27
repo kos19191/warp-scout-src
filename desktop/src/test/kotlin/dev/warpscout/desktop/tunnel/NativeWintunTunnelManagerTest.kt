@@ -417,6 +417,11 @@ class NativeWintunTunnelManagerTest {
             assertEquals(1, protonAttempts, "preferViaWarp=true must skip direct attempt and connect via WARP immediately")
             assertTrue(manager.snapshot.secondExitActive)
             assertTrue(manager.snapshot.secondExitViaWarp)
+
+            // Горячее добавление новых IP в живой ExitRouter (и автоматическая защита от добавления IP ProtonVPN).
+            val added = manager.addCidrsToLiveRouter(listOf("104.18.32.47/32", "217.138.213.2/32"))
+            assertTrue("104.18.32.47/32" in added)
+            assertFalse("217.138.213.2/32" in added, "ProtonVPN endpoint IP must never be routed into lane1")
         } finally {
             manager.shutdown()
         }

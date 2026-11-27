@@ -359,12 +359,33 @@ fun RoutesScreen(state: DesktopUiState, controller: DesktopController) {
                         color = badgeColor.copy(alpha = 0.13f),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(
-                            text = liveText,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = badgeColor,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                        )
+                        Column(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Text(
+                                text = liveText,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = badgeColor
+                            )
+                            if (active && state.tunnel.secondExitCheckText.isNotBlank()) {
+                                val checkColor = when (state.tunnel.secondExitCheckOk) {
+                                    true -> warp.ok
+                                    false -> warp.warn
+                                    null -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                                val prefix = when (state.tunnel.secondExitCheckOk) {
+                                    true -> "✓ "
+                                    false -> "⚠ "
+                                    null -> "… "
+                                }
+                                Text(
+                                    text = prefix + state.tunnel.secondExitCheckText,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = checkColor
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -472,6 +493,16 @@ fun RoutesScreen(state: DesktopUiState, controller: DesktopController) {
                             if (secondAllForeign) "Применить (весь зарубежный)" else "Собрать адреса и применить",
                             style = MaterialTheme.typography.labelMedium
                         )
+                    }
+                    if (state.tunnel.isUp && state.tunnel.secondExitActive) {
+                        OutlinedButton(
+                            onClick = { controller.checkSecondExitNow() },
+                            enabled = !state.secondExitBusy
+                        ) {
+                            Icon(Icons.Rounded.Verified, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Проверить", style = MaterialTheme.typography.labelMedium)
+                        }
                     }
                 }
 

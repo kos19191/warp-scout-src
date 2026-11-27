@@ -30,7 +30,9 @@ data class SecondExitSpec(
     val enabled: Boolean = false,
     val confText: String = "",
     val cidrsCsv: String = "",
-    val preferViaWarp: Boolean = true
+    val preferViaWarp: Boolean = true,
+    /** Ключевые домены для автосинхронизации DNS на лету внутри поднятого туннеля. */
+    val syncHosts: List<String> = emptyList()
 ) {
     val activeCandidate: Boolean get() = enabled && confText.isNotBlank() && cidrsCsv.isNotBlank()
 }
@@ -50,6 +52,8 @@ data class TunnelSnapshot(
     val secondExitServer: String = "",
     val secondExitViaWarp: Boolean = false,
     val secondExitError: String = "",
+    val secondExitCheckOk: Boolean? = null,
+    val secondExitCheckText: String = "",
     val statusMessage: String = "Туннель выключен",
     val lastError: String? = null,
     val advice: String? = null,

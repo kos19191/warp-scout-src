@@ -12,12 +12,13 @@ import dev.warpscout.core.net.ResourceProber
 import dev.warpscout.core.tune.TunnelVerifier
 import dev.warpscout.core.tunnel.DataPlane
 import dev.warpscout.core.tunnel.ExitRouter
+import dev.warpscout.core.tunnel.IpPacket
 import dev.warpscout.core.tunnel.PacketQueueIn
 import dev.warpscout.core.tunnel.SharedPacketOut
 import dev.warpscout.core.tunnel.SocketUdpChannel
-import dev.warpscout.core.tunnel.TunDispatcher
 import dev.warpscout.core.tunnel.UdpChannel
 import java.io.File
+import java.io.InputStream
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.util.concurrent.CountDownLatch
@@ -25,6 +26,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Собственный встроенный туннель WarpScout для Windows — без установки AmneziaWG и сторонних VPN.
@@ -85,7 +87,21 @@ class NativeWintunTunnelManager(
     private var activeTun: TunDevice? = null
 
     @Volatile
-    private var activeDispatcher: TunDispatcher? = null
+    private var activeDispatcher: DynamicTunDispatcher? = null
+
+    private val activeExitRouterRef = AtomicReference<ExitRouter>(ExitRouter.EMPTY)
+
+    @Volatile
+    private var activeSecondBypassIps: List<String> = emptyList()
+
+    @Volatile
+    private var activeSecondHasIpv6: Boolean = false
+
+    @Volatile
+    private var activeSecondAllForeign: Boolean = false
+
+    @Volatile
+    private var activeSecondSyncHosts: List<String> = emptyList()
 
     @Volatile
     private var primaryPlane: DataPlane? = null
@@ -538,9 +554,14 @@ class NativeWintunTunnelManager(
             var secondError = ""
             var routesApplied = false
             if (useSecondExit && secondParsed != null && lane0 != null && lane1 != null) {
-                val dispatcher = TunDispatcher(
+                activeExitRouterRef.set(exitRouter)
+                activeSecondBypassIps = secondBypassIps
+                activeSecondHasIpv6 = secondHasIpv6
+                activeSecondAllForeign = isAllForeignSecond
+                activeSecondSyncHosts = secondExit.syncHosts
+                val dispatcher = DynamicTunDispatcher(
                     tun = tun.input,
-                    router = exitRouter,
+                    routerRef = activeExitRouterRef,
                     lanes = listOf(lane0, lane1),
                     log = { msg -> onLog("[маршрутизатор] $msg") }
                 )
@@ -714,6 +735,8 @@ class NativeWintunTunnelManager(
                     secondExitServer = secondServer,
                     secondExitViaWarp = secondViaWarp,
                     secondExitError = secondError,
+                    secondExitCheckOk = null,
+                    secondExitCheckText = if (secondUp) "Проверяю выход (chatgpt.com)…" else "",
                     statusMessage = "Туннель работает: ${cfg.endpoint.render()}",
                     lastError = null,
                     advice = null,
@@ -749,6 +772,17 @@ class NativeWintunTunnelManager(
             }
 
             startStatsPoller()
+
+            // Если Второй выход активен — сразу в отдельном потоке синхронизируем свежие IP из системного DNS
+            // внутри поднятого туннеля (чтобы chatgpt.com/openai.com 100% совпадали с DNS браузера!) и проверяем выход.
+            if (secondUp && !skipNetConfig) {
+                Thread({
+                    runCatching { Thread.sleep(250L) }
+                    if (snapshot.isUp && snapshot.secondExitActive && !cancelRequested.get()) {
+                        syncAndCheckSecondExit()
+                    }
+                }, "ws-second-verify").apply { isDaemon = true; start() }
+            }
             return true
         }
 
@@ -901,5 +935,218 @@ class NativeWintunTunnelManager(
                 .filter { CidrMath.parseIpv4(it) != null }
                 .distinct()
         }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Добавляет новые CIDR в живой [ExitRouter] Второго выхода без переподключения туннеля
+     * (с автоматическим вырезанием IP сервера Второго выхода для защиты от петли).
+     * Возвращает фактически добавленные новые CIDR.
+     */
+    internal fun addCidrsToLiveRouter(newCidrs: Collection<String>): List<String> {
+        if (newCidrs.isEmpty()) return emptyList()
+        val cur = activeExitRouterRef.get()
+        val existingSet = cur.cidrs.toHashSet()
+        val filtered = newCidrs
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && (activeSecondHasIpv6 || ':' !in it) }
+            .distinct()
+        val safe = if (activeSecondBypassIps.isNotEmpty()) {
+            ExitRouter.parse(CidrMath.excludeIpv4(filtered.joinToString(", "), activeSecondBypassIps))
+        } else {
+            filtered
+        }
+        val toAdd = safe.filter { it !in existingSet }
+        if (toAdd.isEmpty()) return emptyList()
+        val merged = ExitRouter.of((cur.cidrs + toAdd).distinct())
+        activeExitRouterRef.set(merged)
+        return toAdd
+    }
+
+    /**
+     * Синхронизирует DNS ключевых доменов Второго выхода прямо изнутри работающего туннеля
+     * (системный DNS Windows + 1.1.1.1 DoH + dns.google DoH) и проверяет реальный выход
+     * через `https://chatgpt.com/cdn-cgi/trace`.
+     */
+    fun syncAndCheckSecondExit(
+        extraHosts: List<String> = emptyList(),
+        onNewCidrs: (List<String>) -> Unit = {}
+    ): Boolean {
+        if (!snapshot.isUp || !snapshot.secondExitActive) return false
+        update { it.copy(secondExitCheckText = "Синхронизирую DNS и проверяю chatgpt.com…") }
+
+        // 1. Если не выбран «Весь зарубежный трафик», освежаем IP ключевых доменов из системного DNS + DoH.
+        val addedAll = LinkedHashSet<String>()
+        var chatgptIps = emptyList<String>()
+        if (!activeSecondAllForeign) {
+            val targets = (activeSecondSyncHosts + extraHosts + SecondExitCatalog.CHECK_HOST)
+                .map { it.trim().lowercase() }
+                .filter { it.isNotEmpty() && '.' in it }
+                .distinct()
+                .take(80)
+            val resolved = SecondExitCatalog.resolveBatch(targets, threads = 12) { host ->
+                SecondExitCatalog.resolveMultiSource(
+                    host = host,
+                    includeIpv6 = activeSecondHasIpv6,
+                    includeSystemDns = true
+                )
+            }
+            chatgptIps = resolved[SecondExitCatalog.CHECK_HOST].orEmpty()
+            val candidateCidrs = LinkedHashSet<String>()
+            for (ips in resolved.values) {
+                for (ip in ips) {
+                    val cidr = SecondExitCatalog.normalizeCidr(ip) ?: continue
+                    if (activeSecondHasIpv6 || ':' !in cidr) candidateCidrs.add(cidr)
+                }
+            }
+            val added = addCidrsToLiveRouter(candidateCidrs)
+            addedAll.addAll(added)
+            if (added.isNotEmpty()) {
+                val cgNote = if (chatgptIps.isNotEmpty()) " (chatgpt.com → ${chatgptIps.take(4).joinToString(", ")})" else ""
+                onLog("[Второй выход] Синхронизация DNS внутри туннеля: добавлено ${added.size} свежих IP$cgNote (всего в таблице: ${activeExitRouterRef.get().size})")
+                if (!skipNetConfig) runCatching { netConfig.flushDns() }
+                onNewCidrs(added)
+            } else if (chatgptIps.isNotEmpty()) {
+                val r = activeExitRouterRef.get()
+                val matched = chatgptIps.count { ip -> ExitRouter.ipBytes(ip)?.let { r.route(it) == 1 } == true }
+                onLog("[Второй выход] DNS-сверка: chatgpt.com → ${chatgptIps.take(4).joinToString(", ")} (в таблице: $matched/${chatgptIps.size})")
+            }
+        }
+
+        if (skipNetConfig) return true
+
+        // 2. Реальная проверка выхода через https://chatgpt.com/cdn-cgi/trace (до 2 попыток: если 1-я ушла в WARP,
+        //    добавляем точный системный IP chatgpt.com на лету и повторяем).
+        for (attempt in 1..2) {
+            val t0 = System.currentTimeMillis()
+            val resp = runCatching {
+                HttpClient(timeoutMs = 5500).get("https://${SecondExitCatalog.CHECK_HOST}/cdn-cgi/trace")
+            }.getOrNull()
+            val ms = (System.currentTimeMillis() - t0).coerceAtLeast(1L)
+
+            if (resp == null || resp.status !in 200..299) {
+                val errNote = if (resp == null) "таймаут / нет ответа (${ms} мс)" else "HTTP ${resp.status}"
+                onLog("[Второй выход] Проверка chatgpt.com: $errNote (пакетов через 2-й выход: ${activeDispatcher?.sentSecondary ?: 0})")
+                update {
+                    it.copy(
+                        secondExitCheckOk = false,
+                        secondExitCheckText = "chatgpt.com не ответил: $errNote"
+                    )
+                }
+                return false
+            }
+
+            val trace = TraceAndSpeed.parseCloudflareTrace(resp.body)
+            val ip = trace["ip"].orEmpty()
+            val loc = trace["loc"].orEmpty().uppercase()
+            val colo = trace["colo"].orEmpty().uppercase()
+            val warpOn = trace["warp"].equals("on", ignoreCase = true) || trace["warp"].equals("plus", ignoreCase = true)
+
+            if (!warpOn && ip.isNotBlank()) {
+                val place = buildString {
+                    if (loc.isNotBlank()) append(loc)
+                    if (colo.isNotBlank()) append(if (isNotEmpty()) " ($colo)" else colo)
+                    if (isEmpty()) append("2-й выход")
+                }
+                val text = "chatgpt.com → $place · IP $ip (${ms} мс)"
+                onLog("[Второй выход] Проверка chatgpt.com: ОК · $text · warp=off (пакетов через 2-й выход: ${activeDispatcher?.sentSecondary ?: 0})")
+                update {
+                    it.copy(
+                        secondExitCheckOk = true,
+                        secondExitCheckText = text
+                    )
+                }
+                return true
+            }
+
+            // Запрос ушёл через WARP! Добираем системные IP chatgpt.com и пробуем ещё раз.
+            val sysIps = resolveIpv4s(SecondExitCatalog.CHECK_HOST)
+            if (attempt == 1 && !activeSecondAllForeign && sysIps.isNotEmpty()) {
+                val addedRetry = addCidrsToLiveRouter(sysIps.map { "$it/32" })
+                if (addedRetry.isNotEmpty()) {
+                    addedAll.addAll(addedRetry)
+                    onNewCidrs(addedRetry)
+                    onLog("[Второй выход] chatgpt.com на 1-й проверке ушёл в WARP — добавил ${addedRetry.joinToString(", ")} в таблицу, повторяю проверку…")
+                    continue
+                }
+            }
+
+            val warnText = "chatgpt.com ушёл в WARP ($ip) — выберите «Весь зарубежный трафик» или нажмите «Проверить выход»"
+            onLog(
+                "[Второй выход] Проверка chatgpt.com: ушло через WARP (IP=$ip, loc=$loc, sysIps=${sysIps.joinToString(",")}, " +
+                    "пакетов во 2-й выход=${activeDispatcher?.sentSecondary ?: 0}, таблица=${activeExitRouterRef.get().size})"
+            )
+            update {
+                it.copy(
+                    secondExitCheckOk = false,
+                    secondExitCheckText = warnText
+                )
+            }
+            return false
+        }
+        return false
+    }
+}
+
+/**
+ * Диспетчер пакетов Wintun с горячей заменой таблицы [ExitRouter] через [AtomicReference],
+ * чтобы новые IP из системного DNS добавлялись во Второй выход на лету без переподключения туннеля.
+ */
+internal class DynamicTunDispatcher(
+    private val tun: InputStream,
+    private val routerRef: AtomicReference<ExitRouter>,
+    private val lanes: List<PacketQueueIn>,
+    private val log: (String) -> Unit = {}
+) : Runnable {
+
+    @Volatile
+    private var stopped = false
+
+    @Volatile
+    var sentPrimary: Long = 0L
+        private set
+
+    @Volatile
+    var sentSecondary: Long = 0L
+        private set
+
+    @Volatile
+    var dropped: Long = 0L
+        private set
+
+    fun stop() {
+        stopped = true
+        lanes.forEach { runCatching { it.close() } }
+    }
+
+    override fun run() {
+        val buf = ByteArray(65535)
+        while (!stopped) {
+            val n = try {
+                tun.read(buf)
+            } catch (_: Exception) {
+                -1
+            }
+            if (n <= 0) break
+            val packet = buf.copyOf(n)
+            val dst = IpPacket.dst(packet)
+            if (dst == null) {
+                dropped++
+                continue
+            }
+            val wanted = routerRef.get().route(dst)
+            val lane = when {
+                wanted !in lanes.indices -> 0
+                lanes[wanted].isClosed() -> 0
+                else -> wanted
+            }
+            if (lane in lanes.indices) {
+                lanes[lane].offer(packet)
+                if (lane == 0) sentPrimary++ else sentSecondary++
+            } else {
+                dropped++
+            }
+        }
+        lanes.forEach { runCatching { it.close() } }
+        log("диспетчер tun остановлен (WARP: $sentPrimary, 2-й выход: $sentSecondary)")
     }
 }

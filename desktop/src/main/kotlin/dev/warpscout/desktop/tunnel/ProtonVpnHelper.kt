@@ -2,9 +2,14 @@ package dev.warpscout.desktop.tunnel
 
 import dev.warpscout.core.config.WgConf
 import dev.warpscout.core.model.WarpConfig
+import dev.warpscout.core.net.DohClient
+import dev.warpscout.core.net.HttpClient
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 data class ProtonConfInfo(
     val config: WarpConfig,
@@ -291,6 +296,78 @@ object SecondExitCatalog {
             return "$addr/$bits"
         }
         return null
+    }
+
+    /** Прямой DoH-резолв через 1.1.1.1 (по IP, без SNI cloudflare-dns.com) с фолбэком на dns.google. */
+    fun resolveFastDoh(host: String, includeIpv6: Boolean = false): List<String> {
+        val cfIp = DohClient("https://1.1.1.1/dns-query", HttpClient(timeoutMs = 2500))
+        val out = LinkedHashSet<String>()
+        val a = runCatching { cfIp.resolveA(host) }.getOrNull()
+        if (a != null) out.addAll(a)
+        if (includeIpv6) {
+            runCatching { cfIp.resolveAAAA(host) }.getOrNull()?.let { out.addAll(it) }
+        }
+        if (out.isNotEmpty() || a != null) return out.toList()
+
+        val gg = DohClient(DohClient.GOOGLE, HttpClient(timeoutMs = 2500))
+        runCatching { gg.resolveA(host) }.getOrNull()?.let { out.addAll(it) }
+        if (includeIpv6) {
+            runCatching { gg.resolveAAAA(host) }.getOrNull()?.let { out.addAll(it) }
+        }
+        return out.toList()
+    }
+
+    /**
+     * Мульти-источниковый резолв для критичных доменов (chatgpt.com, openai.com, claude.ai, grok.com…):
+     * объединяет ответы системного DNS Windows (ровно те IP, что видит Chrome!), Cloudflare 1.1.1.1 DoH
+     * и Google dns.google DoH, чтобы ни один Cloudflare Anycast IP не выпал из таблицы Второго выхода.
+     */
+    fun resolveMultiSource(
+        host: String,
+        includeIpv6: Boolean = false,
+        includeSystemDns: Boolean = true
+    ): List<String> {
+        val out = LinkedHashSet<String>()
+        if (includeSystemDns) {
+            runCatching {
+                InetAddress.getAllByName(host).forEach { addr ->
+                    val ip = addr.hostAddress?.substringBefore('%') ?: return@forEach
+                    if (includeIpv6 || ':' !in ip) out.add(ip)
+                }
+            }
+        }
+        val cfIp = DohClient("https://1.1.1.1/dns-query", HttpClient(timeoutMs = 2500))
+        runCatching { cfIp.resolveA(host) }.getOrNull()?.let { out.addAll(it) }
+        if (includeIpv6) runCatching { cfIp.resolveAAAA(host) }.getOrNull()?.let { out.addAll(it) }
+
+        val gg = DohClient(DohClient.GOOGLE, HttpClient(timeoutMs = 2500))
+        runCatching { gg.resolveA(host) }.getOrNull()?.let { out.addAll(it) }
+        if (includeIpv6) runCatching { gg.resolveAAAA(host) }.getOrNull()?.let { out.addAll(it) }
+
+        return out.filter { includeIpv6 || ':' !in it }
+    }
+
+    /** Параллельный резолв списка доменов без протухания очереди при большом списке. */
+    fun resolveBatch(
+        hosts: List<String>,
+        threads: Int = 16,
+        resolver: (String) -> List<String>
+    ): Map<String, List<String>> {
+        val unique = hosts.distinct()
+        if (unique.isEmpty()) return emptyMap()
+        val ex = Executors.newFixedThreadPool(minOf(threads, unique.size).coerceAtLeast(1)) { r ->
+            Thread(r, "ws-second-dns").apply { isDaemon = true }
+        }
+        return try {
+            val futures = unique.associateWith { h ->
+                ex.submit(Callable { runCatching { resolver(h) }.getOrDefault(emptyList()) })
+            }
+            futures.mapValues { (_, f) ->
+                runCatching { f.get(45, TimeUnit.SECONDS) }.getOrDefault(emptyList())
+            }
+        } finally {
+            ex.shutdownNow()
+        }
     }
 }
 

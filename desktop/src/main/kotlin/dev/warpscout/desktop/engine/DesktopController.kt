@@ -1262,12 +1262,31 @@ class DesktopController(
                 }
                 listHosts.removeAll(priorityHosts)
 
-                val allHosts = (priorityHosts + listHosts).toList()
-                val resolved = if (allHosts.isNotEmpty()) {
-                    _state.update { it.copy(secondExitStatus = "Разворачиваю ${allHosts.size} доменов через DoH…") }
-                    AllowListPlanner.resolveAll(allHosts)
-                } else {
-                    emptyMap()
+                val priorityList = priorityHosts.toList()
+                val restList = listHosts.take(220)
+                val resolved = LinkedHashMap<String, List<String>>()
+
+                // Сначала отдельным быстрым батчем резолвим критичные домены (chatgpt.com, openai.com, claude.ai,
+                // grok.com и свои сайты) через 1.1.1.1 DoH + dns.google DoH (+ системный DNS, если туннель поднят).
+                if (priorityList.isNotEmpty()) {
+                    _state.update { it.copy(secondExitStatus = "Разворачиваю ${priorityList.size} ключевых доменов (DoH + DNS)…") }
+                    resolved.putAll(
+                        SecondExitCatalog.resolveBatch(priorityList, threads = 16) { host ->
+                            SecondExitCatalog.resolveMultiSource(
+                                host = host,
+                                includeIpv6 = includeIpv6,
+                                includeSystemDns = currentTunnelUp
+                            )
+                        }
+                    )
+                }
+                if (restList.isNotEmpty()) {
+                    _state.update { it.copy(secondExitStatus = "Разворачиваю ещё ${restList.size} доменов списков через DoH…") }
+                    resolved.putAll(
+                        SecondExitCatalog.resolveBatch(restList, threads = 16) { host ->
+                            SecondExitCatalog.resolveFastDoh(host, includeIpv6 = includeIpv6)
+                        }
+                    )
                 }
 
                 // 3. Формируем итоговую таблицу CIDR (приоритет: свои сайты + критичные поддомены + готовые подсети).
@@ -1315,6 +1334,52 @@ class DesktopController(
 
     /** Совместимая обёртка для сбора адресов второго выхода. */
     fun resolveSecondExitDomains() = buildSecondExitRoutes(reconnectIfUp = false)
+
+    /** Живая синхронизация DNS внутри туннеля + проверка реального выхода `chatgpt.com` без разрыва туннеля. */
+    fun checkSecondExitNow() {
+        if (_state.value.secondExitBusy) return
+        if (!currentTunnelUp || !_state.value.tunnel.secondExitActive) {
+            showBanner("Второй выход сейчас не активен — сначала подключите туннель", isError = true)
+            return
+        }
+        val extra = collectSecondExitSyncHosts(_state.value.settings)
+        _state.update { it.copy(secondExitBusy = true, secondExitStatus = "Проверяю выход chatgpt.com и синхронизирую DNS…") }
+        auxWorker.execute {
+            try {
+                val ok = nativeTunnel.syncAndCheckSecondExit(extraHosts = extra) { newlyAdded ->
+                    if (newlyAdded.isNotEmpty()) {
+                        updateSettings { cur ->
+                            val merged = (SplitRoutes.prefixesOf(cur.secondExitCidrs) + newlyAdded)
+                                .distinct()
+                                .take(SecondExitCatalog.MAX_CIDRS)
+                                .joinToString(", ")
+                            cur.copy(secondExitCidrs = merged)
+                        }
+                    }
+                }
+                val text = _state.value.tunnel.secondExitCheckText.ifBlank {
+                    if (ok) "Проверка выхода пройдена" else "Проверка выхода не удалась"
+                }
+                _state.update { it.copy(secondExitBusy = false, secondExitStatus = text) }
+                showBanner(text, isError = !ok)
+            } catch (e: Exception) {
+                val err = "Ошибка проверки выхода: ${e.message}"
+                _state.update { it.copy(secondExitBusy = false, secondExitStatus = err) }
+                showBanner(err, isError = true)
+            }
+        }
+    }
+
+    private fun collectSecondExitSyncHosts(s: DesktopSettings): List<String> {
+        val out = LinkedHashSet<String>()
+        out.add(SecondExitCatalog.CHECK_HOST)
+        val custom = SecondExitCatalog.parseCustomSites(s.secondExitDomains)
+        out.addAll(custom.hosts)
+        for (id in s.secondExitListIds) {
+            SecondExitCatalog.byId[id]?.extraHosts?.let { out.addAll(it) }
+        }
+        return out.toList()
+    }
 
     /** Применяет изменённые настройки маршрутов/сети и переподключает туннель, если он был поднят. */
     fun applySettingsAndReconnect() {
@@ -1802,7 +1867,8 @@ class DesktopController(
         enabled = s.secondExitEnabled,
         confText = s.secondExitConf,
         cidrsCsv = s.secondExitCidrs,
-        preferViaWarp = s.secondExitViaWarp
+        preferViaWarp = s.secondExitViaWarp,
+        syncHosts = collectSecondExitSyncHosts(s)
     )
 
     private fun applyCurrentNetworkSettings(cfg: WarpConfig, s: DesktopSettings): WarpConfig = cfg.copy(

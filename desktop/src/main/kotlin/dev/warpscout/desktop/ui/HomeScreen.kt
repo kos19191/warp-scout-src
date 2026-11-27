@@ -486,9 +486,12 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Icon(Icons.Rounded.AltRoute, contentDescription = null, tint = warp.ok, modifier = Modifier.size(16.dp))
-                            val modeTag = if (state.tunnel.secondExitViaWarp) " · через WARP (обход ТСПУ)" else " · напрямую"
+                            val modeTag = if (state.tunnel.secondExitViaWarp) " · через WARP" else " · напрямую"
+                            val checkPart = if (state.tunnel.secondExitCheckOk == true && state.tunnel.secondExitCheckText.isNotBlank()) {
+                                "\n✓ ${state.tunnel.secondExitCheckText}"
+                            } else ""
                             Text(
-                                "Второй выход активен: ${state.tunnel.secondExitServer}$modeTag",
+                                "Второй выход активен: ${state.tunnel.secondExitServer}$modeTag$checkPart",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = warp.ok
                             )
