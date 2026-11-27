@@ -982,9 +982,7 @@
     <string name="route_exit_pending">выход — после проверки связи</string>
     <string name="route_last_point">последняя точка %1$s</string>
     <string name="route_title">Маршрут</string>
-    <string name="route_back_desc">Назад</string>
-    <string name="route_replay">Повторить анимацию</string>
-    <string name="route_replay_off">Туннель выключен: линия прорисуется после подключения</string>
+    <string name="route_close">Закрыть</string>
     <string name="route_map_desc">Схема маршрута: вы, точка входа, выход WARP и второй выход</string>
     <string name="route_map_you">Вы · %1$s</string>
     <string name="route_map_entry">Вход · %1$s</string>

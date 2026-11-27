@@ -6675,11 +6675,11 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
 
         fun visibleList(): List<AppEntry> {
             val q = sheet.appsSearch.text?.toString()?.trim()?.lowercase().orEmpty()
-            // Порядок стабильный: после отметки строка не перемещается из-под пальца. Найти приложение
-            // можно поиском; выбранное состояние видно по галочке.
+            // Отмеченные приложения остаются наверху, затем список идёт по алфавиту — так проще
+            // проверить выбор и найти следующую строку.
             return apps.filter { app ->
                 q.isEmpty() || app.label.lowercase().contains(q) || app.pkg.lowercase().contains(q)
-            }.sortedBy { it.label.lowercase() }
+            }.sortedWith(compareByDescending<AppEntry> { it.pkg in selected }.thenBy { it.label.lowercase() })
         }
 
         val adapter = object : android.widget.BaseAdapter() {
@@ -7495,7 +7495,12 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
         binding.textEndpointNow.setOnClickListener { showRouteScreen() }
         binding.textEndpointNow.setBackgroundResource(ripple.resourceId)
         s.simpleRouteCard.setOnClickListener { showRouteScreen() }
-        if (!premium) return
+        if (!premium) {
+            // В классическом облике нет кольца-кнопки: сканирование остаётся первой кнопкой,
+            // а отдельное включение/выключение туннеля сохраняем сразу под ней.
+            binding.btnTunnel.visibility = View.VISIBLE
+            return
+        }
 
         val sp = android.util.TypedValue.COMPLEX_UNIT_SP
         val accent = look.accent
@@ -7747,7 +7752,10 @@ class MainActivity : AppCompatActivity(), UpdateFlow.Ui {
     private fun showRouteScreen() {
         runCatching {
             routeScreen?.dismiss()
-            val screen = RouteScreen(this)
+            val screen = RouteScreen(this) {
+                startScan(autoConnect = true)
+                refreshRouteScreen()
+            }
             routeScreen = screen
             screen.show(routeInfo())
         }.onFailure { t ->

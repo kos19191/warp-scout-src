@@ -143,7 +143,12 @@ class PowerOrbView @JvmOverloads constructor(
             return
         }
         progressAnim = ValueAnimator.ofFloat(from, target).apply {
-            duration = 300L
+            // Frequent probe updates used to keep restarting a 300 ms animation from its current
+            // frame. The ring then lagged behind the reported percentage and caught up in a visible
+            // jump at phase boundaries (around 45–46%). Keep the displayed progress close to the
+            // latest scan value instead of accumulating animation debt.
+            duration = (kotlin.math.abs(target - from) * 1200L).toLong().coerceIn(60L, 180L)
+            interpolator = LinearInterpolator()
             addUpdateListener { a ->
                 shownProgress = a.animatedValue as Float
                 invalidate()

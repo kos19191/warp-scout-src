@@ -20,7 +20,7 @@ import dev.warpscout.app.databinding.ScreenRouteBinding
  * маршрута и какие приложения через какой выход идут. Только показывает: всё, что здесь видно,
  * считает главный экран ([Info]) — тем же кодом, что и строку «где мы».
  */
-class RouteScreen(private val activity: Activity) {
+class RouteScreen(private val activity: Activity, private val onScan: () -> Unit) {
 
     /** Группа приложений у одного выхода. [kind] — [KIND_SECOND], [KIND_WARP] или [KIND_DIRECT]. */
     class Group(val kind: Int, val title: String, val sub: String, val pkgs: List<String>)
@@ -51,7 +51,6 @@ class RouteScreen(private val activity: Activity) {
     private val pal = Design.palette(activity)
     private val density = activity.resources.displayMetrics.density
     private var shownKey = ""
-    private var shownMode = RouteMapView.MODE_OFF
 
     val isShowing: Boolean get() = dialog?.isShowing == true
 
@@ -73,9 +72,7 @@ class RouteScreen(private val activity: Activity) {
         v.routeBack.setOnClickListener { dismiss() }
         v.routeMap.design = kind
         v.routeReplay.setOnClickListener {
-            if (shownMode == RouteMapView.MODE_OFF) {
-                android.widget.Toast.makeText(activity, R.string.route_replay_off, android.widget.Toast.LENGTH_SHORT).show()
-            }
+            onScan()
             v.routeMap.play()
         }
         render(info, first = true)
@@ -108,7 +105,6 @@ class RouteScreen(private val activity: Activity) {
         val key = listOf(info.mode, info.stateText, info.endpoint, info.exitPlace, info.second, info.net).joinToString("|")
         if (!first && key == shownKey) return
         shownKey = key
-        shownMode = info.mode
 
         // Плашка состояния: точка цветом состояния и слово.
         val pill = android.text.SpannableStringBuilder("●  ").append(info.stateText)

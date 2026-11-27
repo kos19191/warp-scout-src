@@ -177,12 +177,23 @@
                             android:visibility="gone" />
 
                         <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnRun"
+                            style="@style/Widget.Material3.Button.TonalButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/button_primary"
+                            android:layout_marginTop="@dimen/space_m"
+                            android:text="@string/btn_run"
+                            android:visibility="visible" />
+
+                        <!-- В «Классическом» кольца нет — оставляем отдельное управление туннелем. -->
+                        <com.google.android.material.button.MaterialButton
                             android:id="@+id/btnTunnel"
                             android:layout_width="match_parent"
                             android:layout_height="@dimen/button_primary"
                             android:layout_marginTop="@dimen/space_m"
                             android:text="@string/btn_tunnel_on"
-                            android:textSize="16sp" />
+                            android:textSize="16sp"
+                            android:visibility="gone" />
 
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/btnStop"
@@ -301,40 +312,6 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="@string/top3_forget" />
-                    </LinearLayout>
-                </com.google.android.material.card.MaterialCardView>
-
-                <com.google.android.material.card.MaterialCardView
-                    style="@style/Card.Section"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/space_m">
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical"
-                        android:padding="@dimen/space_l">
-
-                        <TextView
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:text="@string/home_scan_title"
-                            android:textAppearance="?attr/textAppearanceLabelLarge"
-                            android:textColor="?attr/colorOnSurfaceVariant" />
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnRun"
-                            style="@style/Widget.Material3.Button.TonalButton"
-                            android:layout_width="match_parent"
-                            android:layout_height="@dimen/button_secondary"
-                            android:layout_marginTop="@dimen/space_s"
-                            android:text="@string/btn_run" />
-
-                        <TextView
-                            android:id="@+id/textQuickHint"
-                            style="@style/Text.Caption"
-                            android:text="@string/quick_hint" />
                     </LinearLayout>
                 </com.google.android.material.card.MaterialCardView>
 

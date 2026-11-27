@@ -21,25 +21,22 @@
         android:paddingStart="4dp"
         android:paddingEnd="16dp">
 
-        <ImageButton
-            android:id="@+id/routeBack"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="@string/route_back_desc"
-            android:padding="12dp"
-            android:scaleType="fitCenter"
-            android:src="@drawable/ic_back"
-            android:tint="?attr/colorOnSurface" />
-
         <TextView
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginStart="4dp"
             android:layout_weight="1"
             android:text="@string/route_title"
             android:textAppearance="?attr/textAppearanceTitleLarge"
             android:textStyle="bold" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/routeBack"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:contentDescription="@string/route_close"
+            android:minWidth="0dp"
+            android:text="@string/route_close" />
 
         <TextView
             android:id="@+id/routeState"
@@ -91,8 +88,8 @@
                         android:layout_height="wrap_content"
                         android:layout_gravity="bottom|end"
                         android:layout_margin="10dp"
-                        android:text="@string/route_replay"
-                        app:icon="@drawable/ic_play"
+                        android:text="@string/btn_run"
+                        app:icon="@drawable/ic_rescan"
                         app:iconSize="18dp" />
                 </FrameLayout>
             </com.google.android.material.card.MaterialCardView>
