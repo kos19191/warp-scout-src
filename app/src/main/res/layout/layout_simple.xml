@@ -158,16 +158,16 @@
             </LinearLayout>
         </FrameLayout>
 
-        <!-- Что сейчас делаю (с 1.10.30): ищу точки, проверяю точку с таким-то шумом, проверяю,
-             идут ли данные. Видно только пока идёт подбор или подключение. -->
+        <!-- Резерв под короткий статус. Подробные этапы и объяснения — в расширенном режиме. -->
         <TextView
             android:id="@+id/simpleActivity"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="24dp"
             android:layout_marginTop="12dp"
             android:ellipsize="end"
             android:gravity="center"
-            android:maxLines="2"
+            android:maxLines="1"
+            android:singleLine="true"
             android:textAppearance="?attr/textAppearanceBodyMedium"
             android:visibility="gone" />
 
