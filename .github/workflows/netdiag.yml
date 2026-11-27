@@ -30,13 +30,30 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: "Установка Android SDK 35 и build-tools"
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+
       - uses: gradle/actions/setup-gradle@v4
 
       - name: "Юнит-тесты :netdiag"
-        run: ./gradlew --no-daemon :netdiag:testDebugUnitTest --stacktrace
+        run: |
+          set -o pipefail
+          if ! ./gradlew --no-daemon :netdiag:testDebugUnitTest --stacktrace 2>&1 | tee /tmp/netdiag-test.log; then
+            ERR=$(grep -E "(e: |FAILURE:|What went wrong:|AssertionError|Exception|FAILED)" /tmp/netdiag-test.log | tail -n 15 | tr '\n' ' ')
+            echo "::error title=netdiag-test::$ERR"
+            exit 1
+          fi
 
       - name: "Сборка подписанного APK WilyDiag"
-        run: ./gradlew --no-daemon :netdiag:assembleDebug --stacktrace
+        run: |
+          set -o pipefail
+          if ! ./gradlew --no-daemon :netdiag:assembleDebug --stacktrace 2>&1 | tee /tmp/netdiag-apk.log; then
+            ERR=$(grep -E "(e: |FAILURE:|What went wrong:|Exception|FAILED)" /tmp/netdiag-apk.log | tail -n 15 | tr '\n' ' ')
+            echo "::error title=netdiag-apk::$ERR"
+            exit 1
+          fi
 
       - name: "Подготовка артефактов и SHA-256"
         run: |
