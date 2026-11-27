@@ -4,6 +4,7 @@ import dev.warpscout.core.config.ConfTarget
 import dev.warpscout.core.lists.AllowLists
 import dev.warpscout.desktop.tunnel.ByeDpiPac
 import dev.warpscout.desktop.tunnel.ByeDpiPresets
+import dev.warpscout.desktop.tunnel.SecondExitCatalog
 
 enum class ThemeMode(val title: String) {
     DARK("Тёмная"),
@@ -102,10 +103,12 @@ data class DesktopSettings(
     val builtAllowedIps: String = "",
     val manualAllowedIps: String = "0.0.0.0/0, ::/0",
 
-    // Второй выход (свой WireGuard/AmneziaWG сервер для отдельных доменов)
+    // Второй выход (свой WireGuard/AmneziaWG сервер для выбранных списков и сайтов)
     val secondExitEnabled: Boolean = false,
     val secondExitConf: String = "",
-    val secondExitDomains: String = "chatgpt.com, openai.com, api.openai.com, auth.openai.com",
+    val secondExitListIds: List<String> = SecondExitCatalog.DEFAULT_LIST_IDS,
+    val secondExitViaWarp: Boolean = true,
+    val secondExitDomains: String = "",
     val secondExitCidrs: String = "",
 
     // Встроенный обход DPI (ByeDPI / ciadpi.exe — локальный SOCKS5-прокси без драйвера ядра)

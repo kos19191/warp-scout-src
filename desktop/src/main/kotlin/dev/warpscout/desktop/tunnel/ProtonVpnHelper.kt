@@ -60,6 +60,241 @@ enum class SecondExitPreset(
 }
 
 /**
+ * Одна категория списков для кнопок выбора «Что отправлять через второй выход»
+ * (1-в-1 с мобильным WilyScout: можно комбинировать любые категории одновременно).
+ */
+data class SecondExitCategory(
+    val id: String,
+    val title: String,
+    val allowListId: String? = null,
+    val builtInPrefixes: List<String> = emptyList(),
+    val extraHosts: List<String> = emptyList(),
+    val note: String = ""
+)
+
+data class ParsedCustomSites(
+    val hosts: List<String>,
+    val prefixes: List<String>
+)
+
+/**
+ * Справочник списков и подсетей для WARP и Второго выхода (синхронизировано с мобильным WilyScout):
+ *  • критичные поддомены ИИ-сервисов (`auth.openai.com`, `cdn.oaistatic.com`, `grok.com`, `x.ai`, `api.anthropic.com`…);
+ *  • официальные IPv4-подсети Telegram (10 CIDR) и Google/YouTube AS15169 (`googlevideo.com`, 13 CIDR);
+ *  • официальные IPv4-сети GitHub (чтобы обновления WilyScout и списки всегда были доступны);
+ *  • умный парсер пользовательских сайтов (понимает `https://chatgpt.com/c/123`, `*.example.com`, CIDR и кириллицу).
+ */
+object SecondExitCatalog {
+    const val ALL_FOREIGN_ID = "all-foreign"
+    const val CHECK_HOST = "chatgpt.com"
+    const val MAX_CIDRS = 3000
+
+    /** Официальные IPv4-подсети датацентров Telegram (https://core.telegram.org/resources/cidr.txt). */
+    val TELEGRAM_NETS_V4: List<String> = listOf(
+        "91.108.4.0/22",
+        "91.108.8.0/22",
+        "91.108.12.0/22",
+        "91.108.16.0/22",
+        "91.108.20.0/22",
+        "91.108.56.0/22",
+        "91.105.192.0/23",
+        "95.161.64.0/20",
+        "149.154.160.0/20",
+        "185.76.151.0/24"
+    )
+
+    /** Сети Google AS15169, с которых отдаётся видео YouTube (`rr3---sn-*.googlevideo.com`, 95% адресов). */
+    val YOUTUBE_VIDEO_NETS_V4: List<String> = listOf(
+        "64.233.160.0/19",
+        "66.102.0.0/20",
+        "72.14.192.0/18",
+        "74.125.0.0/16",
+        "108.177.0.0/17",
+        "142.250.0.0/15",
+        "172.217.0.0/16",
+        "172.253.0.0/16",
+        "173.194.0.0/16",
+        "192.178.0.0/15",
+        "209.85.128.0/17",
+        "216.58.192.0/19",
+        "216.239.32.0/19"
+    )
+
+    /** Сети GitHub (обновления WilyScout и списки allow-domains). */
+    val GITHUB_NETS_V4: List<String> = listOf(
+        "140.82.112.0/20",
+        "143.55.64.0/20",
+        "185.199.108.0/22",
+        "192.30.252.0/22"
+    )
+
+    /** Критичные поддомены, без которых вход/API/CDN сервисов уходят мимо таблицы маршрутов. */
+    val EXTRA_HOSTS: Map<String, List<String>> = mapOf(
+        "openai" to listOf(
+            "chatgpt.com", "openai.com", "auth.openai.com", "auth0.openai.com",
+            "api.openai.com", "chat.openai.com", "platform.openai.com",
+            "cdn.openai.com", "cdn.oaistatic.com", "auth-cdn.oaistatic.com",
+            "files.oaiusercontent.com", "oaiusercontent.com",
+            "ab.chatgpt.com", "ws.chatgpt.com", "sora.chatgpt.com", "videos.openai.com"
+        ),
+        "claude" to listOf(
+            "claude.ai", "www.claude.ai", "anthropic.com", "www.anthropic.com",
+            "api.anthropic.com", "console.anthropic.com", "statsig.anthropic.com",
+            "a-cdn.anthropic.com", "s-cdn.anthropic.com", "assets-proxy.anthropic.com"
+        ),
+        "google-ai" to listOf(
+            "gemini.google.com", "aistudio.google.com", "makersuite.google.com",
+            "alkalimakersuite-pa.clients6.google.com", "generativelanguage.googleapis.com"
+        ),
+        "ru-ip-blocked" to listOf(
+            "grok.com", "www.grok.com", "assets.grok.com",
+            "x.ai", "accounts.x.ai", "auth.x.ai", "api.x.ai", "imagine-public.x.ai"
+        )
+    )
+
+    /** Категории-кнопки Второго выхода (в порядке отображения в UI). */
+    val CATEGORIES: List<SecondExitCategory> = listOf(
+        SecondExitCategory(
+            id = "openai",
+            title = "ChatGPT / OpenAI",
+            allowListId = "openai",
+            extraHosts = EXTRA_HOSTS["openai"].orEmpty()
+        ),
+        SecondExitCategory(
+            id = "claude",
+            title = "Claude / Anthropic",
+            allowListId = "claude",
+            extraHosts = EXTRA_HOSTS["claude"].orEmpty()
+        ),
+        SecondExitCategory(
+            id = "google-ai",
+            title = "Gemini / Google AI",
+            allowListId = "google-ai",
+            extraHosts = EXTRA_HOSTS["google-ai"].orEmpty()
+        ),
+        SecondExitCategory(
+            id = "ru-ip-blocked",
+            title = "Закрытые для РФ (Grok…)",
+            allowListId = "ru-ip-blocked",
+            extraHosts = EXTRA_HOSTS["ru-ip-blocked"].orEmpty(),
+            note = "Grok, Canva, Adobe, Atlassian и другие сервисы, блокирующие РФ-адреса"
+        ),
+        SecondExitCategory(
+            id = "telegram",
+            title = "Telegram",
+            allowListId = "telegram",
+            builtInPrefixes = TELEGRAM_NETS_V4,
+            extraHosts = listOf("telegram.org", "web.telegram.org", "t.me")
+        ),
+        SecondExitCategory(
+            id = "youtube",
+            title = "YouTube",
+            allowListId = "youtube",
+            builtInPrefixes = YOUTUBE_VIDEO_NETS_V4,
+            extraHosts = listOf("youtube.com", "www.youtube.com", "youtu.be", "ytimg.com")
+        ),
+        SecondExitCategory(
+            id = "discord",
+            title = "Discord",
+            allowListId = "discord",
+            extraHosts = listOf("discord.com", "discord.gg", "gateway.discord.gg", "cdn.discordapp.com")
+        ),
+        SecondExitCategory(
+            id = "meta",
+            title = "Meta (Insta / FB)",
+            allowListId = "meta",
+            extraHosts = listOf("instagram.com", "www.instagram.com", "facebook.com", "www.facebook.com")
+        ),
+        SecondExitCategory(
+            id = "twitter",
+            title = "X / Twitter",
+            allowListId = "twitter",
+            extraHosts = listOf("x.com", "twitter.com", "api.x.com")
+        ),
+        SecondExitCategory(
+            id = "tiktok",
+            title = "TikTok",
+            allowListId = "tiktok",
+            extraHosts = listOf("tiktok.com", "www.tiktok.com")
+        )
+    )
+
+    val byId: Map<String, SecondExitCategory> = CATEGORIES.associateBy { it.id }
+
+    /** По умолчанию — ровно как в мобильном WilyScout: ИИ-сервисы и сайты, закрытые для РФ-адресов. */
+    val DEFAULT_LIST_IDS: List<String> = listOf("openai", "claude", "google-ai", "ru-ip-blocked")
+
+    private val HOST_RE = Regex("""^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z]{2,63}|xn--[a-z0-9-]{1,59})$""")
+    private val V4_RE = Regex("""^\d{1,3}(\.\d{1,3}){3}$""")
+
+    /** Разбирает пользовательское поле «Свои сайты» (ссылки `https://...`, домены, IP, CIDR, кириллица). */
+    fun parseCustomSites(text: String): ParsedCustomSites {
+        val hosts = LinkedHashSet<String>()
+        val prefixes = LinkedHashSet<String>()
+        for (line in text.lines()) {
+            val clean = line.substringBefore('#').trim()
+            if (clean.isEmpty()) continue
+            for (raw in clean.split(',', ';', ' ', '\t')) {
+                val token = raw.trim()
+                if (token.isEmpty()) continue
+                val cidr = normalizeCidr(token)
+                if (cidr != null) {
+                    prefixes += cidr
+                    continue
+                }
+                val host = extractHost(token)
+                if (host != null) {
+                    hosts += host
+                    if (!host.startsWith("www.") && host.count { it == '.' } == 1) {
+                        hosts += "www.$host"
+                    }
+                }
+            }
+        }
+        return ParsedCustomSites(hosts.toList(), prefixes.toList())
+    }
+
+    internal fun extractHost(token: String): String? {
+        var t = token.trim()
+        if ("://" in t) t = t.substringAfter("://")
+        t = t.substringBefore('/').substringBefore('?').substringBefore('#')
+        if ('@' in t) t = t.substringAfter('@')
+        if (t.count { it == ':' } == 1) {
+            val port = t.substringAfter(':')
+            if (port.isNotEmpty() && port.all { it.isDigit() }) t = t.substringBefore(':')
+        }
+        t = t.trim().trimEnd('.').removePrefix("*.").removePrefix(".").lowercase()
+        if (t.isEmpty()) return null
+        if (t.any { it.code > 127 }) {
+            t = runCatching { java.net.IDN.toASCII(t, java.net.IDN.ALLOW_UNASSIGNED).lowercase() }.getOrNull() ?: return null
+        }
+        return t.takeIf { HOST_RE.matches(it) }
+    }
+
+    internal fun normalizeCidr(token: String): String? {
+        var t = token.trim()
+        if (t.startsWith("[") && "]" in t) t = t.substring(1, t.indexOf(']'))
+        val slash = t.indexOf('/')
+        val addr = if (slash >= 0) t.substring(0, slash) else t
+        val bitsText = if (slash >= 0) t.substring(slash + 1) else ""
+        if (V4_RE.matches(addr)) {
+            val parts = addr.split('.').map { it.toIntOrNull() ?: return null }
+            if (parts.any { it !in 0..255 }) return null
+            val bits = if (bitsText.isEmpty()) 32 else bitsText.toIntOrNull()?.takeIf { it in 0..32 } ?: return null
+            val range = CidrMath.parseIpv4Cidr("$addr/$bits") ?: return null
+            return "${CidrMath.formatIpv4(range.start)}/$bits"
+        }
+        if (':' in addr && addr.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' || it == ':' || it == '.' }) {
+            val bytes = runCatching { InetAddress.getByName(addr).address }.getOrNull() ?: return null
+            if (bytes.size != 16) return null
+            val bits = if (bitsText.isEmpty()) 128 else bitsText.toIntOrNull()?.takeIf { it in 0..128 } ?: return null
+            return "$addr/$bits"
+        }
+        return null
+    }
+}
+
+/**
  * Помощник для простого добавления ProtonVPN (и любых других WireGuard `.conf`):
  *  • распознаёт официальные конфиги ProtonVPN (`# NL-FREE#123`, `10.2.0.2`, `NetShield`, `Bouncing`);
  *  • даёт готовые пресеты маршрутов для Второго выхода (включая «Весь зарубежный трафик» и Telegram CIDR);

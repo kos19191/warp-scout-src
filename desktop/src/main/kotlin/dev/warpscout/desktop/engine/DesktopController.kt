@@ -64,6 +64,7 @@ import dev.warpscout.desktop.tunnel.WindowsTunnelManager
 import dev.warpscout.desktop.tunnel.WintunLoader
 import dev.warpscout.desktop.update.AppUpdater
 import dev.warpscout.desktop.tunnel.ProtonVpnHelper
+import dev.warpscout.desktop.tunnel.SecondExitCatalog
 import dev.warpscout.desktop.tunnel.SecondExitPreset
 import dev.warpscout.desktop.tunnel.TelegramOpener
 import dev.warpscout.desktop.tunnel.TelegramProxyEntry
@@ -1094,27 +1095,50 @@ class DesktopController(
         }
     }
 
-    /** Сборка `AllowedIPs` из скачанных списков через DoH. */
-    fun buildAllowListRoutes() {
+    /** Сборка `AllowedIPs` для WARP из выбранных списков `allow-domains` (при необходимости докачивает кеш сам). */
+    fun buildAllowListRoutes(reconnectIfUp: Boolean = false) {
         if (_state.value.listsBusy) return
-        _state.update { it.copy(listsBusy = true, listsStatus = "Разворачиваю домены списков в CIDR через DoH…") }
+        _state.update { it.copy(listsBusy = true, listsStatus = "Проверяю списки и собираю маршруты WARP через DoH…") }
         auxWorker.execute {
             try {
                 val s = _state.value.settings
                 val block = s.selectedBlockListIds.mapNotNull { AllowLists.byId[it] }
                 val direct = s.selectedDirectListIds.mapNotNull { AllowLists.byId[it] }
+                val allTargets = (block + direct).distinctBy { it.id }
+                if (allTargets.isEmpty()) {
+                    val msg = "Выберите хотя бы одну категорию для туннелирования"
+                    _state.update { it.copy(listsBusy = false, listsStatus = msg) }
+                    return@execute
+                }
+                ensureAllowListsCached(allTargets.map { it.id }) { status ->
+                    _state.update { it.copy(listsStatus = status) }
+                }
                 val cached = AllowLists.loadAll(listStore)
                 val parsed = cached.mapValues { it.value.parsed }
                 if (parsed.isEmpty()) {
-                    val msg = "Кеш списков пуст — сначала нажмите «Скачать списки»"
+                    val msg = "Не удалось загрузить списки allow-domains (проверьте интернет)"
                     _state.update { it.copy(listsBusy = false, listsStatus = msg) }
                     return@execute
                 }
                 val plan = AllowListPlanner.plan(block = block, direct = direct, parsed = parsed, fullTunnel = false)
-                updateSettings { it.copy(builtAllowedIps = plan.allowedIps) }
-                val msg = "Маршруты собраны: ${plan.summary()}"
+                val extras = LinkedHashSet<String>()
+                extras.addAll(SplitRoutes.prefixesOf(plan.allowedIps))
+                if ("youtube" in s.selectedBlockListIds) {
+                    extras.addAll(SecondExitCatalog.YOUTUBE_VIDEO_NETS_V4)
+                }
+                if ("telegram" in s.selectedBlockListIds) {
+                    extras.addAll(SecondExitCatalog.TELEGRAM_NETS_V4)
+                }
+                // Сети GitHub всегда в маршрутах WARP, чтобы обновления и списки не зависали.
+                extras.addAll(SecondExitCatalog.GITHUB_NETS_V4)
+                val finalAllowed = extras.joinToString(", ")
+                updateSettings { it.copy(builtAllowedIps = finalAllowed) }
+                val msg = "Маршруты WARP собраны: ${extras.size} подсетей (${plan.summary()})"
                 appendLog(msg, LogLevel.OK)
                 _state.update { it.copy(listsBusy = false, listsStatus = msg) }
+                if (reconnectIfUp && currentTunnelUp) {
+                    applySettingsAndReconnect()
+                }
             } catch (e: Exception) {
                 val msg = "Ошибка сборки маршрутов: ${e.message}"
                 appendLog(msg, LogLevel.ERROR)
@@ -1123,50 +1147,174 @@ class DesktopController(
         }
     }
 
-    /** Разворачивает домены «Второго выхода» в `/32` и `/128` адреса через DoH. */
-    fun resolveSecondExitDomains() {
+    /** Докачивает отсутствующие или устаревшие (> 7 дней) списки `allow-domains` в локальный кеш. */
+    private fun ensureAllowListsCached(ids: List<String>, onProgress: (String) -> Unit = {}) {
+        val now = System.currentTimeMillis()
+        val weekMs = 7L * 86_400_000L
+        val stamps = AllowLists.cachedIds(listStore)
+        val missing = ids.distinct().mapNotNull { AllowLists.byId[it] }
+            .filter { list -> val ts = stamps[list.id] ?: 0L; ts <= 0L || (now - ts) > weekMs }
+        if (missing.isEmpty()) return
+        onProgress("Скачиваю ${missing.size} списков allow-domains…")
+        val http = HttpClient(timeoutMs = 10_000, followRedirects = true)
+        val fetcher: (String) -> String? = { url ->
+            runCatching {
+                val r = http.get(url, maxBytes = 1024 * 1024)
+                if (r.status in 200..299) r.body else null
+            }.getOrNull()
+        }
+        var ok = 0
+        for (list in missing) {
+            val parts = AllowLists.fetch(fetcher, list)
+            val merged = AllowLists.merge(parts)
+            if (merged.isNotBlank()) {
+                listStore.write(list.id, merged)
+                ok++
+            }
+        }
+        if (ok > 0) {
+            _state.update { it.copy(cachedListStamps = AllowLists.cachedIds(listStore)) }
+        }
+    }
+
+    /** Переключает категорию-кнопку для Второго выхода («Весь зарубежный» взаимоисключается с точечными списками). */
+    fun toggleSecondExitList(id: String) {
+        updateSettings { cur ->
+            val next = if (id == SecondExitCatalog.ALL_FOREIGN_ID) {
+                if (SecondExitCatalog.ALL_FOREIGN_ID in cur.secondExitListIds) {
+                    SecondExitCatalog.DEFAULT_LIST_IDS
+                } else {
+                    listOf(SecondExitCatalog.ALL_FOREIGN_ID)
+                }
+            } else {
+                val withoutAll = cur.secondExitListIds.filterNot { it == SecondExitCatalog.ALL_FOREIGN_ID }
+                if (id in withoutAll) withoutAll - id else withoutAll + id
+            }
+            cur.copy(secondExitEnabled = true, secondExitListIds = next)
+        }
+    }
+
+    /**
+     * Собирает маршруты Второго выхода из выбранных кнопок-списков + своих сайтов (с докачкой `allow-domains`
+     * и встроенными подсетями Telegram/YouTube + критичными поддоменами OpenAI/Claude/Grok) и применяет.
+     */
+    fun buildSecondExitRoutes(reconnectIfUp: Boolean = true) {
         if (_state.value.secondExitBusy) return
-        val domains = _state.value.settings.secondExitDomains
-            .split(',', '\n', '\r', ';', ' ', '\t')
-            .map { it.trim().removePrefix("*.").removePrefix(".").lowercase() }
-            .filter { it.isNotEmpty() && '.' in it }
-            .distinct()
-        if (domains.isEmpty()) {
-            _state.update { it.copy(secondExitStatus = "Список доменов пуст") }
+        val s = _state.value.settings
+        val selectedIds = s.secondExitListIds
+        val customSites = SecondExitCatalog.parseCustomSites(s.secondExitDomains)
+
+        // Режим «Весь зарубежный трафик» — мгновенно без DoH!
+        if (SecondExitCatalog.ALL_FOREIGN_ID in selectedIds) {
+            updateSettings { it.copy(secondExitEnabled = true, secondExitCidrs = "0.0.0.0/0") }
+            val msg = "Второй выход: весь зарубежный трафик (при «Обходе РФ» российские сайты остаются напрямую)"
+            appendLog(msg, LogLevel.OK)
+            _state.update { it.copy(secondExitStatus = msg) }
+            if (reconnectIfUp && currentTunnelUp) {
+                applySettingsAndReconnect()
+            } else {
+                showBanner(msg)
+            }
             return
         }
-        _state.update { it.copy(secondExitBusy = true, secondExitStatus = "Разворачиваю ${domains.size} доменов через DoH…") }
+
+        val categories = selectedIds.mapNotNull { SecondExitCatalog.byId[it] }
+        if (categories.isEmpty() && customSites.hosts.isEmpty() && customSites.prefixes.isEmpty()) {
+            _state.update { it.copy(secondExitStatus = "Выберите хотя бы один список или введите свои сайты") }
+            return
+        }
+
+        _state.update { it.copy(secondExitBusy = true, secondExitStatus = "Собираю списки и адреса для Второго выхода…") }
         auxWorker.execute {
             try {
                 val secondParsed = WgConf.toWarpConfig("second-exit", _state.value.settings.secondExitConf)
                 val includeIpv6 = secondParsed == null || !secondParsed.account.ipv6.isNullOrBlank()
-                val resolved = AllowListPlanner.resolveAll(domains)
-                val cidrs = LinkedHashSet<String>()
-                var unresolvedCount = 0
-                for ((_, ips) in resolved) {
-                    if (ips.isEmpty()) unresolvedCount++
-                    for (ip in ips) {
-                        if (':' in ip) {
-                            if (includeIpv6) cidrs.add("$ip/128")
-                        } else if (Regex("""^\d+\.\d+\.\d+\.\d+$""").matches(ip)) {
-                            cidrs.add("$ip/32")
-                        }
+
+                // 1. Автоматически докачиваем недостающие списки allow-domains.
+                val allowIds = categories.mapNotNull { it.allowListId }.distinct()
+                if (allowIds.isNotEmpty()) {
+                    ensureAllowListsCached(allowIds) { st ->
+                        _state.update { it.copy(secondExitStatus = st) }
                     }
                 }
-                val csv = cidrs.joinToString(", ")
-                updateSettings { it.copy(secondExitCidrs = csv) }
-                val msg = if (cidrs.isEmpty()) "Адреса не найдены (проверьте интернет)"
-                else "Найдено IPv4-адресов: ${cidrs.size} (доменов: ${domains.size}" +
-                    if (unresolvedCount > 0) ", не разрешилось: $unresolvedCount)" else ")"
-                appendLog("Второй выход: $msg", if (cidrs.isNotEmpty()) LogLevel.OK else LogLevel.WARN)
+                val cached = AllowLists.loadAll(listStore)
+
+                // 2. Собираем приоритетные подсети и домены (свои сайты + критичные поддомены + встроенные CIDR).
+                val priorityPrefixes = LinkedHashSet<String>()
+                val listPrefixes = LinkedHashSet<String>()
+                val priorityHosts = LinkedHashSet<String>()
+                val listHosts = LinkedHashSet<String>()
+
+                customSites.prefixes.forEach { p -> if (includeIpv6 || ':' !in p) priorityPrefixes.add(p) }
+                priorityHosts.addAll(customSites.hosts)
+
+                for (cat in categories) {
+                    cat.builtInPrefixes.forEach { p -> if (includeIpv6 || ':' !in p) priorityPrefixes.add(p) }
+                    priorityHosts.addAll(cat.extraHosts)
+                    val parsedList = cat.allowListId?.let { cached[it]?.parsed }
+                    if (parsedList != null) {
+                        parsedList.prefixes.forEach { p ->
+                            val norm = SecondExitCatalog.normalizeCidr(p) ?: p
+                            if (includeIpv6 || ':' !in norm) listPrefixes.add(norm)
+                        }
+                        listHosts.addAll(parsedList.domains)
+                    }
+                }
+                listHosts.removeAll(priorityHosts)
+
+                val allHosts = (priorityHosts + listHosts).toList()
+                val resolved = if (allHosts.isNotEmpty()) {
+                    _state.update { it.copy(secondExitStatus = "Разворачиваю ${allHosts.size} доменов через DoH…") }
+                    AllowListPlanner.resolveAll(allHosts)
+                } else {
+                    emptyMap()
+                }
+
+                // 3. Формируем итоговую таблицу CIDR (приоритет: свои сайты + критичные поддомены + готовые подсети).
+                val out = LinkedHashSet<String>()
+                out.addAll(priorityPrefixes)
+                for (host in priorityHosts) {
+                    for (ip in resolved[host].orEmpty()) {
+                        val cidr = SecondExitCatalog.normalizeCidr(ip) ?: continue
+                        if (includeIpv6 || ':' !in cidr) out.add(cidr)
+                    }
+                }
+                out.addAll(listPrefixes)
+                for (host in listHosts) {
+                    for (ip in resolved[host].orEmpty()) {
+                        val cidr = SecondExitCatalog.normalizeCidr(ip) ?: continue
+                        if (includeIpv6 || ':' !in cidr) out.add(cidr)
+                    }
+                }
+
+                val capped = out.take(SecondExitCatalog.MAX_CIDRS)
+                val csv = capped.joinToString(", ")
+                updateSettings { it.copy(secondExitEnabled = true, secondExitCidrs = csv) }
+
+                val catNames = categories.joinToString(", ") { it.title }
+                val msg = if (capped.isEmpty()) {
+                    "Адреса не найдены (проверьте интернет)"
+                } else {
+                    "Собрано подсетей: ${capped.size}" +
+                        (if (catNames.isNotBlank()) " · $catNames" else "") +
+                        (if (customSites.hosts.isNotEmpty() || customSites.prefixes.isNotEmpty()) " + свои сайты" else "")
+                }
+                appendLog("Второй выход: $msg", if (capped.isNotEmpty()) LogLevel.OK else LogLevel.WARN)
                 _state.update { it.copy(secondExitBusy = false, secondExitStatus = msg) }
+
+                if (capped.isNotEmpty() && reconnectIfUp && currentTunnelUp) {
+                    applySettingsAndReconnect()
+                }
             } catch (e: Exception) {
-                val msg = "Ошибка DoH: ${e.message}"
+                val msg = "Ошибка сборки адресов 2-го выхода: ${e.message}"
                 appendLog(msg, LogLevel.ERROR)
                 _state.update { it.copy(secondExitBusy = false, secondExitStatus = msg) }
             }
         }
     }
+
+    /** Совместимая обёртка для сбора адресов второго выхода. */
+    fun resolveSecondExitDomains() = buildSecondExitRoutes(reconnectIfUp = false)
 
     /** Применяет изменённые настройки маршрутов/сети и переподключает туннель, если он был поднят. */
     fun applySettingsAndReconnect() {
@@ -1229,17 +1377,22 @@ class DesktopController(
             return false
         }
         val cur = _state.value.settings
-        val chosenPreset = preset ?: if (cur.secondExitCidrs.isBlank() && cur.secondExitDomains.isBlank()) SecondExitPreset.TELEGRAM else null
         updateSettings { s ->
-            val nextDomains = chosenPreset?.domains ?: s.secondExitDomains
+            val nextListIds = when (preset) {
+                SecondExitPreset.ALL_FOREIGN -> listOf(SecondExitCatalog.ALL_FOREIGN_ID)
+                SecondExitPreset.TELEGRAM -> listOf("telegram")
+                SecondExitPreset.AI -> listOf("openai", "claude", "google-ai", "ru-ip-blocked")
+                SecondExitPreset.SOCIAL_MEDIA -> listOf("youtube", "discord", "twitter", "meta")
+                null -> s.secondExitListIds.ifEmpty { SecondExitCatalog.DEFAULT_LIST_IDS }
+            }
             val nextCidrs = when {
-                chosenPreset != null && chosenPreset.builtInCidrs.isNotBlank() -> chosenPreset.builtInCidrs
+                preset != null && preset.builtInCidrs.isNotBlank() -> preset.builtInCidrs
                 else -> s.secondExitCidrs
             }
             s.copy(
                 secondExitEnabled = true,
                 secondExitConf = confText.trim(),
-                secondExitDomains = nextDomains,
+                secondExitListIds = nextListIds,
                 secondExitCidrs = nextCidrs
             )
         }
@@ -1249,8 +1402,8 @@ class DesktopController(
         _state.update { it.copy(secondExitStatus = msg) }
         showBanner(msg)
 
-        if (chosenPreset != null && chosenPreset.builtInCidrs.isBlank()) {
-            resolveSecondExitDomains()
+        if (cur.secondExitCidrs.isBlank() || preset != null) {
+            buildSecondExitRoutes(reconnectIfUp = applyNow)
         } else if (applyNow && currentTunnelUp) {
             applySettingsAndReconnect()
         }
@@ -1648,7 +1801,8 @@ class DesktopController(
     private fun buildSecondExitSpec(s: DesktopSettings): SecondExitSpec = SecondExitSpec(
         enabled = s.secondExitEnabled,
         confText = s.secondExitConf,
-        cidrsCsv = s.secondExitCidrs
+        cidrsCsv = s.secondExitCidrs,
+        preferViaWarp = s.secondExitViaWarp
     )
 
     private fun applyCurrentNetworkSettings(cfg: WarpConfig, s: DesktopSettings): WarpConfig = cfg.copy(

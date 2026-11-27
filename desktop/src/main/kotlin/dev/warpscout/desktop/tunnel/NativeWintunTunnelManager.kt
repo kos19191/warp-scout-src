@@ -413,9 +413,13 @@ class NativeWintunTunnelManager(
 
             teardownActiveSession()
 
-            // 1. Определяем IP текущей точки WARP (и Второго выхода) и добавляем /32 bypass-маршруты через физический шлюз.
+            // 1. Определяем IP текущей точки WARP (и Второго выхода, если пробуем напрямую) и добавляем /32 bypass-маршруты через физический шлюз.
             val warpBypassIps = resolveIpv4s(cfg.endpoint.host)
-            val initialBypassTargets = (warpBypassIps + secondBypassIps).distinct()
+            val initialBypassTargets = if (secondExit.preferViaWarp) {
+                warpBypassIps.distinct()
+            } else {
+                (warpBypassIps + secondBypassIps).distinct()
+            }
             if (!skipNetConfig) {
                 val added = netConfig.addBypassHostRoutes(initialBypassTargets, physicalGateway)
                 bypassRoutesAdded.addAll(added)
@@ -615,18 +619,26 @@ class NativeWintunTunnelManager(
                     return false
                 }
 
-                // Попытка 1: прямой WireGuard (быстрый таймаут 3.5 с).
-                val directOk = launchSecondAttempt(viaWarp = false, timeoutMs = minOf(handshakeWaitMs, 3500L))
+                // Попытка 1: если пользователь НЕ включил «сразу через WARP», пробуем прямой WireGuard (3.5 с).
+                val directOk = if (secondExit.preferViaWarp) {
+                    false
+                } else {
+                    launchSecondAttempt(viaWarp = false, timeoutMs = minOf(handshakeWaitMs, 3500L))
+                }
                 if (directOk) {
                     secondUp = true
                     secondViaWarp = false
                     secondServer = secondParsed.endpoint.render()
                     onLog("Второй выход активен напрямую: $secondServer (${exitRouter.size} подсетей)")
                 } else if (!cancelRequested.get()) {
-                    // Попытка 2: Double-Hop поверх уже работающего AmneziaWG/WARP (обход блокировки ТСПУ на UDP 51820!).
-                    onLog("[Второй выход] Прямой WireGuard к ${secondParsed.endpoint.render()} не ответил (вероятно, блокировка ТСПУ) — запускаю поверх WARP (Double-Hop)…")
+                    // Double-Hop поверх уже работающего AmneziaWG/WARP (обход блокировки ТСПУ на UDP 51820!).
+                    if (secondExit.preferViaWarp) {
+                        onLog("[Второй выход] Подключаюсь к ${secondParsed.endpoint.render()} поверх WARP (Double-Hop · обход ТСПУ)…")
+                    } else {
+                        onLog("[Второй выход] Прямой WireGuard к ${secondParsed.endpoint.render()} не ответил (вероятно, блокировка ТСПУ) — запускаю поверх WARP (Double-Hop)…")
+                    }
                     if (!skipNetConfig) {
-                        if (secondBypassIps.isNotEmpty()) {
+                        if (!secondExit.preferViaWarp && secondBypassIps.isNotEmpty()) {
                             netConfig.removeBypassHostRoutes(secondBypassIps, physicalGateway)
                             bypassRoutesAdded.removeAll(secondBypassIps.toSet())
                         }
@@ -651,8 +663,12 @@ class NativeWintunTunnelManager(
                         secondServer = secondParsed.endpoint.render()
                         onLog("Второй выход активен поверх WARP (Double-Hop): $secondServer (${exitRouter.size} подсетей, MSS=${Ipv4Nat.DOUBLE_HOP_MAX_TCP_MSS})")
                     } else {
-                        secondError = "Сервер ${secondParsed.endpoint.render()} не ответил ни напрямую, ни через WARP — проверьте ключи или скачайте новый .conf"
-                        onLog("Второй выход (${secondParsed.endpoint.render()}) не ответил даже поверх WARP — маршруты идут через WARP")
+                        secondError = if (secondExit.preferViaWarp) {
+                            "Сервер ${secondParsed.endpoint.render()} не ответил через WARP — проверьте ключи или скачайте новый .conf"
+                        } else {
+                            "Сервер ${secondParsed.endpoint.render()} не ответил ни напрямую, ни через WARP — проверьте ключи или скачайте новый .conf"
+                        }
+                        onLog("Второй выход (${secondParsed.endpoint.render()}) не ответил поверх WARP — маршруты идут через WARP")
                         runCatching { lane1.close() }
                     }
                 } else {

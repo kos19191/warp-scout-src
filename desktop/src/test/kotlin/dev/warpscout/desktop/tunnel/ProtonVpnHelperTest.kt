@@ -160,6 +160,24 @@ class ProtonVpnHelperTest {
         assertEquals(1, router.route(Ipv4Nat.ipv4Bytes("104.18.32.47")!!))
     }
 
+    @Test
+    fun `SecondExitCatalog parses URLs, wildcards, CIDRs and exposes mobile-parity categories`() {
+        val parsed = SecondExitCatalog.parseCustomSites(
+            "https://chatgpt.com/c/12345, *.openai.com, 1.2.3.4/24, 9.9.9.9 # comment"
+        )
+        assertTrue("chatgpt.com" in parsed.hosts)
+        assertTrue("www.chatgpt.com" in parsed.hosts)
+        assertTrue("openai.com" in parsed.hosts)
+        assertTrue("1.2.3.0/24" in parsed.prefixes, "Host bits must be masked out in CIDR")
+        assertTrue("9.9.9.9/32" in parsed.prefixes)
+
+        assertEquals(listOf("openai", "claude", "google-ai", "ru-ip-blocked"), SecondExitCatalog.DEFAULT_LIST_IDS)
+        assertTrue("auth.openai.com" in SecondExitCatalog.byId["openai"]!!.extraHosts)
+        assertTrue("grok.com" in SecondExitCatalog.byId["ru-ip-blocked"]!!.extraHosts)
+        assertEquals(10, SecondExitCatalog.byId["telegram"]!!.builtInPrefixes.size)
+        assertEquals(13, SecondExitCatalog.byId["youtube"]!!.builtInPrefixes.size)
+    }
+
     private fun buildTcpSynWithOptions(src: ByteArray, dst: ByteArray, tcpOpts: ByteArray): ByteArray {
         require(tcpOpts.size % 4 == 0)
         val total = 20 + 20 + tcpOpts.size

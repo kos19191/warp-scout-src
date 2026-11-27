@@ -29,7 +29,8 @@ enum class TunnelPhase(val title: String) {
 data class SecondExitSpec(
     val enabled: Boolean = false,
     val confText: String = "",
-    val cidrsCsv: String = ""
+    val cidrsCsv: String = "",
+    val preferViaWarp: Boolean = true
 ) {
     val activeCandidate: Boolean get() = enabled && confText.isNotBlank() && cidrsCsv.isNotBlank()
 }

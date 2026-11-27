@@ -343,7 +343,8 @@ class NativeWintunTunnelManagerTest {
                 secondExit = SecondExitSpec(
                     enabled = true,
                     confText = protonConfText,
-                    cidrsCsv = "0.0.0.0/0"
+                    cidrsCsv = "0.0.0.0/0",
+                    preferViaWarp = false
                 )
             )
             assertTrue(ok, "Tunnel must connect")
@@ -351,6 +352,71 @@ class NativeWintunTunnelManagerTest {
             assertTrue(manager.snapshot.secondExitActive, "Second exit must be active via Double-Hop")
             assertTrue(manager.snapshot.secondExitViaWarp, "secondExitViaWarp must be true")
             assertEquals(protonEp.render(), manager.snapshot.secondExitServer)
+        } finally {
+            manager.shutdown()
+        }
+    }
+
+    @Test
+    fun `second exit connects immediately via Double-Hop when preferViaWarp is true`() {
+        val warpSrvPriv = ByteArray(32) { (it * 3 + 7).toByte() }
+        val warpSrvPub = Crypto.publicOf(warpSrvPriv)
+        val protonSrvPriv = ByteArray(32) { (it * 5 + 13).toByte() }
+        val protonSrvPub = Crypto.publicOf(protonSrvPriv)
+        val protonClientPriv = ByteArray(32) { (it * 7 + 19).toByte() }
+
+        val warpEp = Endpoint("188.114.96.4", 854)
+        val protonEp = Endpoint("217.138.213.2", 51820)
+        val primaryCfg = testConfig(warpEp, warpSrvPub)
+        val protonConfText = """
+            [Interface]
+            PrivateKey = ${Base64.getEncoder().encodeToString(protonClientPriv)}
+            Address = 10.2.0.2/32
+            DNS = 10.2.0.1
+
+            [Peer]
+            # CA-FREE#20
+            PublicKey = ${Base64.getEncoder().encodeToString(protonSrvPub)}
+            AllowedIPs = 0.0.0.0/0
+            Endpoint = ${protonEp.render()}
+        """.trimIndent()
+
+        var protonAttempts = 0
+        val manager = NativeWintunTunnelManager(
+            nativeDir = File(System.getProperty("java.io.tmpdir")),
+            runner = FakeCommandRunner(elevated = true),
+            tunFactory = { name -> InMemoryTunDevice(name) },
+            udpFactory = { ep ->
+                when (ep) {
+                    warpEp -> ResponderUdpChannel(ep, warpEp, warpSrvPriv)
+                    protonEp -> {
+                        protonAttempts++
+                        ResponderUdpChannel(ep, protonEp, protonSrvPriv)
+                    }
+                    else -> ResponderUdpChannel(ep, Endpoint("0.0.0.0", 1), warpSrvPriv)
+                }
+            },
+            exitProber = { ExitInfo(ip = "217.138.213.2", colo = "YYZ", country = "CA", warpOn = false) },
+            handshakeWaitMs = 2000L,
+            statsPollMs = 5000L,
+            requireElevationCheck = false,
+            skipNetConfig = true
+        )
+
+        try {
+            val ok = manager.connect(
+                primary = primaryCfg,
+                secondExit = SecondExitSpec(
+                    enabled = true,
+                    confText = protonConfText,
+                    cidrsCsv = "0.0.0.0/0",
+                    preferViaWarp = true
+                )
+            )
+            assertTrue(ok)
+            assertEquals(1, protonAttempts, "preferViaWarp=true must skip direct attempt and connect via WARP immediately")
+            assertTrue(manager.snapshot.secondExitActive)
+            assertTrue(manager.snapshot.secondExitViaWarp)
         } finally {
             manager.shutdown()
         }
