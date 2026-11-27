@@ -1139,7 +1139,7 @@ class DesktopController(
         auxWorker.execute {
             try {
                 val secondParsed = WgConf.toWarpConfig("second-exit", _state.value.settings.secondExitConf)
-                val includeIpv6 = secondParsed == null || secondParsed.account.ipv6.isNotBlank()
+                val includeIpv6 = secondParsed == null || !secondParsed.account.ipv6.isNullOrBlank()
                 val resolved = AllowListPlanner.resolveAll(domains)
                 val cidrs = LinkedHashSet<String>()
                 var unresolvedCount = 0

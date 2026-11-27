@@ -359,7 +359,7 @@ class NativeWintunTunnelManager(
         val secondBypassIps = if (secondParsed != null) resolveIpv4s(secondParsed.endpoint.host) else emptyList()
         val rawSecondCidrs = if (secondParsed != null) ExitRouter.parse(secondExit.cidrsCsv) else emptyList()
         val isAllForeignSecond = rawSecondCidrs.any { it.trim() == "0.0.0.0/0" }
-        val secondHasIpv6 = secondParsed != null && secondParsed.account.ipv6.isNotBlank()
+        val secondHasIpv6 = secondParsed != null && !secondParsed.account.ipv6.isNullOrBlank()
         // Защита от петли в Double-Hop и защита от отправки IPv6 в IPv4-only второй туннель (ProtonVPN):
         //  1. Если у второго выхода нет IPv6 — фильтруем IPv6 CIDR.
         //  2. Всегда вырезаем IP самого сервера второго выхода из ExitRouter, чтобы даже с 0.0.0.0/0
