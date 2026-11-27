@@ -604,7 +604,7 @@ class NativeWintunTunnelManager(
                         tunInput = secondIn,
                         tunOutput = secondOut,
                         config = secondParsed,
-                        settings = NetSettings(attempts = 3, timeoutMs = 1300),
+                        settings = NetSettings(attempts = 5, timeoutMs = 1800),
                         onTunnelUp = { latch.countDown() },
                         screenOn = { true },
                         log = { msg -> onLog("[Второй выход] $msg") },
@@ -675,9 +675,12 @@ class NativeWintunTunnelManager(
                         if (!routeRes.ok) {
                             onLog("Предупреждение при установке маршрутов Double-Hop: ${routeRes.combined.take(160)}")
                         }
+                        // Короткая пауза, чтобы Windows IP-стек гарантированно принял новые маршруты Wintun
+                        // перед первым UDP-пакетом Double-Hop.
+                        runCatching { Thread.sleep(150L) }
                     }
 
-                    val warpHopOk = launchSecondAttempt(viaWarp = true, timeoutMs = minOf(handshakeWaitMs, 6500L))
+                    val warpHopOk = launchSecondAttempt(viaWarp = true, timeoutMs = minOf(handshakeWaitMs, 8000L))
                     if (warpHopOk) {
                         secondUp = true
                         secondViaWarp = true

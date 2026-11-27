@@ -53,22 +53,42 @@ object Wg {
         val mac1Key: ByteArray
     )
 
-    /** TAI64N (12 байт): 8 байт = секунды (младшие 62 бита) + старшие биты наносекунд, 4 байта = остаток. */
-    fun tai64n(millis: Long = System.currentTimeMillis()): ByteArray {
-        val nsTotal = millis * 1_000_000L
-        val sec = nsTotal / 1_000_000_000L
-        val nsec = nsTotal % 1_000_000_000L
-        val packed = ((nsec shl 2) and 0x3f00000000000000L) or (sec and 0x3fffffffffffffffL)
+    private val lastTai64nNs = java.util.concurrent.atomic.AtomicLong(0L)
+
+    /**
+     * TAI64N (12 байт, big-endian), строго по спецификации WireGuard и `wireguard-linux` (`noise.c`):
+     *  • байты 0..7: big-endian u64 = `0x400000000000000a + seconds_since_1970`;
+     *  • байты 8..11: big-endian u32 = `nanoseconds` (0..999_999_999).
+     *
+     * Сервер WireGuard (в т.ч. ProtonVPN на ядре Linux) защищается от replay-атак простым
+     * беззнаковым побайтовым сравнением `memcmp(new_ts, last_ts, 12) > 0`. Поэтому порядок байт
+     * обязан быть big-endian — иначе при переходе младшего байта секунды `255 → 0` (каждые 256 с)
+     * сервер начинает отвергать все новые инициации и rekey как «устаревшие».
+     */
+    fun tai64n(millis: Long = System.currentTimeMillis(), extraNanos: Int = 0): ByteArray {
+        val secBase = Math.floorDiv(millis, 1000L)
+        val remMs = Math.floorMod(millis, 1000L)
+        val totalNs = remMs * 1_000_000L + extraNanos.coerceIn(0, 999_999)
+        val sec = 0x400000000000000aL + secBase + (totalNs / 1_000_000_000L)
+        val nsec = (totalNs % 1_000_000_000L).toInt()
         val out = ByteArray(12)
-        var v = packed
         for (i in 0 until 8) {
-            out[i] = (v and 0xff).toByte()
-            v = v ushr 8
+            out[i] = (sec ushr (56 - i * 8)).toByte()
         }
-        val hi = (nsec ushr 62).toInt()
-        out[8] = hi.toByte(); out[9] = (hi ushr 8).toByte()
-        out[10] = (hi ushr 16).toByte(); out[11] = (hi ushr 24).toByte()
+        out[8] = (nsec ushr 24).toByte()
+        out[9] = (nsec ushr 16).toByte()
+        out[10] = (nsec ushr 8).toByte()
+        out[11] = nsec.toByte()
         return out
+    }
+
+    /** Строго монотонный TAI64N (защита от одинаковых миллисекунд и отката часов ОС по NTP). */
+    fun nextTai64n(): ByteArray {
+        val nowNs = System.currentTimeMillis() * 1_000_000L
+        val monoNs = lastTai64nNs.updateAndGet { prev -> if (nowNs > prev) nowNs else prev + 1L }
+        val ms = Math.floorDiv(monoNs, 1_000_000L)
+        val subNs = Math.floorMod(monoNs, 1_000_000L).toInt()
+        return tai64n(ms, subNs)
     }
 
     private fun aeadKey(counter: Long = 0): ByteArray = ByteArray(12) // nonce = 0 (4 байта нуля + le64(0))
@@ -126,7 +146,7 @@ object Wg {
         ck = Blake2s.hmac(temp, byteArrayOf(0x01))
         key = Blake2s.hmac(temp, ck + byteArrayOf(0x02))
 
-        val ts = timestamp ?: tai64n()
+        val ts = timestamp ?: nextTai64n()
         require(ts.size == 12) { "TAI64N = 12 байт" }
         val encryptedTimestamp = Crypto.chacha20Poly1305Seal(key, aeadKey(), ts, h)
         encryptedTimestamp.copyInto(buf, 88)                        // 28 байт: 12 + 16(tag)

@@ -235,4 +235,31 @@ class ProtonVpnHelperTest {
         while ((sum ushr 16) != 0) sum = (sum and 0xFFFF) + (sum ushr 16)
         return sum.inv() and 0xFFFF
     }
+
+    @Test
+    fun tai64nIsBigEndianAndStrictlyMonotonicAcross256SecondWrap() {
+        fun unsignedMemcmp(a: ByteArray, b: ByteArray): Int {
+            for (i in 0 until minOf(a.size, b.size)) {
+                val cmp = (a[i].toInt() and 0xFF) - (b[i].toInt() and 0xFF)
+                if (cmp != 0) return cmp
+            }
+            return a.size - b.size
+        }
+
+        // Проверяем границу 255 -> 256 секунд (где старый little-endian TAI64N откатывался назад и ломал WireGuard rekey!).
+        val t255 = dev.warpscout.core.wg.Wg.tai64n(1_700_000_255_900L)
+        val t256 = dev.warpscout.core.wg.Wg.tai64n(1_700_000_256_000L)
+        assertEquals(12, t255.size)
+        assertEquals(0x40, t255[0].toInt() and 0xFF, "TAI64 epoch high byte must be 0x40 (big-endian)")
+        assertEquals(0x40, t256[0].toInt() and 0xFF)
+        assertTrue(unsignedMemcmp(t256, t255) > 0, "TAI64N must strictly increase across 255->256s wrap")
+
+        // Проверяем строгую монотонность подряд идущих вызовов nextTai64n() даже в пределах 1 мс.
+        var prev = dev.warpscout.core.wg.Wg.nextTai64n()
+        repeat(50) {
+            val cur = dev.warpscout.core.wg.Wg.nextTai64n()
+            assertTrue(unsignedMemcmp(cur, prev) > 0, "nextTai64n() must always be strictly greater by memcmp")
+            prev = cur
+        }
+    }
 }
