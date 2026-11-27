@@ -20,7 +20,7 @@ object NetProbes {
 
     private val random = SecureRandom()
     private val IPV4_RE = Regex("""^\d{1,3}(\.\d{1,3}){3}$""")
-    private val DOH_DATA_RE = Regex(""""type"\s*:\s*1\b[^}]*?"data"\s*:\s*"(\d{1,3}(?:\.\d{1,3}){3})"""")
+    private val DOH_DATA_RE = Regex("\"type\"\\s*:\\s*1\\b[^}]*?\"data\"\\s*:\\s*\"(\\d{1,3}(?:\\.\\d{1,3}){3})\"")
 
     /**
      * Пошаговый зонд: DNS → TCP → TLS (с SNI) → HTTP GET + чтение до [maxBodyBytes].

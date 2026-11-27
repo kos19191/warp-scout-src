@@ -95,10 +95,10 @@ object AndroidNetworkCollector {
         val privateDnsServer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) lp?.privateDnsServerName.orEmpty() else ""
 
         val proxyInfo = lp?.httpProxy
+        val pacStr = proxyInfo?.pacFileUrl?.toString().orEmpty()
         val httpProxy = when {
             proxyInfo == null -> "нет"
-            !proxyInfo.pacFileUrl.toString().isNullOrBlank() && proxyInfo.pacFileUrl.toString() != "null" ->
-                "PAC: ${proxyInfo.pacFileUrl}"
+            pacStr.isNotBlank() && pacStr != "null" -> "PAC: $pacStr"
             !proxyInfo.host.isNullOrBlank() -> "${proxyInfo.host}:${proxyInfo.port}"
             else -> "нет"
         }
