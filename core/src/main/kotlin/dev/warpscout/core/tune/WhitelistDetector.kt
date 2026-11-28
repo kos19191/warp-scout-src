@@ -15,7 +15,7 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
-import javax.security.cert.X509Certificate
+import java.security.cert.X509Certificate
 
 /**
  * Детектор режима «белых списков» (ТСПУ, default-deny).

@@ -12,7 +12,7 @@ import java.net.UnknownHostException
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.X509TrustManager
-import javax.security.cert.X509Certificate
+import java.security.cert.X509Certificate
 
 /**
  * TCP/TLS-канал, реализующий [UdpChannel] — поэтому им можно заменить UDP-сокет в [DataPlane]
