@@ -144,7 +144,7 @@ object SniSource {
                 var line: String?
                 while { line = reader.readLine(); line != null } {
                     val trimmed = line.trim()
-                    if (trimmed.isNotEmpty() && trimmed !startsWith "#") {
+                    if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
                         out += sanitize(trimmed)
                     }
                 }
@@ -186,7 +186,7 @@ object SniSource {
             val ageMs = System.currentTimeMillis() - file.lastModified()
             if (ageMs > 24 * 60 * 60 * 1000) return@runCaching emptyList() // кеш старше суток — не доверяем
             BufferedReader(InputStreamReader(java.io.FileInputStream(file), "UTF-8")).use { reader ->
-                reader.lines().map { it.trim() }.filter { it.isNotEmpty() && it !startsWith "#" }.toList()
+                reader.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
             }
         }.getOrDefault(emptyList())
     }
