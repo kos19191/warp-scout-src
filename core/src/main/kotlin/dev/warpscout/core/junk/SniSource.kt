@@ -12,7 +12,7 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Источник SNI-доменов для QUIC-маски.
  *
- * Статический список [JunkLibrary.SNI_DOMAINS] мал (24 домена) и использовать его 항상 по порядку
+ * Статический список [JunkLibrary.SNI_DOMAINS] мал (24 домена) и использовать его всегда по порядку
  * — значит быстро выучить несколько паттернов и начать их резать. Для белых списков нужно:
  *  1. Больше доменов (лучше — весь актуальный белый список Минцифры);
  *  2. Ротация SNI при каждой попытке, а не первые три из фиксированного списка;
@@ -70,7 +70,7 @@ object SniSource {
         val now = System.currentTimeMillis()
 
         // 1. Пробуем удалённый источник, если задан и кеш протух.
-        if (settings.remoteUrl.isNotBlank() && (now - lastFetch > settings.cacheMaxAgeMs)) {
+        if (settings.remoteUrl?.isNotBlank() == true && (now - lastFetch > settings.cacheMaxAgeMs)) {
             val remote = tryLoadRemote(settings)
             if (remote.isNotEmpty()) {
                 val cfg = SniConfig(remote, "remote", now)
@@ -124,8 +124,8 @@ object SniSource {
     // --------------------------------------------------------------- загрузка
 
     private fun tryLoadRemote(settings: SniSettings): List<String> {
+        val url = settings.remoteUrl ?: return emptyList()
         return runCatching {
-            val url = URL(settings.remoteUrl ?: return@runCatching emptyList())
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "GET"
             conn.connectTimeout = settings.timeoutMs
@@ -134,25 +134,28 @@ object SniSource {
             conn.useCaches = false
             conn.connect()
 
-            if (conn.responseCode != 200) return@runCatching emptyList()
-
-            val reader = BufferedReader(InputStreamReader(conn.inputStream, "UTF-8"))
-            val out = mutableListOf<String>()
-            try {
-                var line: String?
-                while (true) {
-                    line = reader.readLine()
-                    if (line == null) break
-                    val trimmed = line.trim()
-                    if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
-                        out += sanitize(trimmed)
+            val result = if (conn.responseCode != 200) {
+                emptyList<String>()
+            } else {
+                val reader = BufferedReader(InputStreamReader(conn.inputStream, "UTF-8"))
+                val out = mutableListOf<String>()
+                try {
+                    var line: String?
+                    while (true) {
+                        line = reader.readLine()
+                        if (line == null) break
+                        val trimmed = line.trim()
+                        if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
+                            out += sanitize(trimmed)
+                        }
                     }
+                } finally {
+                    reader.close()
                 }
-            } finally {
-                reader.close()
+                conn.disconnect()
+                out.filter { it.isNotEmpty() }
             }
-            conn.disconnect()
-            out.filter { it.isNotEmpty() }
+            result
         }.getOrDefault(emptyList())
     }
 
