@@ -7,9 +7,7 @@ import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 
 /**
  * Источник SNI-доменов для QUIC-маски.
@@ -33,9 +31,9 @@ data class SniConfig(
     val fetchedAt: Long? = null
 ) {
     val isEmpty: Boolean get() = domains.isEmpty()
-    fun random(random: SecureRandom = Crypto.random): String? =
+    fun random(random: kotlin.random.Random = kotlin.random.Random.Default): String? =
         domains.randomOrNull(random)
-    fun rotate(random: SecureRandom = Crypto.random): List<String> =
+    fun rotate(random: kotlin.random.Random = kotlin.random.Random.Default): List<String> =
         domains.shuffled(random)
 }
 
@@ -127,7 +125,7 @@ object SniSource {
 
     private fun tryLoadRemote(settings: SniSettings): List<String> {
         return runCatching {
-            val url = URL(settings.remoteUrl!!)
+            val url = URL(settings.remoteUrl ?: return@runCatching emptyList())
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "GET"
             conn.connectTimeout = settings.timeoutMs
@@ -142,7 +140,9 @@ object SniSource {
             val out = mutableListOf<String>()
             try {
                 var line: String?
-                while { line = reader.readLine(); line != null } {
+                while (true) {
+                    line = reader.readLine()
+                    if (line == null) break
                     val trimmed = line.trim()
                     if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
                         out += sanitize(trimmed)
