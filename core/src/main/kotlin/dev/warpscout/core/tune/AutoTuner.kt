@@ -861,3 +861,4 @@ class AutoTuner(
 
     private fun EndpointSpec.name(): String =
     "pool[${subnets.size} подсетей × ${ports.size} портов, ${mode.name.lowercase()}, seed=$seed]"
+}
