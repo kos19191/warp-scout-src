@@ -509,8 +509,6 @@ class AutoTuner(
         refineCandidates.take(6).associate { it.endpoint to tlsProber.probe(it.endpoint, sni = sniFor(it.endpoint)) }
     } else emptyMap()
 
-    } // end else (whitelistMode == false)
-
     // --- кандидаты: endpoint × профиль ----------------------------------------------
     val candidates = ArrayList<Candidate>()
     for ((endpoint, profiles) in perProfile) {
