@@ -92,7 +92,11 @@ object JunkLibrary {
 
     /** Версия defaultPool с SNI из удалённого источника (SniSource). При ошибке сети — fallback на локальный список. */
     fun defaultPoolRemote(settings: SniSettings = SniSettings.Default, sniCount: Int = 3, level: Int = 3, seed: Long = 7L): List<JunkProfile> {
-        val snis = SniSource.sniPool(settings.copy(poolSize = sniCount))
+        // defaultPool() должен быть детерминированным: nameOf() сравнивает шаблоны профиля с библиотечными,
+        // и если набор quic-профилей плавает (rotate/shuffle), сопоставление ломается. Рандомная ротация
+        // нужна только в sniPool() для AutoTuner — здесь берём домены в фиксированном порядке.
+        val cfg = SniSource.load(settings)
+        val snis = cfg.domains.sorted().take(sniCount.coerceAtLeast(1).coerceAtMost(cfg.domains.size))
         return buildList {
             // «Без шума» — такой же участник сравнения, как остальные: на части сетей DPI не трогает
             // WireGuard вообще, и тогда любая маскировка только мешает. Раньше этот вариант
