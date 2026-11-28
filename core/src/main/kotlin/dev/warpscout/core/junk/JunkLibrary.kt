@@ -5,6 +5,7 @@ import dev.warpscout.core.model.AwgParams
 import dev.warpscout.core.model.JunkChunk
 import dev.warpscout.core.model.JunkKind
 import dev.warpscout.core.model.JunkProfile
+import dev.warpscout.core.tune.SniSettings
 
 /**
  * Библиотека профилей «шума» (AWG I1/I2). Это то, что в РФ приходится постоянно перенастраивать:
@@ -86,7 +87,12 @@ object JunkLibrary {
      * SNI из белого списка + SIP. Порядок такой, чтобы дешёвые/типовые проверялись первыми.
      */
     fun defaultPool(sniCount: Int = 3, level: Int = 3, seed: Long = 7L): List<JunkProfile> {
-        val snis = SNI_DOMAINS.take(sniCount.coerceAtLeast(1))
+        return defaultPoolRemote(SniSettings.Default, sniCount, level, seed)
+    }
+
+    /** Версия defaultPool с SNI из удалённого источника (SniSource). При ошибке сети — fallback на локальный список. */
+    fun defaultPoolRemote(settings: SniSettings = SniSettings.Default, sniCount: Int = 3, level: Int = 3, seed: Long = 7L): List<JunkProfile> {
+        val snis = SniSource.sniPool(settings.copy(poolSize = sniCount))
         return buildList {
             // «Без шума» — такой же участник сравнения, как остальные: на части сетей DPI не трогает
             // WireGuard вообще, и тогда любая маскировка только мешает. Раньше этот вариант

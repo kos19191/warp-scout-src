@@ -21,6 +21,11 @@ import dev.warpscout.core.net.ResourceProber
 import dev.warpscout.core.net.TlsProber
 import dev.warpscout.core.net.WgProber
 import dev.warpscout.core.presets.Presets
+import dev.warpscout.core.junk.SniSettings
+import dev.warpscout.core.junk.SniSource
+import dev.warpscout.core.net.WarpDefaults
+import dev.warpscout.core.tunnel.MasqueTransport
+import dev.warpscout.core.tunnel.TcpChannel
 import dev.warpscout.core.config.WgConf
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -205,6 +210,21 @@ class AutoTuner(
         }
         val peerPublic = Crypto.unBase64(account.peerPublicB64)
 
+        // --- P0: детекция белых списков -------------------------------------------
+        // Если сеть в режиме default-deny (ТСПУ), UDP-скан к Cloudflare бесполезен —
+        // переключаемся на MASQUE TCP 443 к whitelisted SNI.
+        val whitelist = WhitelistDetector.detect(spec.net, progress)
+        val whitelistMode = whitelist.isWhitelist()
+        if (whitelistMode) {
+            notes += "Белые списки активны (default-deny): UDP к Cloudflare режется, переходим на MASQUE TCP 443"
+            progress.log("whitelist: ACTIVE — используем MASQUE TCP-транспорт")
+        } else if (whitelist.status == dev.warpscout.core.tune.WhitelistStatus.NETWORK_DOWN) {
+            notes += "Сеть не отвечает вообще — подбор не имеет смысла"
+            progress.log("whitelist: сеть не работает")
+        } else {
+            progress.log("whitelist: обычный режим, UDP-скан как обычно")
+        }
+
         // Сохранённую конфигурацию пробуем первой: проверить одну точку — секунды, полный
         // скан пула — минуты и заметный расход батареи. Не подтвердилась — честно идём в полный подбор.
         val cached = spec.cachedStart
@@ -214,7 +234,7 @@ class AutoTuner(
                 // должен рассказывать пользователю про точки, которые он даже не проверял.
                 val quickNotes = notes.toMutableList()
                 quickNotes += "Быстрый старт: сохранённые точки проверены заново, полный скан не понадобился."
-                val quick = tuneWith(narrow, progress, started, quickNotes, account, peerPublic)
+                val quick = tuneWith(narrow, progress, started, quickNotes, account, peerPublic, whitelistMode)
                 val usable = quick.report.candidates.filter { it.usable }
                     .map { it.config.endpoint.render() }
                     .distinct()
@@ -239,11 +259,11 @@ class AutoTuner(
                 )
                 // Прежние точки полный подбор проверит подробно первыми (если они ответят).
                 val prior = (listOf(cached.endpoint) + cached.queue).distinct()
-                return tuneWith(spec.copy(priority = spec.priority + prior), progress, started, notes, account, peerPublic)
+                return tuneWith(spec.copy(priority = spec.priority + prior), progress, started, notes, account, peerPublic, whitelistMode)
             }
         }
 
-        return tuneWith(spec, progress, started, notes, account, peerPublic)
+        return tuneWith(spec, progress, started, notes, account, peerPublic, whitelistMode)
     }
 
     /**
@@ -327,16 +347,60 @@ class AutoTuner(
         started: LocalDateTime,
         notes: MutableList<String>,
         account: dev.warpscout.core.model.WarpAccount,
-        peerPublic: ByteArray
+        peerPublic: ByteArray,
+        whitelistMode: Boolean = false
     ): TuningResult {
     val peerPublic = Crypto.unBase64(account.peerPublicB64)
-    // Прежняя очередь — в пул первой: её точек может не быть в выборке пула.
-    val endpoints = (spec.priority.filter { !it.host.contains(':') } + EndpointPool.build(spec.endpointSpec)).distinct()
+
+    // P1: в режиме белых списков используем MASQUE TCP-endpoints (162.159.198/199.*, 443/8443/…)
+    // вместо AWG UDP. WgProber не сможет проверить их по UDP, поэтому пул строим из MASQUE
+    // подсетей, а проверка пойдёт через TlsProber (TLS_OK — признак живого endpoint'а).
+    val endpointSpec = if (spec.endpointSpec.mode == dev.warpscout.core.net.PoolMode.EXPLICIT) {
+        spec.endpointSpec // явный список — используем как есть
+    } else {
+        val masqueSpec = dev.warpscout.core.net.EndpointSpec(
+            subnets = dev.warpscout.core.net.WarpDefaults.MASQUE_SUBNETS,
+            hostnames = emptyList(),
+            ports = dev.warpscout.core.net.WarpDefaults.MASQUE_PORTS,
+            octetRange = 1..10,
+            mode = dev.warpscout.core.net.PoolMode.STRATIFIED,
+            samplesPerKey = 2,
+            maxEndpoints = 200,
+            seed = spec.endpointSpec.seed
+        )
+        if (whitelistMode) {
+            notes += "Пул endpoint'ов переключён на MASQUE подсети (TCP 443)"
+            progress.log("пул: MASQUE подсети для белых списков")
+        }
+        masqueSpec
+    }
+
+    // Прежняя очередь — в пул первой: её точек могут не быть в выборке пула.
+    val endpoints = (spec.priority.filter { !it.host.contains(':') } + EndpointPool.build(endpointSpec)).distinct()
     progress.log("Ключи: ${account.source}; кандидатов: ${endpoints.size}")
 
     // --- фаза 1: быстрый скан -------------------------------------------------------
-    val coarse = wgProber.scan(endpoints, account, peerPublic, junk = null, isCancelled = { progress.isCancelled() }) { d, t, _ ->
-        if (d % 25 == 0 || d == t) progress.progress(d, t, "первичный UDP-скан")
+    // В режиме белых списков UDP к MASQUE endpoint'ам не пробиться — режется на L3.
+    // Используем TLS-пробу (TCP 443) вместо WG handshake.
+    val coarse = if (whitelistMode) {
+        progress.log("первичный TLS-скан (MASQUE TCP 443)")
+        endpoints.map { ep ->
+            if (progress.isCancelled()) null
+            else {
+                val sample = tlsProber.probe(ep, sni = sniFor(ep))
+                EndpointStats(
+                    endpoint = ep,
+                    samples = listOf(sample),
+                    bestVerdict = sample.verdict,
+                    replies = if (sample.verdict == Verdict.TLS_OK) 1 else 0,
+                    attempts = 1
+                )
+            }
+        }.filterNotNull()
+    } else {
+        wgProber.scan(endpoints, account, peerPublic, junk = null, isCancelled = { progress.isCancelled() }) { d, t, _ ->
+            if (d % 25 == 0 || d == t) progress.progress(d, t, "первичный UDP-скан")
+        }
     }
     if (progress.isCancelled()) return finish(spec, started, notes, emptyList(), emptyList(), account, progress, endpoints.size)
 
@@ -346,8 +410,9 @@ class AutoTuner(
             .thenBy { it.minRtt ?: Double.MAX_VALUE }
             .thenBy { it.lossPct }
     )
-    val alive = ranked.filter { it.bestVerdict in setOf(Verdict.HANDSHAKE_OK, Verdict.COOKIE_REPLY) }
-    notes += "Живых (подтверждённый handshake/cookie): ${alive.size} из ${ranked.size}"
+    val aliveVerdicts = if (whitelistMode) setOf(Verdict.TLS_OK) else setOf(Verdict.HANDSHAKE_OK, Verdict.COOKIE_REPLY)
+    val alive = ranked.filter { it.bestVerdict in aliveVerdicts }
+    notes += "Живых (${if (whitelistMode) "TLS OK" else "подтверждённый handshake/cookie"}): ${alive.size} из ${ranked.size}"
 
     // Ответившие точки прежней очереди проверяются подробно в любом случае — первыми.
     val prior = spec.priority.mapTo(HashSet()) { it.render() }
@@ -363,51 +428,58 @@ class AutoTuner(
         families.joinToString(", ") { if (it.all { ch -> ch.isDigit() }) "$it.*" else it }
 
     // --- фаза 2: подробно, по профилям шума ---------------------------------------
-    // Шум, который на этой сети замерзает (знает приложение по прошлым подборам и подключениям),
-    // не проверяем: одна проба данных его не разоблачает, а место в очереди он займёт.
+    // В режиме белых списков AWG handshake недоступен (UDP режется на L3) — фаза 2
+    // пропускается: за TLS_OK уже ответила фаза 1, шум не нужен.
     val activeProfiles = spec.junkProfiles.filter { it.name !in spec.excludeJunk }.ifEmpty { spec.junkProfiles }
-    val skipped = spec.junkProfiles.filter { it.name in spec.excludeJunk }.map { it.name }
-    if (skipped.isNotEmpty() && activeProfiles.size < spec.junkProfiles.size) {
-        val line = "На этой сети замерзает шум: ${skipped.joinToString(", ")} — не проверяю его"
-        notes += line
-        progress.log(line)
-    }
     val perProfile = LinkedHashMap<Endpoint, MutableMap<String, EndpointStats>>()
-    val totalWork = refineCandidates.size * activeProfiles.size
-    var done = 0
-    // Площадка выхода — одна на адрес (зависит от адреса и сети, а не от шума): спрашиваем, пока не
-    // узнали, и не больше трёх раз на адрес — если резолвер её не называет, проба не тратит время.
     val siteByHost = HashMap<String, String>()
-    val siteTries = HashMap<String, Int>()
-    for (stats in refineCandidates) {
-        for (profile in activeProfiles) {
-            if (progress.isCancelled()) break
-            val host = stats.endpoint.host
-            val ask = spec.dataProbe && host !in siteByHost && (siteTries[host] ?: 0) < 3
-            val refined = wgProber.probe(
-                stats.endpoint, account, peerPublic, profile, dataProbe = spec.dataProbe, askSite = ask
-            ).stats
-            if (ask && refined.dataReplies > 0) siteTries[host] = (siteTries[host] ?: 0) + 1
-            refined.site?.let { siteByHost[host] = it }
-            perProfile.getOrPut(stats.endpoint) { LinkedHashMap() }[profile.name] = refined
-            done++
-            val dataMark = when {
-                refined.dataTried == 0 -> ""
-                refined.dataReplies > 0 -> " · данные ✓"
-                else -> " · данных нет"
-            }
-            progress.progress(done, totalWork, "${stats.endpoint.render()} · ${profile.name} · ${refined.bestVerdict}$dataMark")
+    if (whitelistMode) {
+        progress.log("фаза 2: пропускаем — только TLS (MASQUE)")
+        for (stats in alive) {
+            perProfile.getOrPut(stats.endpoint) { LinkedHashMap() }["none"] = stats
         }
-    }
-    if (spec.dataProbe) {
-        // Итог проверки данных — в журнал подбора: по нему видно, режет ли сеть сам туннель.
-        val tried = perProfile.values.flatMap { it.values }.filter { it.dataTried > 0 }
-        if (tried.isNotEmpty()) {
-            val passed = tried.count { it.dataReplies > 0 }
-            val line = "Данные через туннель: пошли у $passed из ${tried.size} вариантов «точка + шум»" +
-                (if (passed == 0) " — рукопожатие проходит, а данные нет: сеть режет сам туннель" else "")
+    } else {
+        val skipped = spec.junkProfiles.filter { it.name in spec.excludeJunk }.map { it.name }
+        if (skipped.isNotEmpty() && activeProfiles.size < spec.junkProfiles.size) {
+            val line = "На этой сети замерзает шум: ${skipped.joinToString(", ")} — не проверяю его"
             notes += line
             progress.log(line)
+        }
+        val totalWork = refineCandidates.size * activeProfiles.size
+        var done = 0
+        // Площадка выхода — одна на адрес (зависит от адреса и сети, а не от шума): спрашиваем, пока не
+        // узнали, и не больше трёх раз на адрес — если резолвер её не называет, проба не тратит время.
+        val siteTries = HashMap<String, Int>()
+        for (stats in refineCandidates) {
+            for (profile in activeProfiles) {
+                if (progress.isCancelled()) break
+                val host = stats.endpoint.host
+                val ask = spec.dataProbe && host !in siteByHost && (siteTries[host] ?: 0) < 3
+                val refined = wgProber.probe(
+                    stats.endpoint, account, peerPublic, profile, dataProbe = spec.dataProbe, askSite = ask
+                ).stats
+                if (ask && refined.dataReplies > 0) siteTries[host] = (siteTries[host] ?: 0) + 1
+                refined.site?.let { siteByHost[host] = it }
+                perProfile.getOrPut(stats.endpoint) { LinkedHashMap() }[profile.name] = refined
+                done++
+                val dataMark = when {
+                    refined.dataTried == 0 -> ""
+                    refined.dataReplies > 0 -> " · данные ✓"
+                    else -> " · данных нет"
+                }
+                progress.progress(done, totalWork, "${stats.endpoint.render()} · ${profile.name} · ${refined.bestVerdict}$dataMark")
+            }
+        }
+        if (spec.dataProbe) {
+            // Итог проверки данных — в журнал подбора: по нему видно, режет ли сеть сам туннель.
+            val tried = perProfile.values.flatMap { it.values }.filter { it.dataTried > 0 }
+            if (tried.isNotEmpty()) {
+                val passed = tried.count { it.dataReplies > 0 }
+                val line = "Данные через туннель: пошли у $passed из ${tried.size} вариантов «точка + шум»" +
+                    (if (passed == 0) " — рукопожатие проходит, а данные нет: сеть режет сам туннель" else "")
+                notes += line
+                progress.log(line)
+            }
         }
     }
     if (siteByHost.isNotEmpty()) {
@@ -422,19 +494,22 @@ class AutoTuner(
         progress.log(line)
     }
 
-    // --- фаза 3: MASQUE/TLS, если подсеть задана ------------------------------------
+    // --- фаза 3: MASQUE/TLS, если подсеть задана или режим белых списков --------------
     val tlsResults: Map<Endpoint, ProbeSample> = if (!progress.isCancelled() &&
-        spec.endpointSpec.ports.contains(443) &&
-        spec.endpointSpec.subnets.any { it.startsWith("162.159.19") }
+        (spec.endpointSpec.ports.contains(443) ||
+         spec.endpointSpec.subnets.any { it.startsWith("162.159.198") || it.startsWith("162.159.199") } ||
+         whitelistMode)
     ) {
-        refineCandidates.take(4).associate { it.endpoint to tlsProber.probe(it.endpoint) }
+        refineCandidates.take(6).associate { it.endpoint to tlsProber.probe(it.endpoint, sni = sniFor(it.endpoint)) }
     } else emptyMap()
+
+    } // end else (whitelistMode == false)
 
     // --- кандидаты: endpoint × профиль ----------------------------------------------
     val candidates = ArrayList<Candidate>()
     for ((endpoint, profiles) in perProfile) {
         for ((profileName, stats) in profiles) {
-            val profile = activeProfiles.firstOrNull { it.name == profileName } ?: continue
+            val profile = if (whitelistMode) JunkLibrary.none() else activeProfiles.firstOrNull { it.name == profileName } ?: continue
             val survived = stats.replies > 0
             val tlsSample = tlsResults[endpoint]
             val effectiveStats = if (tlsSample != null && tlsSample.verdict == Verdict.TLS_OK) {
@@ -539,6 +614,16 @@ class AutoTuner(
     }
 
     return finish(spec, started, notes, finalList, resourceResults, account, progress, endpoints.size, frozen = frozenNames)
+    }
+
+    /** SNI для MASQUE-эндпоинта: берём из загруженного пула, циклически. */
+    private var sniIndex = 0
+
+    private fun sniFor(endpoint: Endpoint): String {
+        val pool = SniSource.sniPool(SniSettings.Default.copy(poolSize = 24))
+        val sni = pool[sniIndex % pool.size]
+        sniIndex++
+        return sni
     }
 
     /**
@@ -769,7 +854,6 @@ class AutoTuner(
         }
         return TuningResult(report, best?.config, text, account.source)
     }
-}
 
 private fun EndpointSpec.name(): String =
     "pool[${subnets.size} подсетей × ${ports.size} портов, ${mode.name.lowercase()}, seed=$seed]"
