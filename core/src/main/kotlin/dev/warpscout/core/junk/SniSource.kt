@@ -124,9 +124,9 @@ object SniSource {
     // --------------------------------------------------------------- загрузка
 
     private fun tryLoadRemote(settings: SniSettings): List<String> {
-        val url = settings.remoteUrl ?: return emptyList()
+        val urlString = settings.remoteUrl ?: return emptyList()
         return runCatching {
-            val conn = url.openConnection() as HttpURLConnection
+            val conn = URL(urlString).openConnection() as HttpURLConnection
             conn.requestMethod = "GET"
             conn.connectTimeout = settings.timeoutMs
             conn.readTimeout = settings.timeoutMs
@@ -185,11 +185,17 @@ object SniSource {
     private fun readCache(path: String): List<String> {
         return runCatching {
             val file = File(path)
-            if (!file.exists()) return@runCaching emptyList()
-            val ageMs = System.currentTimeMillis() - file.lastModified()
-            if (ageMs > 24 * 60 * 60 * 1000) return@runCaching emptyList() // кеш старше суток — не доверяем
-            BufferedReader(InputStreamReader(java.io.FileInputStream(file), "UTF-8")).use { reader ->
-                reader.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
+            if (!file.exists()) {
+                emptyList<String>()
+            } else {
+                val ageMs = System.currentTimeMillis() - file.lastModified()
+                if (ageMs > 24 * 60 * 60 * 1000) {
+                    emptyList<String>() // кеш старше суток — не доверяем
+                } else {
+                    BufferedReader(InputStreamReader(java.io.FileInputStream(file), "UTF-8")).use { reader ->
+                        reader.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
+                    }
+                }
             }
         }.getOrDefault(emptyList())
     }
