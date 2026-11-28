@@ -859,5 +859,5 @@ class AutoTuner(
         return TuningResult(report, best?.config, text, account.source)
     }
 
-private fun EndpointSpec.name(): String =
+    private fun EndpointSpec.name(): String =
     "pool[${subnets.size} подсетей × ${ports.size} портов, ${mode.name.lowercase()}, seed=$seed]"

@@ -201,7 +201,7 @@ object WhitelistDetector {
     /** CAPTCHA-гейт: заходим на whitelist-домен по HTTPS и ищем признаки страницы подтверждения. */
     private fun detectCaptcha(host: String, settings: NetSettings): Boolean {
         return runCatching {
-            val sock = settings.tcpFactory.create(Endpoint(host, WHITELIST_PORT))
+            var sock = settings.tcpFactory.create(Endpoint(host, WHITELIST_PORT))
             sock.connect(InetSocketAddress(host, WHITELIST_PORT), settings.connectTimeoutMs.coerceAtMost(PROBE_TIMEOUT_MS))
             val sslCtx = SSLContext.getInstance("TLS")
             sslCtx.init(null, arrayOf(TrustAll), null)

@@ -57,7 +57,7 @@ class TcpChannel(
         }
         sock = settings.tcpFactory.create(endpoint).apply {
             connect(InetSocketAddress(address, endpoint.port), timeoutMs)
-            soTimeout = readTimeoutMs
+            soTimeout = timeoutMs
             tcpNoDelay = true
         }
 
@@ -65,7 +65,7 @@ class TcpChannel(
         ctx.init(null, arrayOf(TrustAll), null)
         ssl = ctx.socketFactory.createSocket(sock!!, sni, endpoint.port, true) as SSLSocket
         sock = ssl
-        ssl.soTimeout = readTimeoutMs
+        ssl.soTimeout = timeoutMs
 
         // Не ставим ALPN — выглядим как обычный TLS-клиент, не как браузер.
         runCatching {
