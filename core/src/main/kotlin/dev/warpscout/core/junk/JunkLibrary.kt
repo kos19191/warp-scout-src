@@ -5,7 +5,7 @@ import dev.warpscout.core.model.AwgParams
 import dev.warpscout.core.model.JunkChunk
 import dev.warpscout.core.model.JunkKind
 import dev.warpscout.core.model.JunkProfile
-import dev.warpscout.core.tune.SniSettings
+import dev.warpscout.core.junk.SniSettings
 
 /**
  * Библиотека профилей «шума» (AWG I1/I2). Это то, что в РФ приходится постоянно перенастраивать:
