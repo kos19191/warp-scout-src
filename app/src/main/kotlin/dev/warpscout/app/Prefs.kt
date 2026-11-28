@@ -2,6 +2,7 @@ package dev.warpscout.app
 
 import android.content.Context
 import dev.warpscout.core.junk.JunkLibrary
+import dev.warpscout.core.junk.SniSettings
 import dev.warpscout.core.model.JunkProfile
 import dev.warpscout.core.net.EndpointPool
 import dev.warpscout.core.net.EndpointSpec
@@ -122,6 +123,16 @@ class Prefs(private val context: Context) {
     var enabledJunk: Set<String>
         get() = sp.getStringSet("junk", junkNames.toSet()) ?: junkNames.toSet()
         set(v) = sp.edit().putStringSet("junk", v).apply()
+
+    /** URL удалённого источника SNI-доменов (plain-text, один домен в строке, # — комментарии). Пусто = локальный список. */
+    var sniUrl: String
+        get() = sp.getString("sniUrl", "") ?: ""
+        set(v) = sp.edit().putString("sniUrl", v).apply()
+
+    /** Принудительно включать режим белых списков (MASQUE TCP 443), игнорируя детект сети. */
+    var whitelistForce: Boolean
+        get() = sp.getBoolean("whitelistForce", false)
+        set(v) = sp.edit().putBoolean("whitelistForce", v).apply()
 
     var scheduleOn: Boolean
         get() = sp.getBoolean("schedule", false)
@@ -829,8 +840,11 @@ class Prefs(private val context: Context) {
         set(v) = sp.edit().putLong("lastChangedAt", v).apply()
 
     val junkPool: List<JunkProfile>
-        get() = JunkLibrary.defaultPool().filter { it.name in enabledJunk }
-            .ifEmpty { listOf(JunkLibrary.none()) }
+        get() {
+            val settings = SniSettings(remoteUrl = sniUrl.takeIf { it.isNotEmpty() })
+            return JunkLibrary.defaultPoolRemote(settings).filter { it.name in enabledJunk }
+                .ifEmpty { listOf(JunkLibrary.none()) }
+        }
 
     /**
      * Что именно сканить.
@@ -1213,6 +1227,7 @@ class Prefs(private val context: Context) {
     fun tuningSpec(): TuningSpec = TuningSpec(
         endpointSpec = endpointSpec(),
         junkProfiles = junkPool,
+        whitelistForce = whitelistForce,
         net = NetSettings(attempts = attempts, timeoutMs = timeoutMs, concurrency = concurrency),
         // С 1.10.30 — отмеченное в «Что проверять». Проверки без VPN и через туннель включаются
         // отдельно, поэтому список нужен, если включена хоть одна из них.

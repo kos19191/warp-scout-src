@@ -131,6 +131,8 @@ data class TuningSpec(
      * Россию, — иначе подбор раз за разом подтверждал бы московские точки и не смотрел остальные.
      */
     val seekAbroad: Boolean = false,
+    /** Принудительно включать режим белых списков (MASQUE TCP 443), игнорируя детект сети. */
+    val whitelistForce: Boolean = false,
     /**
      * Сколько кандидатов проверить изнутри туннеля (с 1.10.49-beta2 — из разных семейств адресов,
      * см. [PointMix.forVerification]); после трёх проверка останавливается, если две точки уже
@@ -214,7 +216,11 @@ class AutoTuner(
         // Если сеть в режиме default-deny (ТСПУ), UDP-скан к Cloudflare бесполезен —
         // переключаемся на MASQUE TCP 443 к whitelisted SNI.
         val whitelist = WhitelistDetector.detect(spec.net, progress)
-        val whitelistMode = whitelist.isWhitelist()
+        val whitelistMode = whitelist.isWhitelist() || spec.whitelistForce
+        if (spec.whitelistForce && !whitelist.isWhitelist()) {
+            notes += "Режим белых списков принудительно включён пользователем"
+            progress.log("whitelist: принудительный режим (пользователь)")
+        }
         if (whitelistMode) {
             notes += "Белые списки активны (default-deny): UDP к Cloudflare режется, переходим на MASQUE TCP 443"
             progress.log("whitelist: ACTIVE — используем MASQUE TCP-транспорт")
